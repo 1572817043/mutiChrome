@@ -1,0 +1,213 @@
+# MultiChrome 进度快照
+
+## 当前阶段
+
+V0.4 基础可用性已完成第一段：账号卡片支持颜色标识、标准/紧凑视图切换、多选和批量标签操作。用户确认“备注就够用”，账号状态管理入口已从 UI 移除，底层 `status` 字段仅保留用于旧数据兼容。账号卡片已移除目录大小显示，目录大小只在编辑单个账号时按需刷新；运行状态改为账号页轻量动态刷新。外部图标区分实验已暂停，不纳入当前 MVP；当前继续回到普通多 Chrome profile 管理，并已补齐目录健康检查、一键低风险修复、轻量备份/恢复、完整 profile 文件夹备份/恢复、批量打开网址队列、常用/最近网址、项目入口和账号平台资料库第一版这类基础能力。
+
+## 已确认决策
+
+- 第一版只做多账号 Chrome profile 管理。
+- 先做 macOS 桌面 App，后期再适配 Windows。
+- 技术栈使用 Tauri + React + TypeScript + Vite。
+- 开发期 profile 根目录先放本机。
+- 账号元数据使用 JSON，且放在配置根目录下，方便迁移。
+- 浏览器路径设置保存在 `profiles.json` 的 `settings.browserPath` 中，旧版无 settings 的文档会自动使用默认路径。
+- 常用网址和最近网址保存在 `profiles.json` 的 `settings.favoriteUrls`、`settings.recentUrls` 中，会跟随配置根目录迁移。
+- 项目保存在 `profiles.json` 的 `projects` 数组中，表示“多个入口网址 + 一批绑定账号 + 打开间隔 + 备注”，用于长期重复打开的空投/活动入口；它不是自动任务系统。
+- 账号和项目编辑都采用草稿弹窗：字段修改不会实时写入，只有点“保存账号/保存项目”才保存；点 X、取消或点遮罩关闭都会丢弃本次草稿。
+- 完整 profile 备份保存到配置根目录的 `app-data/backups/full-profiles-*` 文件夹，包含筛选后的 `profiles.json`、`manifest.json` 和对应 `profiles/account-xxx/`；恢复前必须先扫描预览，真正恢复时用独立确认弹窗，默认允许覆盖同 ID 的 profile 文件夹。
+- AdsPower 里的“账号平台”能力先做成账号资料库：记录平台、登录网址、用户名、备注等信息；密码字段和网页自动识别输入框并自动填入属于更复杂的安全存储/浏览器扩展/自动化能力，已确认暂不进入当前阶段。
+- UI 采用启动器式 AppShell：左侧导航、主区域账号卡片网格、编辑弹窗、设置弹窗。
+- UI 方向参考 AdsPower 的生产力质感，但不照搬 AdsPower 的表格型主界面；用户更偏好长方形卡片/小方块启动器，主界面应保持简洁，低频信息放进编辑弹窗。
+- 后期计划可加入软件内 AI 聊天助手，用于导入项目、整理链接、批量创建账号草稿和辅助配置，但现阶段先做好基础功能；AI 写入任何数据前都要预览确认。
+- 后期计划可做窗口同步、群控等能力，但不进入当前 MVP。
+- 账号颜色保存为 `profiles.json` 中的 `accentColor`，跟随配置根目录迁移；老账号缺少颜色时按账号编号显示默认色。
+- 外部图标区分的第一轮实验不改主应用，只放在 `experiments/launcher-apps/`；它能区分“启动入口”，但运行中的窗口仍归属 `/Applications/Google Chrome.app`，Dock 运行图标是否能完全区分需要后续独立 helper app 或独立浏览器 bundle 方案继续验证。
+- 外部图标区分第二轮采用 stay-open helper：仍不复制 Chrome，只让账号 `.app` 自身保持运行，负责启动或聚焦对应 `--user-data-dir` 的 Chrome 进程。
+- shell stay-open helper 被证实不能响应 Dock 点击；原因是 macOS 只会激活已运行 App，不会重新执行 shell 脚本。第二轮修正后改用 AppleScript applet，并通过 `on reopen` 处理 Dock 点击。
+- 用户确认双图标体验不理想：身份图标会和 Google Chrome 原生图标一起出现；该路线暂时放下，当前不继续做 Dock 图标区分。
+- 用户确认账号状态管理对当前 MVP 过重：主界面、编辑弹窗、筛选和批量操作中不再显示 `正常/待检查/归档`，主要依靠名称、备注和标签管理账号。
+
+## 已完成
+
+- 创建 `docs/plan.md`。
+- 创建 `docs/project-overview.md`，用于新对话快速恢复项目背景、决策、踩坑记录和后续路线。
+- 初始化 Tauri + React + TypeScript + Vite 项目。
+- 使用 JSON 作为账号元数据格式。
+- 实现账号模型：创建账号、更新账号、生成 `account-001` 风格 ID。
+- 实现 Tauri 后端根目录能力：初始化目录、读写 `profiles.json`、计算目录大小、生成 profile 路径。
+- 实现基础桌面管理 UI：TopBar、Sidebar、账号列表、详情面板。
+- 优化 UI 第二版：压缩顶部工具栏、移动数据目录、表格化账号列表、改进空状态和右侧属性面板。
+- 接入浏览器预览模式和 Tauri 桌面命令。
+- 修复 macOS 打开 Chrome 时把 profile 目录当作本地文件夹页面打开的问题；现在使用 `--user-data-dir=/完整路径` 形式传参。
+- 修复新建账号后未打开 Chrome 前 profile 文件夹不存在的问题；保存账号元数据时会同步创建对应目录。
+- 实现 V0.2 基础管理：归档/恢复账号、只删除记录、删除记录和文件夹、复制账号、复制导入已有 profile、批量刷新目录大小。
+- 修复删除按钮在 Tauri WebView 中依赖 `window.confirm` 导致无响应的问题；改为右侧应用内确认面板。
+- 支持手动设置浏览器路径；未检测到浏览器时禁用“打开 Chrome”操作。
+- 使用 `/Users/a0000/Downloads/mutiChrome.jpeg` 生成并替换 Tauri 图标资源：`icon.png`、`32x32.png`、`128x128.png`、`128x128@2x.png`、`icon.icns`、`icon.ico`。
+- 通过前端测试、前端构建、Rust 测试和 Tauri release 构建。
+- 实现 V0.3 启动器布局：去掉右侧 Inspector，主区域改为账号卡片；点击卡片启动 Chrome；点击卡片右上角编辑按钮打开编辑弹窗。
+- 删除入口只保留在编辑弹窗底部危险区，并继续使用二次确认。
+- 根目录、Chrome 路径和检测状态移入左下角设置弹窗。
+- 增加前端交互测试，覆盖“点击卡片启动”和“点击编辑不启动且删除只在弹窗内出现”。
+- 修复账号启动后强制打开 `about:blank` 的问题；后续普通卡片启动改为传 `chrome://newtab/`，用于重新唤起 profile 或在已运行时打开新标签。
+- 实现 V0.4 账号辨识和基础批量管理：账号颜色、编辑颜色、标准/紧凑视图、多选、全选当前、批量追加标签。
+- 优化中等宽度窗口下的工具栏布局：搜索区和全选/数量操作组分离，避免控件一项一行地散开。
+- 旧版曾增加当前会话内的重复启动防护：同一账号已经启动后，再点卡片不会重复打开新的 Chrome 窗口；后续发现该策略无法感知用户 `Command+Q` 关闭 Chrome，已移除长期“已打开”记忆。
+- 新增 `experiments/launcher-apps/generate-launcher-apps.mjs` 技术实验脚本，可生成 `MC-account-001.app` 这类账号启动器。
+- 外部启动器实验脚本直接写 `.icns` 容器，不依赖 `iconutil`；每个启动器有独立 `CFBundleIdentifier`、独立图标颜色和号码角标。
+- 已生成实验启动器：`.launcher-experiment/MC-account-001.app`、`.launcher-experiment/MC-account-002.app`。
+- `experiments/launcher-apps/generate-launcher-apps.mjs` 新增 `--mode stay-open`，默认 `launch-once` 行为保持不变。
+- 已生成第二轮实验包：`.launcher-helper-experiment/MC-account-001.app`、`.launcher-helper-experiment/MC-account-002.app`。
+- stay-open helper 已从 pid 文件 + zsh 循环改为 AppleScript applet：通过 `osacompile -s` 编译为 stay-open App，使用 `on run`、`on reopen`、`on idle` 处理启动、Dock 点击和生命周期。
+- AppleScript helper 生成后会重新写入自定义 `Info.plist` 和 `AppIcon.icns`，并执行本地 ad-hoc 签名，避免修改 plist/icon 后签名失效。
+- 已停止当前运行中的实验 helper 进程，未关闭 Chrome profile 窗口。
+- 新增配置根目录健康检查：可检查根目录、`app-data/profiles.json`、`profiles/`、登记账号目录缺失、空 profile 目录、未登记孤儿目录、非目录条目和索引损坏。
+- 健康检查入口放在设置弹窗内，主界面保持简洁；检查只读展示，不自动修复或改动用户数据。
+- 简化账号状态功能：移除主界面状态筛选、账号卡片状态角标、编辑弹窗状态按钮、归档按钮和批量改状态按钮；`profiles.json` 里的 `status` 字段暂不迁移，继续兼容旧数据。
+- 新增轻量备份/恢复：设置弹窗内可创建 `profiles.json` 备份到 `app-data/backups/`，也可从指定备份 JSON 路径恢复账号索引和设置；恢复不会删除已有 profile 文件夹，只会补齐备份账号对应目录。
+- 从备份恢复前新增二次确认，避免误触覆盖当前账号索引和设置。
+- 设置弹窗新增“打开数据目录”和“打开备份目录”入口；打开备份目录时会先确保 `app-data/backups/` 存在。
+- 健康检查新增“修复可自动处理项”：只自动创建缺失的根目录、`app-data/`、`profiles/`、`app-data/backups/`、空 `profiles.json` 和已登记账号缺失的 profile 文件夹；不会覆盖损坏索引，不会删除文件，不会自动登记孤儿目录。
+- 健康检查新增孤儿 Profile 目录登记：发现 `profiles/` 下存在但 `profiles.json` 未登记的目录时，可手动点击“登记为账号”；登记只写入账号索引，不复制、不移动、不删除原目录。
+- 新增“选中账号打开指定网址”：批量操作栏可输入网址，自动补 `https://`，并为选中的每个账号用独立 Chrome profile 打开该网址；普通点击卡片走账号自身的默认新标签启动。
+- 修复账号卡片重复点击被误拦截的问题：普通卡片点击不再记录“本轮已打开”，只保留启动过程中的瞬时防抖；每次点击都会向同一 profile 发送启动请求，并默认传 `chrome://newtab/`，让 Chrome 在已运行时尽量打开/切到同一 profile 的新标签。
+- 修复已运行账号重复点击容易重新弹出窗口的问题：后端启动命令改为按运行状态分流，未运行 profile 继续使用 `open -n -a Chrome --args --user-data-dir=...`，已运行 profile 直接调用 Chrome 包内可执行文件并传同一个 `--user-data-dir` 和目标 URL，让 Chrome 复用现有 profile 进程。若当前页本来就是新标签页，视觉上可能只是聚焦现有新标签；核心目标是不再重复开同账号窗口。
+- 批量打开网址改为队列式启动：选中多个账号后按顺序逐个打开，不再同时全部启动；批量栏可设置 1-60 秒间隔，默认 3 秒，并支持中途停止。
+- 批量打开栏新增常用网址和最近网址：常用网址可手动收藏/删除，最近网址会在批量打开成功后自动记录；点击网址短标签可快速回填，适合每天打卡、项目活动页、抽奖页等重复入口。
+- 左侧“项目”模块已启用：可新建项目，设置名称、网址、备注、打开间隔和绑定账号；项目卡片可按绑定账号顺序批量打开该项目网址。典型场景是 Galxe/Zealy/项目官网/抽奖页等长期重复入口。
+- 修正新建交互：新建账号和新建项目改为草稿弹窗，保存才写入 `profiles.json`；取消或点 X 不会留下未完成账号/项目。
+- 账号支持批量新建：可在账号页一次粘贴多行账号文本，格式支持“名称, 标签, 备注”、“名称 | 标签 | 备注”和从表格复制的 Tab 分隔内容；保存后一次性创建多个账号记录和对应 profile 目录，取消或关闭不会落盘。
+- 修复账号卡片右侧布局：未运行账号不再显示“切换到账号”按钮；大小状态文本如“未检测”固定在右侧按钮下方的状态槽，暗色模式和运行态两个按钮同时出现时也不再重叠。
+- 精简账号卡片低频信息：账号卡片不再常驻显示目录大小，也移除右上角“刷新大小”；目录大小只在打开账号编辑弹窗时刷新当前账号一个 profile。后续如果需要容量统计，考虑做左侧独立统计模块，不塞回账号卡片。
+- 补齐项目基础闭环：项目页支持搜索名称/网址/备注；编辑弹窗支持复制项目和删除项目并二次确认；项目打开队列支持中途停止。
+- 实现账号平台资料库第一版：账号编辑弹窗可添加平台、登录网址、用户名、备注；可从该账号 profile 打开平台登录网址；可复制用户名；可删除平台资料。资料保存到 `profiles.json` 的 `profiles[].accountPlatforms`，跟随配置根目录迁移。
+- 账号平台资料库新增常用模板：新增或展开平台资料后，可一键套用 X、Discord、Telegram、Gmail、Galxe、Zealy 的平台名和登录网址；模板只修改弹窗草稿，仍需点击“保存账号”才写入。
+- 窗口管理 V1 开始：新增运行状态识别。macOS 后端通过 `ps` 扫描 Chrome 主进程的 `--user-data-dir=<root>/profiles/<account-id>`，去重后返回正在运行的账号 ID；前端在账号卡片显示“运行中”，启动成功后会临时标记为运行中。后续已改为账号页轻量动态刷新：前台每 5 秒刷新一次运行状态，窗口回到前台或页面恢复可见时也会刷新；该状态不写入 `profiles.json`。
+- 窗口管理 V1 第二步：运行中的账号卡片新增“切换到账号”按钮。后端通过 `ps -axo pid=,command=` 找到对应 Chrome 主进程 PID，再用原生 macOS Accessibility API 把该进程窗口拉到前台；这是进程级切换，不承诺精确窗口或标签页。
+- 窗口管理 V1 第三步：批量栏新增“检查窗口”。选中账号后可检查其中正在运行的账号当前能被 Accessibility API 看到的 Chrome 窗口数量；后端新增 `list_profile_windows`，枚举窗口标题、位置、尺寸和最小化状态，不持久化。
+- 窗口管理 V1 第四步：窗口检查结果新增首个窗口的位置和尺寸，例如 `1280x720 @ 12,34`。后端通过 Accessibility API 读取窗口 `AXPosition` 和 `AXSize`，前端只作为诊断摘要展示。
+- 窗口管理 V1 第五步：批量栏新增“平铺窗口”。选中账号后，只处理其中正在运行的账号；前端按当前屏幕可用宽高计算网格，后端新增 `set_profile_window_bounds` 设置该账号首个 Chrome 窗口的位置和尺寸。该能力是手动平铺小实验，不做同步、不保存布局、不移动未运行账号。
+- 窗口管理 V1 第六步：平铺前新增窗口预检查。点击“平铺窗口”后会先读取每个选中运行账号的窗口列表，只把能读到至少一个窗口的账号纳入网格；没有可读窗口的账号会被跳过并计入提示，网格按实际可平铺账号数量重新计算，避免出现空洞布局。
+- 窗口管理 V1 第七步：窗口类操作失败提示优化。“切换到账号”“检查窗口”“平铺窗口”遇到 Accessibility API、Apple Events 或权限相关失败时，会提示到 macOS 系统设置的辅助功能权限位置，并保留原始错误，避免只看到晦涩命令错误。
+- 窗口管理 V1 第八步：平铺窗口尊重屏幕可用区域偏移。前端会读取 `screen.availLeft/availTop`，窗口网格从系统报告的可用区域左上角开始，而不是固定从 `0,0` 开始；字段不存在时回退到 `0`，保持旧环境兼容。
+- 窗口管理 V1 第九步：平铺窗口新增最小可用尺寸保护。每个平铺窗口按至少 `320x240` 估算，如果当前屏幕容不下已选运行窗口数量，就不移动任何窗口，并提示减少选择或分批平铺，避免把大量账号压成不可用的小窗口。
+- 窗口管理 V1 第十步：平铺窗口新增多窗口账号提示。仍然只移动每个账号的首个 Chrome 窗口；如果某个账号有多个可读窗口，平铺完成提示会说明有几个账号存在多个窗口、仅平铺首个窗口，避免误以为所有窗口都会被整理。
+- 窗口管理 V1 第十一步：窗口检查新增最小化状态。后端读取窗口 `AXMinimized` 属性并序列化为 `minimized`；前端只在检查摘要里给首个窗口追加“已最小化”，不自动恢复、不移动窗口。
+- 窗口管理 V1 第十二步：布局同步 V0。批量栏新增“主账号”选择和“同步布局”按钮；会读取主账号首个窗口的位置和尺寸快照，并应用到其它选中且正在运行、且有可读窗口的账号首个窗口。该能力只同步窗口位置和大小，不同步鼠标、键盘、滚动、标签页，也不自动打开未运行账号。
+- 窗口管理 V1 第十三步：布局同步新增最小化保护。主账号首个窗口如果已最小化，会中止同步并提示先恢复窗口；目标账号首个窗口如果已最小化，会跳过该账号并计入提示，不自动恢复窗口、不设置 bounds。
+- 修正账号编辑弹窗交互：顶部标题和关闭按钮固定，不再随内容滚动；底部保存按钮固定；已有账号编辑改为保存式草稿，关闭或点遮罩不会写入修改。
+- 优化账号平台资料库展示：已有平台默认折叠成一行摘要，保留打开、复制、编辑、删除动作；点击编辑才展开字段；新增平台会自动展开，方便立即录入。
+- 修正项目编辑交互：已有项目编辑改为保存式草稿，修改名称、网址、间隔、备注和绑定账号后，只有点击“保存项目”才写入；点 X、取消或遮罩关闭会丢弃草稿。
+- 精简项目卡片：主界面项目卡片只保留项目名、网址、绑定账号数、打开间隔、开始打开和编辑；备注、账号列表和复制入口收进编辑弹窗。
+- 修复项目编辑弹窗布局：项目表单、项目操作和危险操作统一放入可滚动内容区，底部保存栏固定，避免截图中保存按钮上浮和底部操作区断层。
+- 统一账号/项目编辑弹窗的遮罩关闭行为：点击弹窗外部等同点右上角 X，只关闭并丢弃草稿，不会保存修改；同时补强测试，避免弹窗标题变化造成误判。
+- 项目支持多个网址：每条网址可设置名称、URL 和备注；项目卡片保持简洁，只显示网址数量，多个网址时可选择打开全部或只打开某一个网址。
+- 项目打开队列支持多网址：打开全部时会按“账号顺序”逐个账号处理，每个账号连续打开该项目的所有网址，然后再按项目间隔进入下一个账号。
+- 项目网址列表支持批量导入、单条复制和上下排序：可把多行“名称 URL 备注”或纯 URL 一次导入为项目入口；每条网址可复制 URL，也可在编辑弹窗里调整顺序。
+- 设置弹窗交互补齐：点击外部遮罩会关闭；关闭设置会丢弃未保存的 Chrome 路径草稿，并清除备份恢复确认框。
+- 弹窗支持 `Esc` 关闭：账号编辑、项目编辑、批量新建账号和设置弹窗按 `Esc` 等同点右上角 X，不保存草稿。
+- 账号删除确认改为独立小弹窗：点击“只删除记录”或“删除记录和文件夹”只打开确认窗口，点“确认删除”后才执行删除；确认内容不再挤在账号编辑弹窗内部。
+- 账号导入升级为批量扫描导入：账号页“导入”先扫描来源目录并展示候选；支持识别旧 MultiChrome 根目录、普通 profiles 目录或整理好的来源目录；扫描只读，不写入、不复制；默认只勾选可信 profile，可疑项需手动勾选，跳过项不能导入。
+- 批量导入采用复制导入，不做原地登记：确认后为每个候选生成新的 `account-xxx`，复制到当前根目录 `profiles/` 下，全部复制成功后才写入 `profiles.json`；如果中途失败，会删除本次已复制的新目录，不写入账号索引，方便回滚。
+- 批量导入新增去重标记：导入成功后会在账号索引写入 `importSource`，并在目标 profile 根目录写 `.multichrome.json`；后续扫描时会根据来源路径或 marker 的 `profileUid` 标记“已导入”，重复候选默认禁用，避免同一个来源被反复复制。
+- 批量导入预览提示已区分“可导入 / 可疑 / 已导入”：重复候选不会再被算进可导入数量，避免扫描结果和导入按钮状态不一致。
+- 新增完整 profile 文件夹备份/恢复：设置弹窗可选择全部账号或当前选中账号，先预览账号数和预计大小，再创建完整备份目录；恢复时先扫描备份目录，展示新增/覆盖账号数量和总大小，再通过独立确认弹窗执行恢复。
+- 完整备份恢复采用合并策略：备份内账号会写入当前账号索引，当前本机设置保持不被备份覆盖；同 ID profile 文件夹会先复制到 staging 目录，再替换目标目录，降低半截覆盖风险。
+- 账号支持批量删除：选中账号后批量栏可打开“删除选中”确认弹窗；可选择“只删除记录”或“删除记录和文件夹”。删除文件夹模式会先逐个删除 profile 目录，全部成功后才移除账号索引；失败时保留账号索引并显示错误。
+
+## 验证记录
+
+- `npm test`：通过。
+- `npm run build`：通过。
+- `CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo cargo test`：通过。
+- `CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo npm run tauri:build`：通过。
+- UI 第二版后重新执行 `npm test`、`npm run build`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo npm run tauri:build`：通过。
+- Chrome profile 启动参数修复后重新执行 `npm test`、`npm run build`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo cargo test --manifest-path src-tauri/Cargo.toml`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo npm run tauri:build`：通过。
+- 新建账号目录创建修复后重新执行 `npm test`、`npm run build`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo cargo test --manifest-path src-tauri/Cargo.toml`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo npm run tauri:build`：通过。
+- V0.2 基础管理和图标替换后重新执行 `npm test`、`npm run build`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo cargo test --manifest-path src-tauri/Cargo.toml`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo npm run tauri:build`：通过。当前前端测试 4 个，Rust 测试 12 个。
+- 删除确认面板修复后重新执行 `npm test`、`npm run build`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo cargo test --manifest-path src-tauri/Cargo.toml`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo npm run tauri:build`：通过。当前前端测试 5 个，Rust 测试 12 个。
+- V0.3 启动器布局后重新执行 `npm test`、`npm run build`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo cargo test --manifest-path src-tauri/Cargo.toml`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo npm run tauri:build`：通过。当前前端测试 7 个，Rust 测试 12 个。
+- V0.4 账号辨识和批量管理后重新执行 `npm test`、`npm run build`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo cargo test --manifest-path src-tauri/Cargo.toml`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo npm run tauri:build`：通过。当前前端测试 12 个，Rust 测试 12 个。
+- 中等宽度工具栏和重复启动防护后，重新执行 `npm test`、`npm run build`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo cargo test --manifest-path src-tauri/Cargo.toml`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo npm run tauri:build`：通过。当前前端测试 15 个，Rust 测试 12 个。
+- 外部启动器第一轮执行 `node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`：通过，当时 5 个实验脚本测试；执行生成脚本后，`plutil -lint`、`file AppIcon.icns`、执行权限检查均通过。
+- stay-open helper 修正为 AppleScript applet 后，`node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`：通过，当前 9 个实验脚本测试。
+- 目录健康检查完成后重新执行 `npm test`、`npm run build`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo cargo test --manifest-path src-tauri/Cargo.toml`、`node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`：通过。当前前端测试 16 个，Rust 测试 15 个，实验脚本测试 9 个。
+- 用户提醒后补充执行 `CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo npm run tauri:build`：通过，已生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 移除账号状态 UI 后重新执行 `npm test`、`npm run build`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo cargo test --manifest-path src-tauri/Cargo.toml`、`node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo npm run tauri:build`：通过。已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 轻量备份/恢复完成后重新执行 `npm test`、`npm run build`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo cargo test --manifest-path src-tauri/Cargo.toml`、`node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo npm run tauri:build`：通过。当前前端测试 17 个，Rust 测试 17 个，实验脚本测试 9 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 打开数据目录/备份目录入口完成后重新执行 `npm test`、`npm run build`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo cargo test --manifest-path src-tauri/Cargo.toml`、`node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo npm run tauri:build`：通过。当前前端测试 18 个，Rust 测试 18 个，实验脚本测试 9 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 从备份恢复二次确认完成后重新执行 `npm test`、`npm run build`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo cargo test --manifest-path src-tauri/Cargo.toml`、`node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo npm run tauri:build`：通过。当前前端测试 18 个，Rust 测试 18 个，实验脚本测试 9 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 健康检查低风险修复完成后重新执行 `npm test`、`npm run build`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo cargo test --manifest-path src-tauri/Cargo.toml`、`node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo npm run tauri:build`：通过。当前前端测试 19 个，Rust 测试 21 个，实验脚本测试 9 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 孤儿 Profile 目录登记完成后重新执行 `npm test`、`npm run build`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo cargo test --manifest-path src-tauri/Cargo.toml`、`node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo npm run tauri:build`：通过。当前前端测试 20 个，Rust 测试 21 个，实验脚本测试 9 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 选中账号打开指定网址完成后重新执行 `npm test`、`npm run build`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo cargo test --manifest-path src-tauri/Cargo.toml`、`node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo npm run tauri:build`：通过。当前前端测试 21 个，Rust 测试 22 个，实验脚本测试 9 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 账号卡片重复点击误拦截修复使用 TDD：先添加“重复点击账号会再次请求打开同一 profile 的新标签”测试并确认失败，再移除长期已打开状态后通过。最终重新执行 `npm test`、`npm run build`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo cargo test --manifest-path src-tauri/Cargo.toml`、`node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo npm run tauri:build`：通过。当前前端测试 21 个，Rust 测试 22 个，实验脚本测试 9 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 批量打开队列使用 TDD：先添加“按自定义间隔逐个启动”和“可以中途停止”测试并确认失败，再实现队列、间隔输入和停止按钮后通过。最终重新执行 `npm test`、`npm run build`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo cargo test --manifest-path src-tauri/Cargo.toml`、`node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo npm run tauri:build`：通过。当前前端测试 23 个，Rust 测试 22 个，实验脚本测试 9 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 常用/最近网址完成后重新执行 `npm test`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo cargo test --manifest-path src-tauri/Cargo.toml`、`node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo npm run tauri:build`：通过。当前前端测试 25 个，Rust 测试 22 个，实验脚本测试 9 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 项目入口模块使用 TDD：先添加“可以在项目页新建项目并绑定账号”和“项目会按绑定账号和间隔打开网址”两个失败测试，再实现项目数据结构、左侧项目页、项目编辑弹窗和项目打开队列。最终重新执行 `npm test`、`npm run build`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo cargo test --manifest-path src-tauri/Cargo.toml`、`node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo npm run tauri:build`：通过。当前前端测试 27 个，Rust 测试 22 个，实验脚本测试 9 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 新建草稿交互使用 TDD：先添加“新建账号取消后不会留下账号”“新建账号保存后才创建账号”“新建项目取消后不会留下项目”等失败测试，再实现账号/项目草稿状态和保存按钮。最终重新执行 `npm test`、`npm run build`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo cargo test --manifest-path src-tauri/Cargo.toml`、`node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo npm run tauri:build`：通过。当前前端测试 30 个，Rust 测试 22 个，实验脚本测试 9 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 项目基础闭环使用 TDD：先添加项目搜索、复制、删除和停止队列四类失败测试，再实现项目查询、复制项目、删除确认和项目队列停止。最终重新执行 `npm test -- src/App.test.tsx -t "项目"`、`npm test`、`npm run build`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo cargo test --manifest-path src-tauri/Cargo.toml`、`node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo npm run tauri:build`：通过。当前前端测试 34 个，Rust 测试 22 个，实验脚本测试 9 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 账号平台资料库第一版使用 TDD：先添加新增平台资料、打开登录网址并复制用户名、删除平台资料三个失败测试，再实现账号资料结构、编辑弹窗 UI、Tauri 存储结构和打开/复制动作。最终重新执行 `npm test -- src/App.test.tsx -t "账号平台"`、`npm test`、`npm run build`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo cargo test --manifest-path src-tauri/Cargo.toml`、`node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo npm run tauri:build`：通过。当前前端测试 37 个，Rust 测试 22 个，实验脚本测试 9 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 账号编辑弹窗保存式草稿使用 TDD：先添加“保存前不写入、X 关闭丢弃、遮罩关闭丢弃、保存后写入”测试并确认失败，再实现编辑草稿、固定弹窗头尾和遮罩关闭。最终重新执行 `npm test -- src/App.test.tsx -t "编辑已有账号|账号平台"`、`npm test`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo npm run tauri:build`：通过。当前前端测试 40 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 账号平台折叠行使用 TDD：先添加“已有账号平台默认折叠，点击编辑后展开字段”和“新增账号平台会直接展开方便录入”测试并确认失败，再实现平台行折叠/展开和精简样式。最终重新执行 `npm test -- src/App.test.tsx -t "账号平台"`、`npm test`、`npm run build`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo npm run tauri:build`：通过。当前前端测试 42 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 项目编辑保存式草稿使用 TDD：先添加“关闭丢弃、遮罩关闭丢弃、保存才写入”三个失败测试，再实现项目编辑草稿和保存按钮。最终重新执行 `npm test -- src/App.test.tsx -t "编辑已有项目"`、`npm test -- src/App.test.tsx -t "项目"`、`npm test`、`npm run build`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo npm run tauri:build`：通过。当前前端测试 45 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 项目卡片精简使用 TDD：先添加“项目卡片保持精简，低频资料留在编辑弹窗”和“可以在编辑弹窗复制项目”失败测试，再移除卡片备注/账号名/复制按钮并把复制入口移入项目编辑弹窗。最终重新执行 `npm test -- src/App.test.tsx -t "项目卡片|复制项目"`、`npm test -- src/App.test.tsx -t "项目"`、`npm test`、`npm run build`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo npm run tauri:build`：通过。当前前端测试 46 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 项目编辑弹窗布局修复使用 TDD：先添加“项目编辑弹窗使用统一滚动内容和固定保存栏”失败测试，确认旧结构直接把字段、保存栏和危险区平铺为子级；修复后重新执行该测试、`npm test -- src/App.test.tsx -t "项目"`、`npm test`、`npm run build`、Playwright 本地截图检查、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo npm run tauri:build`：通过。当前前端测试 47 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 编辑弹窗遮罩关闭一致性修复使用 TDD：先补强账号和项目遮罩关闭测试，确认账号弹窗点击遮罩未关闭；修复后重新执行 `npm test -- src/App.test.tsx -t "遮罩关闭"`、`npm test`、`npm run build`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo npm run tauri:build`：通过。当前前端测试 47 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 项目多网址使用 TDD：先添加“保存多个网址”“打开全部网址按账号队列执行”“只打开选中的单个网址”三个失败测试，再实现 `urls` 数据结构、编辑弹窗网址列表、项目卡片打开范围选择和多网址队列。最终重新执行 `npm test -- src/App.test.tsx -t "项目"`、`npm test`、`npm run build`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo cargo test --manifest-path src-tauri/Cargo.toml`、`node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo npm run tauri:build`：通过。当前前端测试 50 个，Rust 测试 22 个，实验脚本测试 9 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 项目网址管理增强使用 TDD：先添加“批量导入多行网址”“项目网址上移/下移排序”“复制单条网址”三个失败测试，再实现导入解析器、网址操作按钮和复制反馈。最终重新执行 `npm test -- src/App.test.tsx -t "项目"`、`npm test`、`npm run build`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo cargo test --manifest-path src-tauri/Cargo.toml`、`node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo npm run tauri:build`：通过。当前前端测试 53 个，Rust 测试 22 个，实验脚本测试 9 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 账号批量新建使用 TDD：先添加“批量新建账号取消不落盘”和“批量新建账号并解析标签/备注”两个失败测试，再实现批量新建弹窗、文本解析和预览。最终重新执行 `npm test -- src/App.test.tsx -t "新建账号|批量新建账号|编辑已有账号"`、`npm test`、`npm run build`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo cargo test --manifest-path src-tauri/Cargo.toml`、`node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo npm run tauri:build`：通过。当前前端测试 55 个，Rust 测试 22 个，实验脚本测试 9 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 批量新建账号表格粘贴优化使用 TDD：先添加“批量新建账号支持从表格粘贴制表符分隔内容”测试并确认失败，再让解析器优先识别 Tab 分隔。最终重新执行 `npm test -- src/App.test.tsx -t 制表符`、`npm test`、`npm run build`：通过。当前前端测试 56 个。
+- 批量导入已有 profile 使用 TDD：先添加扫描预览、批量导入成功、导入失败回滚三条前端失败测试，以及旧 MultiChrome 索引识别、一层扫描/可疑判断两条 Rust 失败测试；再实现 `scan_profile_import_candidates`、前端导入候选 UI、确认导入和失败回滚。阶段验证执行 `npm test -- src/App.test.tsx -t "导入"`、`npm test`、`npm run build`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo cargo test --manifest-path src-tauri/Cargo.toml`：通过。当前前端测试 59 个，Rust 测试 24 个。
+- 批量导入去重使用 TDD：先添加“重复候选禁用”和“导入时写 marker/importSource”前端失败测试，以及“写 `.multichrome.json`”和“来源路径重复识别”Rust 失败测试；再实现 `ProfileMarker`、`importSource`、marker 读写和扫描去重。阶段验证执行 `npm test -- src/App.test.tsx -t "导入"`、`npm test`、`npm run build`、`CARGO_HOME=/Users/a0000/agent\ project/muti-chrome/.cargo cargo test --manifest-path src-tauri/Cargo.toml`：通过。当前前端测试 60 个，Rust 测试 26 个。
+- 使用 `open -n .launcher-experiment/MC-account-001.app` 和 `open -n .launcher-experiment/MC-account-002.app` 做桌面验证；进程参数确认分别启动 `/Users/a0000/MultiChromeProfiles/profiles/account-001` 和 `/Users/a0000/MultiChromeProfiles/profiles/account-002`，且没有传 `about:blank`。
+- 使用 `open -n .launcher-helper-experiment/MC-account-001.app` 和 `open -n .launcher-helper-experiment/MC-account-002.app` 做桌面验证；进程参数确认两个 AppleScript `applet` helper 分别保持运行，且两个 Chrome 主进程分别使用 `account-001`、`account-002` 的 `--user-data-dir`。
+- 使用不带 `-n` 的 `open .launcher-helper-experiment/MC-account-001.app` 模拟 reopen；验证后 `account-001` helper 仍只有一个 applet 进程。
+- 使用内置浏览器检查 `http://127.0.0.1:5173/`：主界面无右侧 Inspector，账号卡片宽度稳定为 354px；720px 高度下编辑弹窗可见底部危险区；控制台无 error。
+- 桌面人工测试使用 `/private/tmp/MultiChromeProfiles-Codex-Test`：新建、编辑、归档/恢复、复制、复制导入、刷新大小、浏览器路径检测、打开 Chrome、打开文件夹、只删记录、删除文件夹均通过。
+- 已打开 bundle 配置并生成 macOS `.app`：`src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 白天/夜晚主题使用 TDD：先添加“设置弹窗的主题草稿关闭会丢弃，保存后才持久化”失败测试，再实现 `settings.theme`、设置内主题切换、关闭回滚、保存持久化和暗色 CSS 覆盖。最终重新执行 `npm test -- src/App.test.tsx -t "主题草稿"`、`npm test -- src/App.test.tsx -t "设置弹窗"`、`npm test`、`cargo test`、`npm run build`、`npm run tauri:build`：通过。当前前端测试 69 个，Rust 测试 26 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 完整 profile 备份/恢复使用 TDD：先添加 Rust 完整备份/恢复核心测试和前端设置弹窗交互测试并确认失败，再实现 Rust 备份目录、manifest、扫描预览、合并恢复和前端设置入口/确认弹窗。最终重新执行 `npm test -- src/App.test.tsx -t "完整备份"`、`npm test`、`cargo test`、`npm run build`、`npm run tauri:build`：通过。当前前端测试 71 个，Rust 测试 30 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 批量删除账号使用 TDD：先添加“批量删除只删除记录”和“删除文件夹失败不移除账号索引”两个失败测试，再实现批量栏入口、独立确认弹窗和删除处理。最终重新执行 `npm test -- src/App.test.tsx -t "批量删除"`、`npm test`、`npm run build`、`cargo test`、`npm run tauri:build`：通过。当前前端测试 73 个，Rust 测试 30 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 账号平台常用模板使用 TDD：先添加“套用 Galxe 模板且保存前不落盘”失败测试，再实现模板按钮和明暗主题样式。最终重新执行 `npm test -- src/App.test.tsx -t "账号平台可以套用常用模板"`、`npm test -- src/App.test.tsx -t "账号平台"`、`npm test`、`npm run build`、`cargo test --manifest-path src-tauri/Cargo.toml`、`node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`、`npm run tauri:build`：通过。当前前端测试 74 个，Rust 测试 30 个，实验脚本测试 9 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 运行状态识别使用 TDD：先添加“账号卡片显示正在运行的 Chrome profile”和“刷新大小时会同步刷新账号运行状态”前端失败测试，再添加 Rust 进程解析失败测试，随后实现 `list_running_profiles` 命令、前端 API、临时运行状态和卡片徽标。最终重新执行 `npm test`、`cargo test --manifest-path src-tauri/Cargo.toml`、`npm run build`、`node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`、`npm run tauri:build`：通过。当前前端测试 76 个，Rust 测试 31 个，实验脚本测试 9 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 切换到运行中账号使用 TDD：先添加“运行中的账号可以切换到对应 Chrome 进程”前端失败测试，再添加 Rust PID 解析测试，随后实现 `focus_profile_window` 命令、前端 API 和卡片切换按钮。最终重新执行 `npm test`、`cargo test --manifest-path src-tauri/Cargo.toml`、`npm run build`、`node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`、`npm run tauri:build`：通过。当前前端测试 77 个，Rust 测试 32 个，实验脚本测试 9 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 选中账号检查窗口使用 TDD：先添加“批量栏可以检查选中运行账号的窗口数量”前端失败测试，再添加 Rust AppleScript 输出解析失败测试，随后实现 `list_profile_windows`、前端 API、批量栏按钮和窗口数量汇总消息。最终重新执行 `npm test`、`cargo test --manifest-path src-tauri/Cargo.toml`、`npm run build`、`node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`、`npm run tauri:build`：通过。当前前端测试 78 个，Rust 测试 33 个，实验脚本测试 9 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 窗口位置/尺寸读取使用 TDD：先把窗口检查测试升级为要求显示 `宽x高 @ x,y`，再升级 Rust 解析测试要求解析坐标和尺寸；实现 `ChromeWindowInfo` 的 `x/y/width/height` 字段、AppleScript `position/size` 读取和前端摘要格式。最终重新执行 `npm test`、`cargo test --manifest-path src-tauri/Cargo.toml`、`npm run build`、`node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`、`npm run tauri:build`：通过。当前前端测试 78 个，Rust 测试 33 个，实验脚本测试 9 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 平铺窗口小实验使用 TDD：先添加“批量栏可以平铺选中运行账号的首个窗口”前端失败测试，再添加 Rust `set_window_bounds_script` 失败测试，随后实现 `set_profile_window_bounds` 后端命令、前端 API、网格布局计算和批量栏“平铺窗口”按钮。最终重新执行 `npm test`、`cargo test --manifest-path src-tauri/Cargo.toml`、`npm run build`、`node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`、`npm run tauri:build`：通过。当前前端测试 79 个，Rust 测试 34 个，实验脚本测试 9 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 平铺窗口预检查使用 TDD：先添加“平铺窗口会跳过没有可读窗口的运行账号”失败测试，确认旧实现不会调用窗口检查；随后让平铺流程先读取窗口列表、跳过无窗口账号，并按实际可平铺数量重新计算布局。最终重新执行 `npm test -- src/App.test.tsx -t "平铺"`、`npm test`、`cargo test --manifest-path src-tauri/Cargo.toml`、`node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`、`npm run build`、`npm run tauri:build`：通过。当前前端测试 80 个，Rust 测试 34 个，实验脚本测试 9 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 窗口操作权限失败提示使用 TDD：先添加“切换窗口失败时会提示 macOS 辅助功能权限”和“平铺窗口检查全部失败时会提示 macOS 辅助功能权限”两个失败测试，再实现统一 `windowAutomationErrorMessage`，用于窗口切换、窗口检查和平铺失败。最终重新执行 `npm test -- src/App.test.tsx -t "辅助功能权限"`、`npm test`、`cargo test --manifest-path src-tauri/Cargo.toml`、`node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`、`npm run build`、`npm run tauri:build`：通过。当前前端测试 82 个，Rust 测试 34 个，实验脚本测试 9 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 平铺窗口可用区域偏移使用 TDD：先添加“平铺窗口会使用屏幕可用区域的左上角偏移”失败测试，确认旧实现仍从 `0,0` 开始；随后让 `tileBoundsForCount` 支持原点偏移，并通过兼容类型读取 `screen.availLeft/availTop`。最终重新执行 `npm test -- src/App.test.tsx -t "屏幕可用区域"`、`npm test`、`cargo test --manifest-path src-tauri/Cargo.toml`、`node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`、`npm run build`、`npm run tauri:build`：通过。当前前端测试 83 个，Rust 测试 34 个，实验脚本测试 9 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 平铺窗口数量保护使用 TDD：先添加“平铺窗口过多时会提示分批处理”失败测试，确认 1200x800 屏幕上 10 个窗口会被压成 `300x266` 并直接移动；随后增加 `320x240` 最小可用尺寸估算和容量提示，超过容量时不移动窗口。最终重新执行 `npm test -- src/App.test.tsx -t "平铺窗口过多"`、`npm test`、`cargo test --manifest-path src-tauri/Cargo.toml`、`node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`、`npm run build`、`npm run tauri:build`：通过。当前前端测试 84 个，Rust 测试 34 个，实验脚本测试 9 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 多窗口账号平铺提示使用 TDD：先添加“平铺窗口会提示多窗口账号只处理首个窗口”失败测试，确认原行为只显示“已平铺 2 个窗口”；随后在平铺预检查阶段统计 `windows.length > 1` 的账号数量，并把提示追加到完成消息。最终重新执行 `npm test -- src/App.test.tsx -t "平铺窗口会提示多窗口账号只处理首个窗口"`、`npm test`、`cargo test --manifest-path src-tauri/Cargo.toml`、`node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`、`npm run build`、`npm run tauri:build`：通过。当前前端测试 85 个，Rust 测试 34 个，实验脚本测试 9 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 最小化状态展示使用 TDD：先添加前端“窗口检查会提示首个窗口已最小化”和后端 `chrome_windows_from_osascript_output_parses_minimized_state` 失败测试；随后在 AppleScript 输出中读取 `AXMinimized`，解析器兼容旧 6 列输出并默认非最小化，前端摘要只在 `minimized` 为 true 时追加“已最小化”。最终重新执行 `npm test -- src/App.test.tsx -t "窗口检查会提示首个窗口已最小化"`、`cargo test --manifest-path src-tauri/Cargo.toml chrome_windows_from_osascript_output_parses_minimized_state`、`npm test`、`cargo test --manifest-path src-tauri/Cargo.toml`、`node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`、`npm run build`、`npm run tauri:build`：通过。当前前端测试 86 个，Rust 测试 35 个，实验脚本测试 9 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 布局同步 V0 使用 TDD：先添加“批量栏可以把主账号首个窗口布局同步给其它运行账号”失败测试，确认原批量栏没有“同步布局”入口；随后新增 `windowSyncing` 状态、主账号选择、`syncLayoutForSelectedProfiles` 流程和紧凑工具栏样式。实现采用“先读取主账号首窗 bounds 快照，再逐个目标账号检查窗口并设置 bounds”的保守策略，目标窗口关闭或不可读时计入提示，不中断其它账号。最终重新执行 `npm test -- src/App.test.tsx -t "批量栏可以把主账号首个窗口布局同步给其它运行账号"`、`npm test`、`cargo test --manifest-path src-tauri/Cargo.toml`、`node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`、`npm run build`、`npm run tauri:build`：通过。当前前端测试 87 个，Rust 测试 35 个，实验脚本测试 9 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 布局同步最小化保护使用 TDD：先添加“布局同步会拒绝使用已最小化的主账号窗口”和“布局同步会跳过已最小化的目标窗口”两个失败测试，确认旧实现会继续读取目标并设置最小化窗口 bounds；随后在同步流程中检查 `ChromeWindowInfo.minimized`，主窗口最小化时直接中止，目标窗口最小化时跳过并汇总提示。最终重新执行 `npm test -- src/App.test.tsx -t "布局同步会"`、`npm test -- src/App.test.tsx -t "布局同步"`、`npm test`、`cargo test --manifest-path src-tauri/Cargo.toml`、`node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`、`npm run build`、`npm run tauri:build`：通过。当前前端测试 89 个，Rust 测试 35 个，实验脚本测试 9 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 窗口移动读回验证使用 TDD：先添加“布局同步会在窗口没有实际移动时提示未生效”和“平铺窗口会在窗口没有实际移动时提示未生效”两个失败测试，确认旧实现只要 AppleScript 设置命令无错误就提示成功；随后让同步布局和平铺窗口都在设置 bounds 后重新读取目标账号首个窗口，并用 8px 容差校验位置/尺寸，未匹配时计入“未生效”。阶段验证执行 `npm test -- src/App.test.tsx -t "布局同步"`、`npm test -- src/App.test.tsx -t "平铺窗口"`、`npm test`、`cargo test --manifest-path src-tauri/Cargo.toml`、`node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`、`npm run build`、`npm run tauri:build`：通过。当前前端测试 91 个，Rust 测试 35 个，实验脚本测试 9 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- osascript 权限提示修复使用 TDD：用临时 Chrome profile 在本机复现 `“osascript”不允许辅助访问。(-25211)`，确认窗口读取链路被 `/usr/bin/osascript` 辅助功能权限拦截；先添加“osascript 辅助功能失败时会提示允许 osascript”失败测试，再细分错误文案，提示用户同时允许 MultiChrome 和 `/usr/bin/osascript`。最终重新执行 `npm test -- src/App.test.tsx -t "osascript 辅助功能失败时会提示允许 osascript|辅助功能权限|切换窗口失败"`、`npm test`、`cargo test --manifest-path src-tauri/Cargo.toml`、`node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`、`npm run build`、`npm run tauri:build`：通过。当前前端测试 92 个，Rust 测试 35 个，实验脚本测试 9 个；已重新生成 `src-tauri/target/release/bundle/macos/MultiChrome.app`。
+- 窗口控制底层重构：`focus_profile_window`、`list_profile_windows`、`set_profile_window_bounds` 不再通过 `/usr/bin/osascript` 执行 AppleScript，而是由 Rust 直接调用 macOS Accessibility API，按 Chrome profile 主进程 PID 读取 `AXWindows`、`AXPosition`、`AXSize`、`AXMinimized`，并通过 `AXRaise` 拉前台。仍需要在 macOS 辅助功能里授权 MultiChrome，但不再要求额外授权 `/usr/bin/osascript`。
+- 平铺/同步成功后新增前台切换：平铺窗口成功后会切换到首个成功平铺账号；布局同步成功后会切换到主账号。若窗口移动成功但前台切换失败，会在成功消息后追加提示，不把已完成的移动误判为失败。
+- 打包流程新增固定签名脚本：`npm run tauri:build` 会在 Tauri 生成 `.app` 后执行 `scripts/sign-macos-app.mjs`，用固定 `app.multichrome.desktop` 做本地 ad-hoc 签名，减少开发期反复打包导致辅助功能授权漂移的问题。
+- 用户重新打开并授权当前签名后的 MultiChrome 后，实测确认两个 Chrome profile 窗口可以正常平铺，并按比例分开。
+- 重复点击已运行账号启动修复后，新增 Rust 单测覆盖未运行/已运行两条启动命令路径，并给 `.app` 包内可执行文件名不等于 app 名的情况补了 fallback 测试。最终重新执行 `npm test`、`cargo test --manifest-path src-tauri/Cargo.toml`、`node --test experiments/launcher-apps/generate-launcher-apps.node-test.mjs`、`npm run build`、`npm run tauri:build`：通过。真实进程验证中，对正在运行的 `account-002` 直接投递同一 `--user-data-dir` 后，Chrome 返回“正在现有的浏览器会话中打开。”，且 `ps` 没有新增同账号主进程。
+- 账号卡片右侧布局修复后，用 Playwright 在真实浏览器中验证暗色模式下未运行态和运行态的按钮/状态 bbox 均不相交；随后重新执行 `npm test`、`cargo test --manifest-path src-tauri/Cargo.toml`、`npm run build`、`npm run tauri:build`：通过，已重新生成 macOS `.app`。
+- 运行状态动态刷新和账号卡片大小精简使用 TDD：先添加“运行状态会轻量动态刷新并移除已退出账号”和“账号卡片不显示目录大小，编辑时只刷新当前账号大小”两个失败测试，再实现账号页 5 秒运行状态轮询、前台/可见刷新、移除卡片大小和“刷新大小”按钮。阶段验证执行 `npm test -- src/App.test.tsx -t "运行状态会轻量动态刷新|账号卡片不显示目录大小"`、`npm test`、`npm run build`、`npm run tauri:build`：通过。当前前端测试 93 个，已重新生成 macOS `.app`。
+
+## 已知限制
+
+- 通过 Codex 内置浏览器完成本地页面截图验收；窗口平铺已由用户在真实 macOS `.app` 里验证，重复点击已运行账号的“必定新增空白标签”仍需继续观察 Chrome 自身行为。
+- 外部启动器当前是 shell `.app` 包装器：能作为不同图标的启动入口，但 Chrome 窗口实际进程仍属于 `/Applications/Google Chrome.app`，所以运行中的 Dock 图标可能仍显示 Chrome 自身图标。
+- stay-open AppleScript helper 已能保持独立账号入口进程，并能接收 reopen 事件；视觉层面的 Dock 点击聚焦效果仍需要用户肉眼确认。若系统未授予辅助功能权限，`System Events` 聚焦可能失败，但脚本不会因此重复启动 Chrome。
+- 代理、群控、指纹隔离、任务系统、密码安全存储、网页自动填入账号密码均未进入 MVP。
+- 软件内 AI 助手、实时窗口同步、群控均未进入当前 MVP。
+- 窗口管理 V1 仍是进程级/手动操作能力：运行状态依赖 macOS `ps` 进程参数；“切换到账号”“检查窗口”“平铺窗口”“同步布局”依赖 macOS Accessibility API，仍需要系统辅助功能权限。现在能读取并设置首个窗口位置/尺寸，窗口检查能显示首个窗口是否已最小化，平铺会跳过无可读窗口账号、尊重屏幕可用区域偏移，窗口过多时提示分批处理，多窗口账号会提示仅平铺首个窗口；布局同步 V0 只复制主账号首窗的位置和大小到其它运行账号首窗，并会跳过最小化窗口；平铺和同步都已改为设置后读回坐标，未接近目标 bounds 会提示“未生效”；权限类失败会提示辅助功能设置位置，但仍不能识别具体标签页，也不是鼠标键盘实时同步。
+- 完整 profile 备份当前是整目录复制，不做增量、压缩、加密或云同步；大 profile 目录备份会占用较多磁盘空间。
+- 批量删除文件夹不是事务型操作：如果删除多个 profile 文件夹时中途失败，已经删除成功的文件夹不会自动还原；账号索引会保留，后续可通过健康检查发现缺失目录。
+
+## 下一步
+
+- 下一步继续打磨核心流畅度：窗口管理 V1 的真实桌面平铺边界、账号平台资料库搜索/排序、项目和账号之间的联动入口、孤儿目录登记后的批量编辑、常用网址备注/分组，以及批量导入真实磁盘场景的体验细节。
+- 目录大小/容量占用如果后续确实需要展示，优先做左侧独立统计模块或设置内统计，不回到账号卡片常驻展示。
+- 密码存储需要先设计本地安全方案，不直接明文写入 `profiles.json`；网页自动填入账号密码暂不做。
+- Dock 图标区分暂时不做，除非后续重新明确需要。
+- AI 助手和窗口同步作为后期路线记录，等基础功能经过实际使用和小 bug 修复后再进入设计。

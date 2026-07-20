@@ -1,0 +1,24 @@
+[package]
+name = "multichrome"
+version = "0.1.0"
+description = "Multi Chrome profile manager"
+authors = ["MultiChrome"]
+edition = "2021"
+
+[lib]
+name = "multichrome_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+core-foundation = "0.10"
+dirs = "5"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+
+[dev-dependencies]
+tempfile = "3"
