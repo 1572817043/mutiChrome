@@ -62,14 +62,18 @@ import type {
   ProfileMarker,
   ProfileSettings,
   RootHealthReport,
-  RootRepairResult
+  RootRepairResult,
+  UrlLibraryItem
 } from "./types";
 
 type DeleteMode = "record" | "data";
 type CardDensity = "standard" | "compact";
-type ActiveView = "accounts" | "projects";
+type ActiveView = "accounts" | "projects" | "url-library";
 type FullBackupScope = "all" | "selected";
 type FullBackupWorking = "preview" | "create" | "restore-preview" | "restore";
+type UrlLibraryDraft = Pick<UrlLibraryItem, "name" | "url" | "notes"> & {
+  tags: string;
+};
 
 const DEFAULT_PROFILE_LAUNCH_URL = "chrome://newtab/";
 const DEFAULT_BULK_OPEN_INTERVAL_SECONDS = "3";
@@ -119,6 +123,7 @@ function App() {
     browserPath: DEFAULT_BROWSER_PATH,
     favoriteUrls: [],
     recentUrls: [],
+    urlLibrary: [],
     theme: "light"
   });
   const [browserPathDraft, setBrowserPathDraft] = useState(DEFAULT_BROWSER_PATH);
@@ -136,6 +141,13 @@ function App() {
   const [newProjectDraft, setNewProjectDraft] = useState<AirdropProject | null>(null);
   const [projectQuery, setProjectQuery] = useState("");
   const [pendingProjectDeleteId, setPendingProjectDeleteId] = useState<string | null>(null);
+  const [urlLibraryQuery, setUrlLibraryQuery] = useState("");
+  const [urlLibraryDraft, setUrlLibraryDraft] = useState<UrlLibraryDraft>(
+    createUrlLibraryDraft()
+  );
+  const [editingUrlLibraryId, setEditingUrlLibraryId] = useState<string | null>(null);
+  const [urlLibraryEditorOpen, setUrlLibraryEditorOpen] = useState(false);
+  const [pendingUrlDeleteId, setPendingUrlDeleteId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [profileSizes, setProfileSizes] = useState<Record<string, number | null>>({});
   const [runningProfileIds, setRunningProfileIds] = useState<string[]>([]);
@@ -235,6 +247,20 @@ function App() {
       ).length,
     [importCandidates, selectedImportPaths]
   );
+  const visibleUrlLibraryItems = useMemo(() => {
+    const normalizedQuery = urlLibraryQuery.trim().toLowerCase();
+    const urlLibrary = settings.urlLibrary ?? [];
+    if (!normalizedQuery) {
+      return urlLibrary;
+    }
+
+    return urlLibrary.filter((item) =>
+      [item.name, item.url, item.notes, ...item.tags]
+        .join(" ")
+        .toLowerCase()
+        .includes(normalizedQuery)
+    );
+  }, [settings.urlLibrary, urlLibraryQuery]);
 
   useEffect(() => {
     void boot();
@@ -302,6 +328,8 @@ function App() {
   useEffect(() => {
     const hasOpenDialog = Boolean(
       settingsOpen ||
+        pendingUrlDeleteId ||
+        urlLibraryEditorOpen ||
         newProjectDraft ||
         editingProjectId ||
         batchProfileDialogOpen ||
@@ -328,6 +356,8 @@ function App() {
   }, [
     settingsOpen,
     fullRestoreConfirmOpen,
+    pendingUrlDeleteId,
+    urlLibraryEditorOpen,
     newProjectDraft,
     editingProjectId,
     batchProfileDialogOpen,
@@ -384,6 +414,11 @@ function App() {
     setBatchProfileDraft("");
     setNewProjectDraft(null);
     setPendingProjectDeleteId(null);
+    setUrlLibraryQuery("");
+    setUrlLibraryDraft(createUrlLibraryDraft());
+    setEditingUrlLibraryId(null);
+    setUrlLibraryEditorOpen(false);
+    setPendingUrlDeleteId(null);
     setPendingDelete(null);
     setPendingBatchDelete(null);
     setBatchDeleteWorking(null);
@@ -439,6 +474,7 @@ function App() {
     nextSettings = settings,
     nextProjects = projects
   ) {
+    const sanitizedSettings = normalizeSettings(nextSettings);
     const existingProfileIds = new Set(nextProfiles.map((profile) => profile.id));
     const sanitizedProjects = nextProjects.map((project) => ({
       ...project,
@@ -446,15 +482,15 @@ function App() {
     }));
     await profileApi.saveProfiles(rootPath, {
       version: 1,
-      settings: nextSettings,
+      settings: sanitizedSettings,
       profiles: nextProfiles,
       projects: sanitizedProjects
     });
     setProfiles(nextProfiles);
     setProjects(sanitizedProjects);
-    setSettings(nextSettings);
-    if (nextSettings.browserPath !== settings.browserPath) {
-      setBrowserPathDraft(nextSettings.browserPath);
+    setSettings(sanitizedSettings);
+    if (sanitizedSettings.browserPath !== settings.browserPath) {
+      setBrowserPathDraft(sanitizedSettings.browserPath);
     }
     setRootStatus((current) =>
       current ? { ...current, profileCount: nextProfiles.length } : current
@@ -762,6 +798,14 @@ function App() {
     }
     if (pendingDelete) {
       setPendingDelete(null);
+      return;
+    }
+    if (pendingUrlDeleteId) {
+      setPendingUrlDeleteId(null);
+      return;
+    }
+    if (urlLibraryEditorOpen) {
+      cancelUrlLibraryEdit();
       return;
     }
     if (settingsOpen) {
@@ -1632,24 +1676,170 @@ function App() {
       return;
     }
 
-    if (settings.favoriteUrls.includes(launchUrl)) {
+    if ((settings.urlLibrary ?? []).some((item) => item.url === launchUrl)) {
       setMessage("常用网址已存在");
       return;
     }
 
+    const now = new Date().toISOString();
+    const item = createUrlLibraryItem(
+      {
+        name: displayUrlLabel(launchUrl),
+        url: launchUrl,
+        tags: [],
+        notes: ""
+      },
+      settings.urlLibrary ?? [],
+      now
+    );
     const nextSettings = normalizeSettings({
       ...settings,
-      favoriteUrls: [launchUrl, ...settings.favoriteUrls]
+      urlLibrary: [item, ...(settings.urlLibrary ?? [])]
     });
     await persist(profiles, "已添加常用网址", nextSettings);
   }
 
   async function removeFavoriteUrl(url: string) {
+    const launchUrl = normalizeLaunchUrl(url);
     const nextSettings = normalizeSettings({
       ...settings,
-      favoriteUrls: settings.favoriteUrls.filter((item) => item !== url)
+      favoriteUrls: settings.favoriteUrls.filter((item) => item !== launchUrl),
+      urlLibrary: (settings.urlLibrary ?? []).filter((item) => item.url !== launchUrl)
     });
     await persist(profiles, "已删除常用网址", nextSettings);
+  }
+
+  function startEditingUrlLibraryItem(item: UrlLibraryItem) {
+    setEditingUrlLibraryId(item.id);
+    setUrlLibraryDraft(createUrlLibraryDraft(item));
+    setPendingUrlDeleteId(null);
+    setUrlLibraryEditorOpen(true);
+  }
+
+  function startCreatingUrlLibraryItem() {
+    setEditingUrlLibraryId(null);
+    setUrlLibraryDraft(createUrlLibraryDraft());
+    setPendingUrlDeleteId(null);
+    setUrlLibraryEditorOpen(true);
+  }
+
+  function cancelUrlLibraryEdit() {
+    setEditingUrlLibraryId(null);
+    setPendingUrlDeleteId(null);
+    setUrlLibraryDraft(createUrlLibraryDraft());
+    setUrlLibraryEditorOpen(false);
+  }
+
+  async function saveUrlLibraryDraft() {
+    const launchUrl = normalizeLaunchUrl(urlLibraryDraft.url);
+    if (!launchUrl) {
+      setMessage("请先填写网址");
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const currentLibrary = settings.urlLibrary ?? [];
+    const duplicate = currentLibrary.find(
+      (item) => item.url === launchUrl && item.id !== editingUrlLibraryId
+    );
+    if (duplicate) {
+      setMessage("网址已存在");
+      return;
+    }
+
+    const patch = {
+      name: urlLibraryDraft.name.trim() || displayUrlLabel(launchUrl),
+      url: launchUrl,
+      tags: parseUrlTags(urlLibraryDraft.tags),
+      notes: urlLibraryDraft.notes.trim()
+    };
+    const nextLibrary = editingUrlLibraryId
+      ? currentLibrary.map((item) =>
+          item.id === editingUrlLibraryId
+            ? {
+                ...item,
+                ...patch,
+                updatedAt: now
+              }
+            : item
+        )
+      : [
+          createUrlLibraryItem(patch, currentLibrary, now),
+          ...currentLibrary
+        ];
+    const nextSettings = normalizeSettings({
+      ...settings,
+      urlLibrary: nextLibrary
+    });
+
+    await persist(profiles, "已保存网址", nextSettings);
+    setEditingUrlLibraryId(null);
+    setPendingUrlDeleteId(null);
+    setUrlLibraryDraft(createUrlLibraryDraft());
+    setUrlLibraryEditorOpen(false);
+  }
+
+  async function copyUrlFromLibrary(url: string) {
+    const launchUrl = normalizeLaunchUrl(url);
+    if (!launchUrl) {
+      setMessage("这条网址为空");
+      return;
+    }
+
+    try {
+      if (!navigator.clipboard?.writeText) {
+        setMessage("当前环境不能复制到剪贴板");
+        return;
+      }
+      await navigator.clipboard.writeText(launchUrl);
+      setMessage("网址已复制");
+    } catch (error) {
+      setMessage(errorMessage(error));
+    }
+  }
+
+  function fillBulkUrlFromLibrary(url: string) {
+    const launchUrl = normalizeLaunchUrl(url);
+    if (!launchUrl) {
+      setMessage("这条网址为空");
+      return;
+    }
+
+    setBulkUrl(launchUrl);
+    setActiveView("accounts");
+    setMessage("已填入批量打开网址");
+  }
+
+  function requestDeleteUrlLibraryItem(itemId: string) {
+    setPendingUrlDeleteId(itemId);
+  }
+
+  async function confirmDeleteUrlLibraryItem() {
+    if (!pendingUrlDeleteId) {
+      return;
+    }
+
+    const item = (settings.urlLibrary ?? []).find(
+      (libraryItem) => libraryItem.id === pendingUrlDeleteId
+    );
+    if (!item) {
+      setPendingUrlDeleteId(null);
+      return;
+    }
+
+    const nextSettings = normalizeSettings({
+      ...settings,
+      favoriteUrls: settings.favoriteUrls.filter((url) => url !== item.url),
+      urlLibrary: (settings.urlLibrary ?? []).filter(
+        (libraryItem) => libraryItem.id !== pendingUrlDeleteId
+      )
+    });
+    await persist(profiles, "已删除网址", nextSettings);
+    if (editingUrlLibraryId === pendingUrlDeleteId) {
+      setEditingUrlLibraryId(null);
+      setUrlLibraryDraft(createUrlLibraryDraft());
+    }
+    setPendingUrlDeleteId(null);
   }
 
   async function inspectWindowsForSelectedProfiles() {
@@ -1973,8 +2163,9 @@ function App() {
     });
   }
 
-  async function openUrlForSelectedProfiles() {
+  async function openUrlForSelectedProfiles(urlOverride?: string) {
     if (selectedProfiles.length === 0) {
+      setMessage("请先选择账号");
       return;
     }
     if (bulkOpenRunning) {
@@ -1982,7 +2173,7 @@ function App() {
       return;
     }
 
-    const launchUrl = normalizeLaunchUrl(bulkUrl);
+    const launchUrl = normalizeLaunchUrl(urlOverride ?? bulkUrl);
     if (!launchUrl) {
       setMessage("请先填写要打开的网址");
       return;
@@ -2068,6 +2259,10 @@ function App() {
           setEditingProfileDraft(null);
           setEditingProjectId(null);
           setEditingProjectDraft(null);
+          setEditingUrlLibraryId(null);
+          setUrlLibraryDraft(createUrlLibraryDraft());
+          setUrlLibraryEditorOpen(false);
+          setPendingUrlDeleteId(null);
           setPendingDelete(null);
         }}
         onOpenSettings={openSettingsDialog}
@@ -2287,7 +2482,7 @@ function App() {
           )}
         </section>
           </>
-        ) : (
+        ) : activeView === "projects" ? (
           <ProjectsView
             projects={projects}
             profiles={profiles}
@@ -2307,6 +2502,21 @@ function App() {
               setEditingProjectId(projectId);
               setEditingProjectDraft(cloneProjectForDraft(project));
             }}
+          />
+        ) : (
+          <UrlLibraryView
+            items={settings.urlLibrary ?? []}
+            visibleItems={visibleUrlLibraryItems}
+            recentUrls={settings.recentUrls}
+            query={urlLibraryQuery}
+            selectedCount={selectedProfiles.length}
+            onQueryChange={setUrlLibraryQuery}
+            onCreate={startCreatingUrlLibraryItem}
+            onEdit={startEditingUrlLibraryItem}
+            onFillBulkUrl={fillBulkUrlFromLibrary}
+            onOpenWithSelected={(url) => void openUrlForSelectedProfiles(url)}
+            onCopy={(url) => void copyUrlFromLibrary(url)}
+            onDelete={requestDeleteUrlLibraryItem}
           />
         )}
 
@@ -2351,6 +2561,29 @@ function App() {
           working={batchDeleteWorking}
           onCancel={() => setPendingBatchDelete(null)}
           onConfirm={confirmPendingBatchDelete}
+        />
+      ) : null}
+
+      {urlLibraryEditorOpen ? (
+        <UrlLibraryEditDialog
+          title={editingUrlLibraryId ? "编辑网址" : "新建网址"}
+          draft={urlLibraryDraft}
+          onChange={(patch) =>
+            setUrlLibraryDraft((current) => ({ ...current, ...patch }))
+          }
+          onSave={() => void saveUrlLibraryDraft()}
+          onClose={cancelUrlLibraryEdit}
+        />
+      ) : null}
+
+      {pendingUrlDeleteId ? (
+        <UrlLibraryDeleteConfirmDialog
+          item={
+            (settings.urlLibrary ?? []).find((item) => item.id === pendingUrlDeleteId) ??
+            null
+          }
+          onCancel={() => setPendingUrlDeleteId(null)}
+          onConfirm={() => void confirmDeleteUrlLibraryItem()}
         />
       ) : null}
 
@@ -2506,6 +2739,14 @@ function Sidebar({ activeView, onNavigate, onOpenSettings }: SidebarProps) {
           <FolderKanban size={17} />
           项目
         </button>
+        <button
+          className={`nav-item ${activeView === "url-library" ? "active" : ""}`}
+          type="button"
+          onClick={() => onNavigate("url-library")}
+        >
+          <Tags size={17} />
+          网址库
+        </button>
         <button className="nav-item muted" type="button" disabled>
           任务
         </button>
@@ -2516,6 +2757,396 @@ function Sidebar({ activeView, onNavigate, onOpenSettings }: SidebarProps) {
         设置
       </button>
     </aside>
+  );
+}
+
+interface UrlLibraryViewProps {
+  items: UrlLibraryItem[];
+  visibleItems: UrlLibraryItem[];
+  recentUrls: string[];
+  query: string;
+  selectedCount: number;
+  onQueryChange: (value: string) => void;
+  onCreate: () => void;
+  onEdit: (item: UrlLibraryItem) => void;
+  onFillBulkUrl: (url: string) => void;
+  onOpenWithSelected: (url: string) => void;
+  onCopy: (url: string) => void;
+  onDelete: (itemId: string) => void;
+}
+
+function UrlLibraryView({
+  items,
+  visibleItems,
+  recentUrls,
+  query,
+  selectedCount,
+  onQueryChange,
+  onCreate,
+  onEdit,
+  onFillBulkUrl,
+  onOpenWithSelected,
+  onCopy,
+  onDelete
+}: UrlLibraryViewProps) {
+  const knownUrls = useMemo(() => new Set(items.map((item) => item.url)), [items]);
+  const visibleRecentUrls = recentUrls.filter((url) => !knownUrls.has(url));
+
+  return (
+    <>
+      <section className="launcher-header url-library-header">
+        <div className="url-library-title">
+          <h1>网址库</h1>
+          <span>{items.length} 个常用网址</span>
+        </div>
+        <label className="search-box">
+          <Search size={16} />
+          <input
+            aria-label="搜索网址"
+            placeholder="搜索网址名称、标签、备注"
+            value={query}
+            onChange={(event) => onQueryChange(event.target.value)}
+          />
+        </label>
+        <div className="header-actions">
+          <button className="primary-button" type="button" onClick={onCreate}>
+            <Plus size={16} />
+            新建网址
+          </button>
+        </div>
+      </section>
+
+      <section className="url-library-table-panel" aria-label="常用网址列表">
+        {items.length === 0 ? (
+          <div className="empty-state url-library-empty">
+            <div>
+              <h3>还没有常用网址</h3>
+              <p>把每天会用到的任务页、项目页或登录页存在这里。</p>
+            </div>
+            <button className="primary-button" type="button" onClick={onCreate}>
+              <Plus size={16} />
+              创建第一个网址
+            </button>
+          </div>
+        ) : visibleItems.length === 0 ? (
+          <div className="empty-state url-library-empty">
+            <div>
+              <h3>没有匹配的网址</h3>
+            </div>
+          </div>
+        ) : (
+          <div className="url-library-table-wrap">
+            <table className="url-library-table" aria-label="网址库表格">
+              <thead>
+                <tr>
+                  <th scope="col">名称</th>
+                  <th scope="col">URL</th>
+                  <th scope="col">标签</th>
+                  <th scope="col">备注</th>
+                  <th scope="col">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleItems.map((item) => (
+                  <UrlLibraryTableRow
+                    key={item.id}
+                    item={item}
+                    selectedCount={selectedCount}
+                    onEdit={() => onEdit(item)}
+                    onFillBulkUrl={() => onFillBulkUrl(item.url)}
+                    onOpenWithSelected={() => onOpenWithSelected(item.url)}
+                    onCopy={() => onCopy(item.url)}
+                    onDelete={() => onDelete(item.id)}
+                  />
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      {visibleRecentUrls.length > 0 ? (
+        <section className="url-library-recent" aria-label="最近打开的网址">
+          <strong>最近打开</strong>
+          <div className="url-library-recent-list">
+            {visibleRecentUrls.map((url) => {
+              const label = displayUrlLabel(url);
+              return (
+                <div className="url-library-recent-row" key={url}>
+                  <span>{label}</span>
+                  <div>
+                    <button
+                      className="secondary-button compact"
+                      type="button"
+                      aria-label={`填入批量打开 ${label}`}
+                      onClick={() => onFillBulkUrl(url)}
+                    >
+                      填入
+                    </button>
+                    <button
+                      className="secondary-button compact"
+                      type="button"
+                      aria-label={`用选中账号打开 ${label}`}
+                      onClick={() => onOpenWithSelected(url)}
+                    >
+                      打开
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      ) : null}
+    </>
+  );
+}
+
+interface UrlLibraryTableRowProps {
+  item: UrlLibraryItem;
+  selectedCount: number;
+  onEdit: () => void;
+  onFillBulkUrl: () => void;
+  onOpenWithSelected: () => void;
+  onCopy: () => void;
+  onDelete: () => void;
+}
+
+function UrlLibraryTableRow({
+  item,
+  selectedCount,
+  onEdit,
+  onFillBulkUrl,
+  onOpenWithSelected,
+  onCopy,
+  onDelete
+}: UrlLibraryTableRowProps) {
+  const label = item.name || displayUrlLabel(item.url);
+
+  return (
+    <tr>
+      <td className="url-library-name-cell">
+        <strong>{label}</strong>
+      </td>
+      <td className="url-library-url-cell">
+        <code title={item.url}>{item.url}</code>
+      </td>
+      <td>
+        <div className="url-library-table-tags">
+          {item.tags.length > 0 ? (
+            item.tags.map((tag) => <span key={tag}>{tag}</span>)
+          ) : (
+            <span className="muted-cell">未设置</span>
+          )}
+        </div>
+      </td>
+      <td className="url-library-notes-cell">
+        {item.notes ? <p>{item.notes}</p> : <span className="muted-cell">无备注</span>}
+      </td>
+      <td className="url-library-actions-cell">
+        <div className="url-library-row-actions">
+          <button
+            className="secondary-button compact"
+            type="button"
+            aria-label={`填入批量打开 ${label}`}
+            onClick={onFillBulkUrl}
+          >
+            填入
+          </button>
+          <button
+            className="primary-button compact"
+            type="button"
+            aria-label={`用选中账号打开 ${label}`}
+            title={selectedCount > 0 ? undefined : "先选择账号"}
+            onClick={onOpenWithSelected}
+          >
+            <Play size={14} />
+            打开
+          </button>
+          <button
+            className="secondary-button compact icon-only"
+            type="button"
+            aria-label={`复制网址 ${label}`}
+            onClick={onCopy}
+          >
+            <Copy size={14} />
+          </button>
+          <button
+            className="secondary-button compact icon-only"
+            type="button"
+            aria-label={`编辑网址 ${label}`}
+            onClick={onEdit}
+          >
+            <Pencil size={14} />
+          </button>
+          <button
+            className="secondary-button compact icon-only danger"
+            type="button"
+            aria-label={`删除网址 ${label}`}
+            onClick={onDelete}
+          >
+            <Trash2 size={14} />
+          </button>
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+interface UrlLibraryEditDialogProps {
+  title: string;
+  draft: UrlLibraryDraft;
+  onChange: (patch: Partial<UrlLibraryDraft>) => void;
+  onSave: () => void;
+  onClose: () => void;
+}
+
+function UrlLibraryEditDialog({
+  title,
+  draft,
+  onChange,
+  onSave,
+  onClose
+}: UrlLibraryEditDialogProps) {
+  const titleId = "url-library-edit-title";
+
+  return (
+    <div
+      className="modal-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) {
+          onClose();
+        }
+      }}
+    >
+      <form
+        className="modal-card url-library-edit-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        onSubmit={(event) => {
+          event.preventDefault();
+          onSave();
+        }}
+      >
+        <div className="modal-header">
+          <div>
+            <h2 id={titleId}>{title}</h2>
+            <p>保存后才会写入网址库。</p>
+          </div>
+          <button
+            className="icon-button"
+            type="button"
+            aria-label="关闭"
+            onClick={onClose}
+          >
+            <X size={18} />
+          </button>
+        </div>
+        <div className="modal-body url-library-edit-body">
+          <label className="field" htmlFor="url-library-name">
+            <span>网址名称</span>
+            <input
+              id="url-library-name"
+              value={draft.name}
+              onChange={(event) => onChange({ name: event.target.value })}
+            />
+          </label>
+          <label className="field" htmlFor="url-library-url">
+            <span>网址 URL</span>
+            <input
+              id="url-library-url"
+              value={draft.url}
+              onChange={(event) => onChange({ url: event.target.value })}
+            />
+          </label>
+          <label className="field" htmlFor="url-library-tags">
+            <span>网址标签</span>
+            <input
+              id="url-library-tags"
+              placeholder="多个标签用逗号分隔"
+              value={draft.tags}
+              onChange={(event) => onChange({ tags: event.target.value })}
+            />
+          </label>
+          <label className="field" htmlFor="url-library-notes">
+            <span>网址备注</span>
+            <textarea
+              id="url-library-notes"
+              value={draft.notes}
+              onChange={(event) => onChange({ notes: event.target.value })}
+            />
+          </label>
+        </div>
+        <div className="modal-footer">
+          <button className="secondary-button" type="button" onClick={onClose}>
+            取消
+          </button>
+          <button className="primary-button" type="submit">
+            保存网址
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+interface UrlLibraryDeleteConfirmDialogProps {
+  item: UrlLibraryItem | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+}
+
+function UrlLibraryDeleteConfirmDialog({
+  item,
+  onCancel,
+  onConfirm
+}: UrlLibraryDeleteConfirmDialogProps) {
+  if (!item) {
+    return null;
+  }
+
+  const titleId = "url-library-delete-title";
+  return (
+    <div
+      className="modal-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) {
+          onCancel();
+        }
+      }}
+    >
+      <section
+        className="modal-card delete-confirm-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+      >
+        <div className="modal-header">
+          <div>
+            <h2 id={titleId}>确认删除网址</h2>
+            <p>{item.name || displayUrlLabel(item.url)}</p>
+          </div>
+          <button
+            className="icon-button"
+            type="button"
+            aria-label="关闭"
+            onClick={onCancel}
+          >
+            <X size={18} />
+          </button>
+        </div>
+        <p>这条常用网址会从网址库和批量打开常用项里移除。</p>
+        <div className="confirm-actions">
+          <button className="secondary-button" type="button" onClick={onCancel}>
+            取消
+          </button>
+          <button className="primary-button danger" type="button" onClick={onConfirm}>
+            确认删除
+          </button>
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -3071,18 +3702,21 @@ function EditProjectDialog({
           <div className="field">
             <span className="field-label">绑定账号</span>
             <div className="project-profile-picker">
-              {profiles.map((profile) => (
-                <label key={profile.id} className="project-profile-option">
-                  <input
-                    type="checkbox"
-                    aria-label={`绑定 ${profile.name}`}
-                    checked={project.profileIds.includes(profile.id)}
-                    onChange={(event) => toggleProfile(profile.id, event.target.checked)}
-                  />
-                  <span>{profile.name}</span>
-                  <small>{profile.id}</small>
-                </label>
-              ))}
+              {profiles.map((profile) => {
+                const selected = project.profileIds.includes(profile.id);
+                return (
+                  <button
+                    key={profile.id}
+                    className={`project-profile-option ${selected ? "selected" : ""}`}
+                    type="button"
+                    aria-label={`绑定账号 ${profile.name} ${profile.id}`}
+                    aria-pressed={selected}
+                    onClick={() => toggleProfile(profile.id, !selected)}
+                  >
+                    <span>{profile.name}</span>
+                  </button>
+                );
+              })}
             </div>
           </div>
 
@@ -4802,6 +5436,53 @@ function normalizeLaunchUrl(value: string): string {
     return cleaned;
   }
   return `https://${cleaned}`;
+}
+
+function createUrlLibraryDraft(item?: UrlLibraryItem | null): UrlLibraryDraft {
+  return {
+    name: item?.name ?? "",
+    url: item?.url ?? "",
+    tags: item?.tags.join(", ") ?? "",
+    notes: item?.notes ?? ""
+  };
+}
+
+function createUrlLibraryItem(
+  item: Pick<UrlLibraryItem, "name" | "url" | "tags" | "notes">,
+  existingItems: UrlLibraryItem[],
+  now: string
+): UrlLibraryItem {
+  return {
+    id: nextUrlLibraryId(existingItems),
+    name: item.name,
+    url: normalizeLaunchUrl(item.url),
+    tags: [...new Set(item.tags.map((tag) => tag.trim()).filter(Boolean))],
+    notes: item.notes,
+    createdAt: now,
+    updatedAt: now
+  };
+}
+
+function nextUrlLibraryId(items: UrlLibraryItem[]): string {
+  const usedIds = new Set(items.map((item) => item.id));
+  let index = items.length + 1;
+  let id = `url-${String(index).padStart(3, "0")}`;
+  while (usedIds.has(id)) {
+    index += 1;
+    id = `url-${String(index).padStart(3, "0")}`;
+  }
+  return id;
+}
+
+function parseUrlTags(value: string): string[] {
+  return [
+    ...new Set(
+      value
+        .split(/[,，]/)
+        .map((tag) => tag.trim())
+        .filter(Boolean)
+    )
+  ];
 }
 
 function normalizeBulkOpenIntervalSeconds(value: string): number {

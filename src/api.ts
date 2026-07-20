@@ -14,7 +14,8 @@ import type {
   ProjectUrl,
   ProfileSettings,
   RootHealthReport,
-  RootRepairResult
+  RootRepairResult,
+  UrlLibraryItem
 } from "./types";
 
 export interface RootStatus {
@@ -480,10 +481,18 @@ function filterBrowserDocumentForProfiles(
 }
 
 export function normalizeSettings(settings?: Partial<ProfileSettings>): ProfileSettings {
+  const favoriteUrls = normalizeUrlList(settings?.favoriteUrls, 20);
+  const rawUrlLibrary = Array.isArray(settings?.urlLibrary) ? settings.urlLibrary : [];
+  const urlLibrarySource = rawUrlLibrary.length > 0
+    ? rawUrlLibrary
+    : favoriteUrls.map((url, index) => createUrlLibraryItemFromUrl(url, index));
+  const urlLibrary = normalizeUrlLibrary(urlLibrarySource);
+
   return {
     browserPath: normalizeBrowserPath(settings?.browserPath),
-    favoriteUrls: normalizeUrlList(settings?.favoriteUrls, 20),
+    favoriteUrls: normalizeUrlList(urlLibrary.map((item) => item.url), 20),
     recentUrls: normalizeUrlList(settings?.recentUrls, 10),
+    urlLibrary,
     theme: normalizeTheme(settings?.theme)
   };
 }
@@ -528,6 +537,89 @@ function normalizeStoredUrl(url: string): string {
     return cleaned;
   }
   return `https://${cleaned}`;
+}
+
+function normalizeUrlLibrary(items: Partial<UrlLibraryItem>[] | undefined): UrlLibraryItem[] {
+  if (!Array.isArray(items)) {
+    return [];
+  }
+
+  const seenUrls = new Set<string>();
+  const seenIds = new Set<string>();
+  const result: UrlLibraryItem[] = [];
+
+  for (const [index, item] of items.entries()) {
+    const url = normalizeStoredUrl(typeof item.url === "string" ? item.url : "");
+    if (!url || seenUrls.has(url)) {
+      continue;
+    }
+
+    const fallbackId = `url-${String(index + 1).padStart(3, "0")}`;
+    const id = uniqueUrlLibraryId(
+      typeof item.id === "string" && item.id.trim() ? item.id.trim() : fallbackId,
+      seenIds
+    );
+    const name =
+      typeof item.name === "string" && item.name.trim()
+        ? item.name.trim()
+        : displayStoredUrlLabel(url);
+    const tags = Array.isArray(item.tags)
+      ? [...new Set(item.tags.map((tag) => tag.trim()).filter(Boolean))]
+      : [];
+    const createdAt = typeof item.createdAt === "string" ? item.createdAt : "";
+    const updatedAt = typeof item.updatedAt === "string" ? item.updatedAt : createdAt;
+
+    seenUrls.add(url);
+    result.push({
+      id,
+      name,
+      url,
+      tags,
+      notes: typeof item.notes === "string" ? item.notes : "",
+      createdAt,
+      updatedAt
+    });
+  }
+
+  return result;
+}
+
+function createUrlLibraryItemFromUrl(url: string, index: number): UrlLibraryItem {
+  return {
+    id: `url-${String(index + 1).padStart(3, "0")}`,
+    name: displayStoredUrlLabel(url),
+    url,
+    tags: [],
+    notes: "",
+    createdAt: "",
+    updatedAt: ""
+  };
+}
+
+function uniqueUrlLibraryId(baseId: string, seenIds: Set<string>): string {
+  if (!seenIds.has(baseId)) {
+    seenIds.add(baseId);
+    return baseId;
+  }
+
+  let suffix = 2;
+  let id = `${baseId}-${suffix}`;
+  while (seenIds.has(id)) {
+    suffix += 1;
+    id = `${baseId}-${suffix}`;
+  }
+  seenIds.add(id);
+  return id;
+}
+
+function displayStoredUrlLabel(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const path = `${parsed.pathname}${parsed.search}`.replace(/\/$/, "");
+    return `${parsed.host}${path}`;
+  } catch {
+    return url.replace(/^https?:\/\//i, "");
+  }
 }
 
 function normalizeTheme(theme?: AppTheme): AppTheme {

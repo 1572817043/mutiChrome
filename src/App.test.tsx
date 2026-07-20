@@ -8,7 +8,7 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { profileApi } from "./api";
+import { normalizeSettings, profileApi } from "./api";
 import App from "./App";
 import type { ChromeProfile, ProfileDocument } from "./types";
 
@@ -35,6 +35,22 @@ interface TestProjectUrl {
 describe("App launcher layout", () => {
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  test("旧常用网址会迁移为结构化网址库", () => {
+    const settings = normalizeSettings({
+      browserPath: "/Applications/Google Chrome.app",
+      favoriteUrls: ["galxe.com", "https://galxe.com", "zealy.io"],
+      recentUrls: [],
+      urlLibrary: [],
+      theme: "light"
+    });
+
+    expect(settings.favoriteUrls).toEqual(["https://galxe.com", "https://zealy.io"]);
+    expect(settings.urlLibrary).toMatchObject([
+      { name: "galxe.com", url: "https://galxe.com" },
+      { name: "zealy.io", url: "https://zealy.io" }
+    ]);
   });
 
   beforeEach(() => {
@@ -1957,6 +1973,94 @@ describe("App launcher layout", () => {
     expect(screen.queryByRole("button", { name: "使用常用网址 daily.example.com/checkin" })).toBeNull();
   });
 
+  test("网址库可以展示常用和最近网址并回填批量打开", async () => {
+    const user = userEvent.setup();
+    const document = documentWith([
+      profile({ id: "account-001", name: "主号" }),
+      profile({ id: "account-002", name: "抽奖号" })
+    ]);
+    document.settings.favoriteUrls = ["https://galxe.com"];
+    document.settings.recentUrls = ["https://zealy.io"];
+    localStorage.setItem("multichrome.profileDocument", JSON.stringify(document));
+    render(<App />);
+
+    await user.click(await screen.findByRole("checkbox", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "网址库" }));
+
+    expect(await screen.findByRole("heading", { name: "网址库" })).toBeTruthy();
+    const table = screen.getByRole("table", { name: "网址库表格" });
+    expect(within(table).getByRole("columnheader", { name: "名称" })).toBeTruthy();
+    expect(within(table).getByRole("columnheader", { name: "URL" })).toBeTruthy();
+    expect(within(table).getByRole("columnheader", { name: "标签" })).toBeTruthy();
+    expect(within(table).getByRole("columnheader", { name: "备注" })).toBeTruthy();
+    expect(within(table).getByText("galxe.com")).toBeTruthy();
+    expect(screen.getByText("zealy.io")).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "填入批量打开 galxe.com" }));
+
+    expect(await screen.findByRole("button", { name: "启动 主号" })).toBeTruthy();
+    expect((screen.getByLabelText("批量打开网址") as HTMLInputElement).value).toBe(
+      "https://galxe.com"
+    );
+  });
+
+  test("网址库可以新增结构化常用网址并删除", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "网址库" }));
+    await user.click(screen.getByRole("button", { name: "新建网址" }));
+    const editor = await screen.findByRole("dialog", { name: "新建网址" });
+    await user.type(within(editor).getByLabelText("网址名称"), "Galxe 每日");
+    await user.type(within(editor).getByLabelText("网址 URL"), "galxe.com");
+    await user.type(within(editor).getByLabelText("网址标签"), "平台, 每日");
+    await user.type(within(editor).getByLabelText("网址备注"), "每天看任务");
+    await user.click(within(editor).getByRole("button", { name: "保存网址" }));
+
+    expect(await screen.findByText("已保存网址")).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "新建网址" })).toBeNull();
+    expect(savedDocument().settings.favoriteUrls).toEqual(["https://galxe.com"]);
+    expect((savedDocument().settings as any).urlLibrary[0]).toMatchObject({
+      name: "Galxe 每日",
+      url: "https://galxe.com",
+      tags: ["平台", "每日"],
+      notes: "每天看任务"
+    });
+
+    await user.click(screen.getByRole("button", { name: "删除网址 Galxe 每日" }));
+    const dialog = await screen.findByRole("dialog", { name: "确认删除网址" });
+    await user.click(within(dialog).getByRole("button", { name: "确认删除" }));
+
+    expect(savedDocument().settings.favoriteUrls).toEqual([]);
+    expect((savedDocument().settings as any).urlLibrary).toEqual([]);
+  });
+
+  test("网址库可以用选中账号直接打开网址", async () => {
+    const user = userEvent.setup();
+    const openProfileSpy = vi.spyOn(profileApi, "openProfile").mockResolvedValue("/tmp/profile");
+    const document = documentWith([
+      profile({ id: "account-001", name: "主号" }),
+      profile({ id: "account-002", name: "抽奖号" })
+    ]);
+    document.settings.favoriteUrls = ["https://galxe.com"];
+    localStorage.setItem("multichrome.profileDocument", JSON.stringify(document));
+    render(<App />);
+
+    await user.click(await screen.findByRole("checkbox", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "网址库" }));
+    await user.click(await screen.findByRole("button", { name: "用选中账号打开 galxe.com" }));
+
+    expect(await screen.findByText("已为 1 个账号打开网址")).toBeTruthy();
+    expect(openProfileSpy).toHaveBeenCalledWith(
+      "~/MultiChromeProfiles",
+      "account-001",
+      "/Applications/Google Chrome.app",
+      "https://galxe.com"
+    );
+    expect(savedDocument().settings.recentUrls).toEqual(["https://galxe.com"]);
+    openProfileSpy.mockRestore();
+  });
+
   test("可以在项目页新建项目并绑定账号", async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -1970,8 +2074,21 @@ describe("App launcher layout", () => {
     await user.type(within(dialog).getByLabelText("项目网址"), "galxe.com/quest");
     await user.clear(within(dialog).getByLabelText("项目打开间隔秒"));
     await user.type(within(dialog).getByLabelText("项目打开间隔秒"), "5");
-    await user.click(within(dialog).getByRole("checkbox", { name: "绑定 主号" }));
-    await user.click(within(dialog).getByRole("checkbox", { name: "绑定 抽奖号" }));
+    expect(within(dialog).queryByRole("checkbox", { name: "绑定 主号" })).toBeNull();
+
+    const primaryProfileButton = within(dialog).getByRole("button", {
+      name: "绑定账号 主号 account-001"
+    });
+    const raffleProfileButton = within(dialog).getByRole("button", {
+      name: "绑定账号 抽奖号 account-002"
+    });
+
+    expect(primaryProfileButton.getAttribute("aria-pressed")).toBe("false");
+    expect(primaryProfileButton.textContent).toBe("主号");
+    expect(primaryProfileButton.textContent).not.toContain("account-001");
+    await user.click(primaryProfileButton);
+    await user.click(raffleProfileButton);
+    expect(primaryProfileButton.getAttribute("aria-pressed")).toBe("true");
 
     expect(savedDocument().projects).toHaveLength(0);
 
@@ -2158,7 +2275,9 @@ describe("App launcher layout", () => {
     const dialog = await screen.findByRole("dialog", { name: "新建项目" });
     await user.type(within(dialog).getByLabelText("项目名称"), "Zealy 打卡");
     await user.type(within(dialog).getByLabelText("项目网址"), "zealy.io");
-    await user.click(within(dialog).getByRole("checkbox", { name: "绑定 主号" }));
+    await user.click(
+      within(dialog).getByRole("button", { name: "绑定账号 主号 account-001" })
+    );
 
     await user.click(within(dialog).getByRole("button", { name: "取消新建项目" }));
 
@@ -2435,9 +2554,10 @@ describe("App launcher layout", () => {
 
     expect(within(dialog).getByDisplayValue("每天签到")).toBeTruthy();
     expect(
-      (within(dialog).getByRole("checkbox", { name: "绑定 主号" }) as HTMLInputElement)
-        .checked
-    ).toBe(true);
+      within(dialog)
+        .getByRole("button", { name: "绑定账号 主号 account-001" })
+        .getAttribute("aria-pressed")
+    ).toBe("true");
     expect(within(dialog).getByRole("button", { name: "复制项目" })).toBeTruthy();
   });
 
@@ -2694,7 +2814,9 @@ describe("App launcher layout", () => {
     await user.type(within(dialog).getByLabelText("项目网址"), "zealy.io/campaign");
     await user.clear(within(dialog).getByLabelText("项目打开间隔秒"));
     await user.type(within(dialog).getByLabelText("项目打开间隔秒"), "8");
-    await user.click(within(dialog).getByRole("checkbox", { name: "绑定 抽奖号" }));
+    await user.click(
+      within(dialog).getByRole("button", { name: "绑定账号 抽奖号 account-002" })
+    );
     await user.clear(within(dialog).getByLabelText("备注"));
     await user.type(within(dialog).getByLabelText("备注"), "每周任务");
 
@@ -3171,6 +3293,7 @@ function documentWith(
       browserPath: "/Applications/Google Chrome.app",
       favoriteUrls: [],
       recentUrls: [],
+      urlLibrary: [],
       theme: "light"
     },
     profiles,

@@ -47,7 +47,18 @@ export interface ProfileSettings {
   browserPath: string;
   favoriteUrls: string[];
   recentUrls: string[];
+  urlLibrary: UrlLibraryItem[];
   theme: AppTheme;
+}
+
+export interface UrlLibraryItem {
+  id: string;
+  name: string;
+  url: string;
+  tags: string[];
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ProjectUrl {

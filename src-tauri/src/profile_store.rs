@@ -22,8 +22,26 @@ pub struct AppSettings {
     pub favorite_urls: Vec<String>,
     #[serde(default)]
     pub recent_urls: Vec<String>,
+    #[serde(default)]
+    pub url_library: Vec<StoredUrlLibraryItem>,
     #[serde(default = "default_theme")]
     pub theme: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredUrlLibraryItem {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub notes: String,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
 }
 
 impl Default for AppSettings {
@@ -32,6 +50,7 @@ impl Default for AppSettings {
             browser_path: default_browser_path(),
             favorite_urls: Vec::new(),
             recent_urls: Vec::new(),
+            url_library: Vec::new(),
             theme: default_theme(),
         }
     }
@@ -1399,7 +1418,7 @@ mod tests {
             .expect("profiles document");
         assert_eq!(
             document,
-            "{\n  \"version\": 1,\n  \"settings\": {\n    \"browserPath\": \"/Applications/Google Chrome.app\",\n    \"favoriteUrls\": [],\n    \"recentUrls\": [],\n    \"theme\": \"light\"\n  },\n  \"profiles\": [],\n  \"projects\": []\n}\n"
+            "{\n  \"version\": 1,\n  \"settings\": {\n    \"browserPath\": \"/Applications/Google Chrome.app\",\n    \"favoriteUrls\": [],\n    \"recentUrls\": [],\n    \"urlLibrary\": [],\n    \"theme\": \"light\"\n  },\n  \"profiles\": [],\n  \"projects\": []\n}\n"
         );
     }
 
@@ -1972,6 +1991,7 @@ mod tests {
                 browser_path: "/Applications/Chromium.app".to_string(),
                 favorite_urls: Vec::new(),
                 recent_urls: Vec::new(),
+                url_library: Vec::new(),
                 theme: "dark".to_string(),
             },
             profiles: vec![test_profile("account-009")],
