@@ -56,6 +56,7 @@ import { isSessionRunning, profileSessionStatus } from "./browserSessions";
 import {
   buildGridWindowLayoutPlan,
   buildPrimaryWindowRegistry,
+  buildWindowLayoutSyncPlan,
   windowMatchesBounds,
   type BrowserWindowRegistryInput
 } from "./browserWindows";
@@ -2380,12 +2381,31 @@ function App() {
     const operation = startWindowOperation("同步布局", freshRunningSelectedProfiles);
     setWindowSyncing(true);
     try {
-      const sourceWindows = await listProfileWindowsWithTimeout(
-        sourceProfile,
-        "读取主窗口"
-      );
-      const sourceWindow = sourceWindows[0];
-      if (!sourceWindow) {
+      const registryInputs: BrowserWindowRegistryInput[] = [];
+      let firstFailedError: unknown = null;
+
+      try {
+        const sourceWindows = await listProfileWindowsWithTimeout(
+          sourceProfile,
+          "读取主窗口"
+        );
+        registryInputs.push({
+          profileId: sourceProfile.id,
+          profileName: sourceProfile.name,
+          windows: sourceWindows
+        });
+      } catch (error) {
+        registryInputs.push({
+          profileId: sourceProfile.id,
+          profileName: sourceProfile.name,
+          windows: [],
+          windowError: errorMessage(error)
+        });
+      }
+
+      let windowRegistry = buildPrimaryWindowRegistry(registryInputs);
+      let syncPlan = buildWindowLayoutSyncPlan(windowRegistry, sourceProfile.id);
+      if (syncPlan.sourceStatus === "missing-window") {
         setMessage("主账号没有可同步窗口");
         finishWindowOperation(operation, "failed", {
           profileCount: freshRunningSelectedProfiles.length,
@@ -2395,7 +2415,7 @@ function App() {
         await refreshRunningProfiles();
         return;
       }
-      if (sourceWindow.minimized) {
+      if (syncPlan.sourceStatus === "minimized-window") {
         setMessage("主账号窗口已最小化，请先恢复窗口再同步布局");
         finishWindowOperation(operation, "failed", {
           profileCount: freshRunningSelectedProfiles.length,
@@ -2405,21 +2425,15 @@ function App() {
         await refreshRunningProfiles();
         return;
       }
-
-      const sourceBounds: WindowBounds = {
-        x: sourceWindow.x,
-        y: sourceWindow.y,
-        width: sourceWindow.width,
-        height: sourceWindow.height
-      };
-      let syncedCount = 0;
-      let noWindowCount = 0;
-      let minimizedCount = 0;
-      let unchangedCount = 0;
-      let failedCount = 0;
-      let focusFailedCount = 0;
-      let firstFailedError: unknown = null;
-      const syncedProfiles: ChromeProfile[] = [];
+      if (syncPlan.sourceStatus === "window-error") {
+        setMessage(windowAutomationErrorMessage(syncPlan.sourceWindowError));
+        finishWindowOperation(operation, "failed", {
+          profileCount: freshRunningSelectedProfiles.length,
+          sourceProfileId: sourceProfile.id
+        });
+        await refreshRunningProfiles();
+        return;
+      }
 
       for (const profile of freshRunningSelectedProfiles) {
         if (profile.id === sourceProfile.id) {
@@ -2427,23 +2441,59 @@ function App() {
         }
 
         try {
-          const windows = await listProfileWindowsWithTimeout(profile, "检查同步窗口");
-          if (windows.length === 0) {
-            noWindowCount += 1;
-            continue;
-          }
-          if (windows[0].minimized) {
-            minimizedCount += 1;
-            continue;
-          }
-          await setProfileWindowBoundsWithTimeout(profile, sourceBounds, "同步布局");
+          const windows = await listProfileWindowsWithTimeout(
+            profile,
+            "检查同步窗口"
+          );
+          registryInputs.push({
+            profileId: profile.id,
+            profileName: profile.name,
+            windows
+          });
+        } catch (error) {
+          firstFailedError ??= error;
+          registryInputs.push({
+            profileId: profile.id,
+            profileName: profile.name,
+            windows: [],
+            windowError: errorMessage(error)
+          });
+        }
+      }
+
+      windowRegistry = buildPrimaryWindowRegistry(registryInputs);
+      syncPlan = buildWindowLayoutSyncPlan(windowRegistry, sourceProfile.id);
+
+      let syncedCount = 0;
+      const noWindowCount = syncPlan.noWindowCount;
+      const minimizedCount = syncPlan.minimizedCount;
+      let unchangedCount = 0;
+      let failedCount = syncPlan.failedCount;
+      let focusFailedCount = 0;
+      const syncedProfiles: ChromeProfile[] = [];
+      const profileById = new Map(
+        freshRunningSelectedProfiles.map((profile) => [profile.id, profile])
+      );
+
+      for (const placement of syncPlan.placements) {
+        const profile = profileById.get(placement.profileId);
+        if (!profile) {
+          continue;
+        }
+
+        try {
+          await setProfileWindowBoundsWithTimeout(
+            profile,
+            placement.bounds,
+            "同步布局"
+          );
           const updatedWindows = await listProfileWindowsWithTimeout(
             profile,
             "确认同步布局"
           );
           if (
             !updatedWindows[0] ||
-            !windowMatchesBounds(updatedWindows[0], sourceBounds)
+            !windowMatchesBounds(updatedWindows[0], placement.bounds)
           ) {
             unchangedCount += 1;
             continue;

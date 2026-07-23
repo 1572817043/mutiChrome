@@ -8,7 +8,9 @@ V0.4 基础可用性已完成第一段：账号卡片支持颜色标识、标准
 
 V4.0 已完成窗口编排基础第一段：新增 `src/browserWindows.ts` 纯模型，覆盖窗口注册表、`grid` 布局计划、屏幕容量计算、平铺坐标生成和窗口边界容差判断。现有“平铺窗口”已改为先把扫描结果转换为注册表，再生成布局计划并执行原有窗口移动命令；这一步只整理窗口资源和布局边界，不做实时群控、键鼠同步、标签页同步或网页状态同步。V4.0 已用 Computer Use 在真实 macOS 桌面完成补充测试：用户已开启 MultiChrome 辅助功能权限，软件已打开且已有两个 Chrome profile 窗口；MultiChrome 选中 `账号1` 和 `账号 2` 后，“检查窗口”读到两个账号各 1 个窗口，坐标分别为 `864x1017 @ 0,38` 与 `864x1016 @ 864,38`；点击“平铺窗口”后按钮进入“平铺中”，最终提示“已平铺 2 个窗口”，复查坐标仍为左右分屏。
 
-后续路线已明确：V4 继续打窗口编排基础，不直接做完整群控。V4.1 把“同步布局”接入窗口注册表；V4.2 做 `grid`、`left-right`、`rows`、`columns` 这类轻量布局预设纯模型；V4.3 标准化检查、平铺、同步布局的 operation summary；V4.4 做轻量窗口面板。V5 才进入同步控制器基础，先做 `sync-bounds`、dry-run 预览和结果详情；鼠标、键盘、滚动、标签页等交互同步只在 V5.4 做技术预研，不进 MVP 主流程。
+V4.1 已完成同步布局接入窗口注册表：PR #3 `https://github.com/1572817043/mutiChrome/pull/3`，commit `1e58ec7d536e29181d391b2b2a9c243832598128`。本轮新增 `buildWindowLayoutSyncPlan` 纯模型，建模 source/target 的 `missing`、`minimized`、`window-error` 状态；source 不进入 `placements`，`noWindowCount`、`minimizedCount`、`failedCount` 只统计目标账号；目标窗口读取失败时跳过并继续同步其它目标。Claude 改代码前反证审查有效，采纳 `sourceWindowError`、最小化保护、目标失败不中断等约束；Claude 提交前 diff 红队审查有效，采纳补 App 层“目标读取失败但其它目标继续同步”测试。自动验证全部通过：`rtk npm test -- --run src/App.test.tsx -t "布局同步会跳过读取失败的目标并继续同步其它目标"`、`rtk npm test -- --run src/App.test.tsx -t "同步布局|布局同步"`、`rtk npm test`、`rtk npm run build`、`rtk cargo test --manifest-path src-tauri/Cargo.toml`、`rtk git diff --check`。本轮未做 macOS 辅助功能实机验证，因为未改底层 AX/Rust 窗口 API、`list_profile_windows`、`set_profile_window_bounds`、窗口 bounds 写入和读回机制；真实窗口同步继续纳入后续使用观察。
+
+后续路线已明确：V4 继续打窗口编排基础，不直接做完整群控。V4.2 做 `grid`、`left-right`、`rows`、`columns` 这类轻量布局预设纯模型；V4.3 标准化检查、平铺、同步布局的 operation summary；V4.4 做轻量窗口面板。V5 才进入同步控制器基础，先做 `sync-bounds`、dry-run 预览和结果详情；鼠标、键盘、滚动、标签页等交互同步只在 V5.4 做技术预研，不进 MVP 主流程。
 
 ## 已确认决策
 
@@ -28,6 +30,7 @@ V4.0 已完成窗口编排基础第一段：新增 `src/browserWindows.ts` 纯�
 - UI 方向参考 AdsPower 的生产力质感，但不照搬 AdsPower 的表格型主界面；用户更偏好长方形卡片/小方块启动器，主界面应保持简洁，低频信息放进编辑弹窗。
 - 后期计划可加入软件内 AI 聊天助手，用于导入项目、整理链接、批量创建账号草稿和辅助配置，但现阶段先做好基础功能；AI 写入任何数据前都要预览确认。
 - 后期计划可做窗口同步、群控等能力，但不进入当前 MVP。
+- 窗口类 PR 验证规则：改 Rust Accessibility API、`list_profile_windows`、`set_profile_window_bounds`、窗口坐标换算、bounds 写入/读回确认机制或新增窗口操作入口时，必须做 macOS 实机验证；纯前端窗口分类模型、operation summary、文案/展示调整和测试补充，实机验证可选。
 - 账号颜色保存为 `profiles.json` 中的 `accentColor`，跟随配置根目录迁移；老账号缺少颜色时按账号编号显示默认色。
 - 外部图标区分的第一轮实验不改主应用，只放在 `experiments/launcher-apps/`；它能区分“启动入口”，但运行中的窗口仍归属 `/Applications/Google Chrome.app`，Dock 运行图标是否能完全区分需要后续独立 helper app 或独立浏览器 bundle 方案继续验证。
 - 外部图标区分第二轮采用 stay-open helper：仍不复制 Chrome，只让账号 `.app` 自身保持运行，负责启动或聚焦对应 `--user-data-dir` 的 Chrome 进程。
@@ -256,6 +259,7 @@ V4.0 已完成窗口编排基础第一段：新增 `src/browserWindows.ts` 纯�
 - 浏览器会话编排 V3.5 使用 TDD：先添加 `findActiveBrowserOperationProfileConflicts` 纯模型失败测试，再添加“项目打开会避开正在执行批量打开的同账号”“批量打开会避开正在执行项目的同账号”“批量打开会避开正在单独启动的同账号”等 UI 失败测试；随后新增 active operation 冲突守卫，覆盖批量打开、项目打开、窗口操作、单账号打开和账号平台打开。Claude CLI 预审指出 queued 误杀、卡死无逃逸、部分成功阻塞、轻重操作饥饿和 check-then-act 非原子等风险；V3.5 先采用保守阻止策略，不做完整队列、强制解锁或持久化。Claude CLI 复审继续指出底层命令卡死会导致账号长期被 operation 锁住；该风险已采纳，新增 `withBrowserOperationTimeout`，启动和窗口命令 120 秒无返回会失败并释放 operation/旧启动状态。阶段验证已执行 v3.5 相关模型/UI 测试：通过。
 - 浏览器会话编排 V4.0 使用 TDD：先添加 `src/browserWindows.test.ts`，确认缺少 `browserWindows` 模块时失败；随后新增窗口注册表和 `grid` 布局计划纯模型，并把“平铺窗口”接入该模型。窗口扫描失败会进入注册表错误项，窗口缺失会进入跳过项，容量超限时布局计划不生成移动目标，避免一边计算失败一边移动窗口。阶段验证已执行 `npm test -- --run src/browserWindows.test.ts`、`npm test -- --run src/App.test.tsx -t "平铺窗口|同步布局"`、`npm test`、`npm run build`、`cargo test --manifest-path src-tauri/Cargo.toml`、`git diff --check`：通过。当前前端测试 165 个，Rust 测试 42 个。
 - 浏览器会话编排 V4.0 实机补充验证：用户已开启辅助功能权限，MultiChrome 和两个 Chrome profile 已打开；通过 Computer Use 操作 MultiChrome，“检查窗口”读到 `账号1 1 个窗口（864x1017 @ 0,38）` 与 `账号 2 1 个窗口（864x1016 @ 864,38）`；点击“平铺窗口”后 UI 短暂显示“平铺中”，完成后显示“已平铺 2 个窗口”；再次检查窗口坐标仍为左右分屏。结论是 V4.0 窗口注册表 + `grid` 布局计划接入平铺流程在真实授权桌面环境可用。
+- 浏览器会话编排 V4.1 已完成：同步布局接入 `browserWindows` 窗口注册表，PR #3 `https://github.com/1572817043/mutiChrome/pull/3`，commit `1e58ec7d536e29181d391b2b2a9c243832598128`。新增 `buildWindowLayoutSyncPlan` 纯模型，覆盖 source/target 的 `missing`、`minimized`、`window-error` 建模；source 不进入 `placements`，跳过/失败计数只统计目标账号；目标读取失败会跳过并继续同步其它目标。Claude 改代码前反证审查有效，采纳 `sourceWindowError`、最小化保护、目标失败不中断等约束；Claude 提交前 diff 红队审查有效，采纳补 App 层目标读取失败测试。阶段验证执行 `rtk npm test -- --run src/App.test.tsx -t "布局同步会跳过读取失败的目标并继续同步其它目标"`、`rtk npm test -- --run src/App.test.tsx -t "同步布局|布局同步"`、`rtk npm test`、`rtk npm run build`、`rtk cargo test --manifest-path src-tauri/Cargo.toml`、`rtk git diff --check`：全部通过。本轮未做 macOS 辅助功能实机验证，因为未改底层 AX/Rust 窗口 API、`list_profile_windows`、`set_profile_window_bounds`、窗口 bounds 写入和读回机制；真实窗口同步继续纳入后续使用观察。
 - 阶段 1“建立无行为拆分基线”完成：只从 `src/App.tsx` 末尾抽出纯 helper 和显示/解析 helper，新增 `src/domain/projectModel.ts`、`src/domain/batchProfileParser.ts`、`src/domain/urlLibraryModel.ts`、`src/shared/urlHelpers.ts`、`src/shared/formatHelpers.ts`、`src/shared/screenWorkArea.ts`、`src/shared/windowAutomationErrors.ts`，并把 `cloneProfileForDraft` 收进 `src/domain/profileModel.ts`。`App.tsx` 从 6794 行降到 6342 行；本阶段不改业务状态和 UI 结构。先写新增 helper 测试并确认红灯，再移动实现。阶段验证执行 `npm test`、`npm run build`、`cargo test --manifest-path src-tauri/Cargo.toml`、`git diff --check`：通过。当前前端测试 177 个，Rust 测试 42 个。
 - 阶段 2“拆 URL Library 与记录展示组件”完成：只从 `src/App.tsx` 搬出已经是独立函数组件的低耦合 UI，不做 UI 重设计、不新增功能、不改业务状态和用户可见行为。新增 `src/url-library/UrlLibraryView.tsx`、`src/url-library/UrlShortcutGroup.tsx`、`src/browser/operations/OperationList.tsx`、`src/browser/launch/LaunchEventList.tsx`，并新增对应组件边界测试 `src/url-library/UrlLibraryView.test.tsx`、`src/browser/operations/OperationList.test.tsx`、`src/browser/launch/LaunchEventList.test.tsx`。`App.tsx` 从 6342 行降到 5750 行；阶段 1 之后仍留在 `App.tsx` 末尾的 profile/import helper 本阶段不碰。阶段验证执行 `npm test -- --run src/url-library/UrlLibraryView.test.tsx src/browser/operations/OperationList.test.tsx src/browser/launch/LaunchEventList.test.tsx`、`npm test -- --run src/App.test.tsx -t "网址库|最近操作|当前操作|最近启动|批量打开"`、`npm test -- --run src/browserOperations.test.ts src/browserSessionLaunch.test.ts`、`npm test`、`npm run build`、`cargo test --manifest-path src-tauri/Cargo.toml`、`git diff --check`：通过。当前前端测试 182 个，Rust 测试 42 个。
 - 阶段 3“抽浏览器操作编排 hook”完成：只从 `src/App.tsx` 抽出浏览器 operation 状态和胶水函数，新增 `src/browser/operations/useBrowserOperations.ts` 与 `src/browser/operations/useBrowserOperations.test.tsx`。`browserOperations` 状态、operation ID 生成、upsert/裁剪、profile open/window action/bulk open/project open 生命周期、active operation 冲突提示、启动和窗口命令 120 秒超时包装均迁入 hook；`App.tsx` 改为调用 hook API。最近启动事件保存队列仍保留在 `App.tsx`，避免本轮扩大 sidecar 持久化风险。`App.tsx` 从 5750 行降到 5589 行；本阶段不做 UI 重设计、不新增 operation 能力、不改变用户可见行为。阶段验证执行 `npm test -- --run src/browser/operations/useBrowserOperations.test.tsx` 先红灯、再绿灯；`npm test -- --run src/browserOperations.test.ts src/browser/operations/useBrowserOperations.test.tsx`、`npm test -- --run src/App.test.tsx -t "批量打开|重试失败|项目打开|检查窗口|平铺窗口|同步布局|前置窗口|正在执行|超时"`、`npm test`、`npm run build`、`cargo test --manifest-path src-tauri/Cargo.toml`、`git diff --check`：通过。当前前端测试 186 个，Rust 测试 42 个。
@@ -274,7 +278,7 @@ V4.0 已完成窗口编排基础第一段：新增 `src/browserWindows.ts` 纯�
 - 代理、群控、指纹隔离、任务系统、密码安全存储、网页自动填入账号密码均未进入 MVP。
 - 软件内 AI 助手、实时窗口同步、群控均未进入当前 MVP。
 - 网址库暂不做 favicon、自动标题抓取、AI 扫描导入、账号绑定规则或网页自动填表；当前只是本地常用网址资料库和批量打开入口。
-- 窗口管理仍是进程级/手动操作能力：运行状态依赖 macOS `ps` 进程参数；“切换到账号”“检查窗口”“前置窗口”“平铺窗口”“同步布局”依赖 macOS Accessibility API，仍需要系统辅助功能权限。现在能读取并设置首个窗口位置/尺寸，窗口检查能显示首个窗口是否已最小化，平铺会跳过无可读窗口账号、尊重屏幕可用区域偏移，窗口过多时提示分批处理，多窗口账号会提示仅平铺首个窗口；V4.0 只有“平铺窗口”接入了窗口注册表和布局计划，布局同步仍是旧命令式流程；布局同步 V0 只复制主账号首窗的位置和大小到其它运行账号首窗，并会跳过最小化窗口；平铺和同步都已改为设置后读回坐标，未接近目标 bounds 会提示“未生效”，成功后会尝试批量前置相关窗口；权限类失败会提示辅助功能设置位置，但仍不能识别具体标签页，也不是鼠标键盘实时同步。
+- 窗口管理仍是进程级/手动操作能力：运行状态依赖 macOS `ps` 进程参数；“切换到账号”“检查窗口”“前置窗口”“平铺窗口”“同步布局”依赖 macOS Accessibility API，仍需要系统辅助功能权限。现在能读取并设置首个窗口位置/尺寸，窗口检查能显示首个窗口是否已最小化；平铺和同步布局都已接入窗口注册表，平铺会跳过无可读窗口账号、尊重屏幕可用区域偏移，窗口过多时提示分批处理，多窗口账号会提示仅平铺首个窗口；布局同步只复制主账号首窗的位置和大小到其它运行账号首窗，并会跳过最小化或读取失败目标；平铺和同步都已改为设置后读回坐标，未接近目标 bounds 会提示“未生效”，成功后会尝试批量前置相关窗口；权限类失败会提示辅助功能设置位置，但仍不能识别具体标签页，也不是鼠标键盘实时同步。
 - 完整 profile 备份当前是整目录复制，不做增量、压缩、加密或云同步；大 profile 目录备份会占用较多磁盘空间。
 - 批量删除文件夹不是事务型操作：如果删除多个 profile 文件夹时中途失败，已经删除成功的文件夹不会自动还原；账号索引会保留，后续可通过健康检查发现缺失目录。
 
@@ -288,8 +292,7 @@ V4.0 已完成窗口编排基础第一段：新增 `src/browserWindows.ts` 纯�
 
 ## 下一步
 
-- 下一步优先做 V4.1：把“同步布局”也接入窗口注册表，进一步收敛“主窗口/目标窗口/跳过原因/最小化保护/读取失败”的纯模型和测试。
-- V4.2 再做轻量布局预设模型，先只做纯模型和现有按钮可消费的最小接线，不做复杂预设管理 UI。
+- 下一步优先做 V4.2：轻量布局预设模型，先只做纯模型和现有按钮可消费的最小接线，不做复杂预设管理 UI。
 - V4.3 标准化检查、平铺、同步布局的 operation summary，让当前/最近操作面板以后能展示更具体的成功、跳过和失败数量。
 - V4.4 再考虑轻量窗口面板，只显示选中账号窗口注册表状态，不做实时控制台。
 - V5 从同步控制器基础开始：先做 `sync-bounds`、dry-run 预览和结果详情；鼠标、键盘、滚动、标签页这类交互同步只作为技术预研，不能直接进入 MVP 主流程。

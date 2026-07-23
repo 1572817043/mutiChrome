@@ -3,6 +3,15 @@ import type { ChromeWindowInfo, WindowBounds } from "./api";
 export type BrowserWindowRegistryStatus = "ready" | "missing" | "error";
 export type WindowLayoutPreset = "grid";
 export type WindowLayoutSkipReason = "missing-window" | "window-error";
+export type WindowSyncSkipReason =
+  | "missing-window"
+  | "minimized-window"
+  | "window-error";
+export type WindowSyncSourceStatus =
+  | "ready"
+  | "missing-window"
+  | "minimized-window"
+  | "window-error";
 
 export interface BrowserWindowRegistryInput {
   profileId: string;
@@ -55,6 +64,25 @@ export interface WindowLayoutPlan {
   placements: WindowLayoutPlacement[];
   skipped: WindowLayoutSkippedEntry[];
   multiWindowProfileCount: number;
+}
+
+export interface WindowSyncSkippedEntry {
+  profileId: string;
+  profileName: string;
+  reason: WindowSyncSkipReason;
+}
+
+export interface WindowSyncPlan {
+  sourceProfileId: string;
+  sourceProfileName: string;
+  sourceStatus: WindowSyncSourceStatus;
+  sourceBounds: WindowBounds | null;
+  sourceWindowError: string | null;
+  placements: WindowLayoutPlacement[];
+  skipped: WindowSyncSkippedEntry[];
+  noWindowCount: number;
+  minimizedCount: number;
+  failedCount: number;
 }
 
 const DEFAULT_MIN_WINDOW_WIDTH = 320;
@@ -136,6 +164,69 @@ export function buildGridWindowLayoutPlan(
   };
 }
 
+export function buildWindowLayoutSyncPlan(
+  registry: BrowserWindowRegistryEntry[],
+  sourceProfileId: string
+): WindowSyncPlan {
+  const sourceEntry = registry.find((entry) => entry.profileId === sourceProfileId);
+  const sourceProfileName = sourceEntry?.profileName ?? sourceProfileId;
+  const sourceStatus = sourceEntry
+    ? syncStatusForRegistryEntry(sourceEntry)
+    : "missing-window";
+  const sourceBounds =
+    sourceStatus === "ready" && sourceEntry?.primaryWindow
+      ? boundsFromWindow(sourceEntry.primaryWindow)
+      : null;
+  const targetEntries = registry.filter((entry) => entry.profileId !== sourceProfileId);
+  const skipped: WindowSyncSkippedEntry[] = [];
+  const placements: WindowLayoutPlacement[] = [];
+  let noWindowCount = 0;
+  let minimizedCount = 0;
+  let failedCount = 0;
+
+  for (const entry of targetEntries) {
+    const targetStatus = syncStatusForRegistryEntry(entry);
+    if (targetStatus === "missing-window") {
+      noWindowCount += 1;
+      skipped.push(syncSkippedEntry(entry, "missing-window"));
+      continue;
+    }
+
+    if (targetStatus === "minimized-window") {
+      minimizedCount += 1;
+      skipped.push(syncSkippedEntry(entry, "minimized-window"));
+      continue;
+    }
+
+    if (targetStatus === "window-error") {
+      failedCount += 1;
+      skipped.push(syncSkippedEntry(entry, "window-error"));
+      continue;
+    }
+
+    if (sourceBounds) {
+      placements.push({
+        profileId: entry.profileId,
+        profileName: entry.profileName,
+        bounds: sourceBounds
+      });
+    }
+  }
+
+  return {
+    sourceProfileId,
+    sourceProfileName,
+    sourceStatus,
+    sourceBounds,
+    sourceWindowError: sourceEntry?.windowError ?? null,
+    placements: sourceStatus === "ready" ? placements : [],
+    skipped,
+    noWindowCount,
+    minimizedCount,
+    failedCount
+  };
+}
+
 export function maxTileableWindowCount(
   screenWidth: number,
   screenHeight: number,
@@ -185,4 +276,42 @@ export function windowMatchesBounds(
     Math.abs(windowInfo.width - bounds.width) <= WINDOW_BOUNDS_TOLERANCE &&
     Math.abs(windowInfo.height - bounds.height) <= WINDOW_BOUNDS_TOLERANCE
   );
+}
+
+function syncStatusForRegistryEntry(
+  entry: BrowserWindowRegistryEntry
+): WindowSyncSourceStatus {
+  if (entry.status === "error") {
+    return "window-error";
+  }
+
+  if (!entry.primaryWindow) {
+    return "missing-window";
+  }
+
+  if (entry.minimized) {
+    return "minimized-window";
+  }
+
+  return "ready";
+}
+
+function boundsFromWindow(windowInfo: ChromeWindowInfo): WindowBounds {
+  return {
+    x: windowInfo.x,
+    y: windowInfo.y,
+    width: windowInfo.width,
+    height: windowInfo.height
+  };
+}
+
+function syncSkippedEntry(
+  entry: BrowserWindowRegistryEntry,
+  reason: WindowSyncSkipReason
+): WindowSyncSkippedEntry {
+  return {
+    profileId: entry.profileId,
+    profileName: entry.profileName,
+    reason
+  };
 }

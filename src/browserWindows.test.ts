@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import type { ChromeWindowInfo } from "./api";
 import {
+  buildWindowLayoutSyncPlan,
   buildGridWindowLayoutPlan,
   buildPrimaryWindowRegistry,
   maxTileableWindowCount,
@@ -166,5 +167,137 @@ describe("browserWindows", () => {
         height: 800
       })
     ).toBe(true);
+  });
+
+  test("同步布局计划使用主账号首窗边界并排除主账号 placement", () => {
+    const registry = buildPrimaryWindowRegistry([
+      {
+        profileId: "account-001",
+        profileName: "主号",
+        windows: [
+          chromeWindow({
+            title: "主窗口",
+            x: 80,
+            y: 120,
+            width: 960,
+            height: 720
+          })
+        ]
+      },
+      {
+        profileId: "account-002",
+        profileName: "抽奖号",
+        windows: [chromeWindow({ title: "目标窗口" })]
+      }
+    ]);
+
+    const plan = buildWindowLayoutSyncPlan(registry, "account-001");
+
+    expect(plan).toEqual({
+      sourceProfileId: "account-001",
+      sourceProfileName: "主号",
+      sourceStatus: "ready",
+      sourceBounds: { x: 80, y: 120, width: 960, height: 720 },
+      sourceWindowError: null,
+      placements: [
+        {
+          profileId: "account-002",
+          profileName: "抽奖号",
+          bounds: { x: 80, y: 120, width: 960, height: 720 }
+        }
+      ],
+      skipped: [],
+      noWindowCount: 0,
+      minimizedCount: 0,
+      failedCount: 0
+    });
+  });
+
+  test("同步布局计划只统计目标账号的缺失、最小化和读取失败", () => {
+    const registry = buildPrimaryWindowRegistry([
+      {
+        profileId: "account-001",
+        profileName: "主号",
+        windows: [chromeWindow({ minimized: true })]
+      },
+      {
+        profileId: "account-002",
+        profileName: "无窗口号",
+        windows: []
+      },
+      {
+        profileId: "account-003",
+        profileName: "最小化号",
+        windows: [chromeWindow({ minimized: true })]
+      },
+      {
+        profileId: "account-004",
+        profileName: "权限失败号",
+        windows: [],
+        windowError: "辅助功能权限不足"
+      }
+    ]);
+
+    const plan = buildWindowLayoutSyncPlan(registry, "account-001");
+
+    expect(plan).toMatchObject({
+      sourceProfileId: "account-001",
+      sourceProfileName: "主号",
+      sourceStatus: "minimized-window",
+      sourceBounds: null,
+      sourceWindowError: null,
+      placements: [],
+      skipped: [
+        {
+          profileId: "account-002",
+          profileName: "无窗口号",
+          reason: "missing-window"
+        },
+        {
+          profileId: "account-003",
+          profileName: "最小化号",
+          reason: "minimized-window"
+        },
+        {
+          profileId: "account-004",
+          profileName: "权限失败号",
+          reason: "window-error"
+        }
+      ],
+      noWindowCount: 1,
+      minimizedCount: 1,
+      failedCount: 1
+    });
+  });
+
+  test("同步布局计划保留主账号窗口读取失败信息", () => {
+    const registry = buildPrimaryWindowRegistry([
+      {
+        profileId: "account-001",
+        profileName: "主号",
+        windows: [],
+        windowError: "读取主窗口失败"
+      },
+      {
+        profileId: "account-002",
+        profileName: "抽奖号",
+        windows: [chromeWindow()]
+      }
+    ]);
+
+    const plan = buildWindowLayoutSyncPlan(registry, "account-001");
+
+    expect(plan).toMatchObject({
+      sourceProfileId: "account-001",
+      sourceProfileName: "主号",
+      sourceStatus: "window-error",
+      sourceBounds: null,
+      sourceWindowError: "读取主窗口失败",
+      placements: [],
+      skipped: [],
+      noWindowCount: 0,
+      minimizedCount: 0,
+      failedCount: 0
+    });
   });
 });
