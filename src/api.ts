@@ -1,4 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
+import {
+  normalizeBrowserLaunchEvents,
+  type BrowserLaunchEvent
+} from "./browserSessionLaunch";
 import type {
   AccountPlatform,
   AirdropProject,
@@ -46,9 +50,23 @@ export interface WindowBounds {
   height: number;
 }
 
+export type BrowserSessionStatus = "starting" | "running" | "stopped";
+
+export interface BrowserSessionSnapshot {
+  profileId: string;
+  status: BrowserSessionStatus;
+  running: boolean;
+  pid: number | null;
+  windowCount: number | null;
+  windows: ChromeWindowInfo[];
+  windowError: string | null;
+  checkedAt: number;
+}
+
 const ROOT_KEY = "multichrome.rootPath";
 const DOCUMENT_KEY = "multichrome.profileDocument";
 const BACKUP_PREFIX = "multichrome.profileBackup.";
+const LAUNCH_EVENTS_PREFIX = "multichrome.browserLaunchEvents.";
 export const DEFAULT_BROWSER_PATH = "/Applications/Google Chrome.app";
 
 function isTauriRuntime(): boolean {
@@ -275,6 +293,44 @@ export const profileApi = {
     localStorage.setItem(DOCUMENT_KEY, JSON.stringify(document));
   },
 
+  async loadBrowserLaunchEvents(rootPath: string): Promise<BrowserLaunchEvent[]> {
+    if (isTauriRuntime()) {
+      const events = await invoke<BrowserLaunchEvent[]>("load_browser_launch_events", {
+        rootPath
+      });
+      return normalizeBrowserLaunchEvents(events);
+    }
+
+    const raw = localStorage.getItem(launchEventsStorageKey(rootPath));
+    if (!raw) {
+      return [];
+    }
+
+    try {
+      return normalizeBrowserLaunchEvents(JSON.parse(raw));
+    } catch {
+      return [];
+    }
+  },
+
+  async saveBrowserLaunchEvents(
+    rootPath: string,
+    events: BrowserLaunchEvent[]
+  ): Promise<void> {
+    const normalizedEvents = normalizeBrowserLaunchEvents(events);
+    if (isTauriRuntime()) {
+      return invoke<void>("save_browser_launch_events", {
+        rootPath,
+        events: normalizedEvents
+      });
+    }
+
+    localStorage.setItem(
+      launchEventsStorageKey(rootPath),
+      JSON.stringify(normalizedEvents)
+    );
+  },
+
   async detectChrome(browserPath?: string): Promise<ChromeStatus> {
     if (isTauriRuntime()) {
       return invoke<ChromeStatus>("detect_chrome", { browserPath });
@@ -319,6 +375,34 @@ export const profileApi = {
     }
 
     return [];
+  },
+
+  async snapshotBrowserSessions(
+    rootPath: string,
+    profileIds: string[],
+    includeWindows = false
+  ): Promise<BrowserSessionSnapshot[]> {
+    if (isTauriRuntime()) {
+      return invoke<BrowserSessionSnapshot[]>("snapshot_browser_sessions", {
+        rootPath,
+        profileIds,
+        includeWindows
+      });
+    }
+
+    const runningIds = await profileApi.listRunningProfiles(rootPath);
+    const runningIdSet = new Set(runningIds);
+    const checkedAt = Date.now();
+    return profileIds.map((profileId) => ({
+      profileId,
+      status: runningIdSet.has(profileId) ? "running" : "stopped",
+      running: runningIdSet.has(profileId),
+      pid: null,
+      windowCount: runningIdSet.has(profileId) ? null : 0,
+      windows: [],
+      windowError: null,
+      checkedAt
+    }));
   },
 
   async focusProfileWindow(rootPath: string, profileId: string): Promise<void> {
@@ -420,6 +504,10 @@ export const profileApi = {
     return path;
   }
 };
+
+function launchEventsStorageKey(rootPath: string): string {
+  return `${LAUNCH_EVENTS_PREFIX}${rootPath}`;
+}
 
 function loadBrowserDocument(): ProfileDocument {
   const raw = localStorage.getItem(DOCUMENT_KEY);

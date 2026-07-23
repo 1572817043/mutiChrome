@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -272,11 +273,26 @@ pub struct ProfileMarker {
     pub imported_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserLaunchEvent {
+    pub profile_id: String,
+    pub profile_name: String,
+    pub source_label: String,
+    pub url: String,
+    pub ok: bool,
+    pub message: String,
+    pub finished_at: u64,
+}
+
 #[derive(Clone)]
 struct DuplicateProfileMeta {
     id: String,
     name: String,
 }
+
+const MAX_BROWSER_LAUNCH_EVENTS: usize = 30;
+static ATOMIC_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub fn init_root(root: &Path) -> Result<RootStatus, String> {
     fs::create_dir_all(root.join("app-data")).map_err(|error| error.to_string())?;
@@ -1100,6 +1116,43 @@ pub fn save_profile_document(root: &Path, document: &ProfileDocument) -> Result<
     fs::write(document_path(root), format!("{json}\n")).map_err(|error| error.to_string())
 }
 
+pub fn load_browser_launch_events(root: &Path) -> Result<Vec<BrowserLaunchEvent>, String> {
+    let path = browser_launch_events_path(root);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let raw = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let Ok(raw_events) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Ok(Vec::new());
+    };
+    let serde_json::Value::Array(raw_events) = raw_events else {
+        return Ok(Vec::new());
+    };
+    let events = raw_events
+        .into_iter()
+        .filter_map(|event| serde_json::from_value::<BrowserLaunchEvent>(event).ok())
+        .collect::<Vec<_>>();
+    Ok(normalize_browser_launch_events(events))
+}
+
+pub fn save_browser_launch_events(
+    root: &Path,
+    events: &[BrowserLaunchEvent],
+) -> Result<(), String> {
+    fs::create_dir_all(root.join("app-data")).map_err(|error| error.to_string())?;
+    let events = normalize_browser_launch_events(events.to_vec());
+    let json = serde_json::to_string_pretty(&events).map_err(|error| error.to_string())?;
+    write_text_file_atomically(&browser_launch_events_path(root), &format!("{json}\n"))
+}
+
+fn normalize_browser_launch_events(mut events: Vec<BrowserLaunchEvent>) -> Vec<BrowserLaunchEvent> {
+    events.retain(|event| !event.profile_id.trim().is_empty() && event.finished_at > 0);
+    events.sort_by(|left, right| right.finished_at.cmp(&left.finished_at));
+    events.truncate(MAX_BROWSER_LAUNCH_EVENTS);
+    events
+}
+
 pub fn ensure_profile_dir(root: &Path, profile_id: &str) -> Result<PathBuf, String> {
     let path = safe_profile_dir(root, profile_id)?;
     fs::create_dir_all(&path).map_err(|error| error.to_string())?;
@@ -1217,6 +1270,51 @@ fn read_document(path: &Path) -> Result<ProfileDocument, String> {
 
 fn document_path(root: &Path) -> std::path::PathBuf {
     root.join("app-data/profiles.json")
+}
+
+fn browser_launch_events_path(root: &Path) -> std::path::PathBuf {
+    root.join("app-data/launch-events.json")
+}
+
+fn write_text_file_atomically(path: &Path, contents: &str) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "无法定位目标文件夹".to_string())?;
+    let file_name = path
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "无法定位目标文件名".to_string())?;
+    let temp_path = atomic_write_temp_path(
+        parent,
+        &file_name,
+        timestamp_millis(),
+        ATOMIC_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed),
+    );
+
+    if let Err(error) = fs::write(&temp_path, contents) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error.to_string());
+    }
+
+    if let Err(error) = fs::rename(&temp_path, path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error.to_string());
+    }
+
+    Ok(())
+}
+
+fn atomic_write_temp_path(
+    parent: &Path,
+    file_name: &str,
+    timestamp: u128,
+    unique_id: u64,
+) -> PathBuf {
+    parent.join(format!(
+        ".{file_name}.tmp-{}-{timestamp}-{unique_id}",
+        std::process::id()
+    ))
 }
 
 fn timestamp_millis() -> u128 {
@@ -1503,6 +1601,98 @@ mod tests {
         save_profile_document(temp_dir.path(), &document).expect("save document");
 
         assert!(temp_dir.path().join("profiles/account-002").is_dir());
+    }
+
+    #[test]
+    fn atomic_write_temp_paths_are_unique_for_same_timestamp() {
+        let first = atomic_write_temp_path(Path::new("/tmp"), "launch-events.json", 10, 1);
+        let second = atomic_write_temp_path(Path::new("/tmp"), "launch-events.json", 10, 2);
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn save_and_load_browser_launch_events_round_trips_and_limits() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        init_root(temp_dir.path()).expect("init root");
+        let events = (0..32)
+            .map(|index| BrowserLaunchEvent {
+                profile_id: format!("account-{index:03}"),
+                profile_name: format!("账号 {index}"),
+                source_label: "批量打开".to_string(),
+                url: "https://galxe.com".to_string(),
+                ok: true,
+                message: "已启动".to_string(),
+                finished_at: index,
+            })
+            .collect::<Vec<_>>();
+
+        save_browser_launch_events(temp_dir.path(), &events).expect("save launch events");
+        let loaded = load_browser_launch_events(temp_dir.path()).expect("load launch events");
+        let raw = fs::read_to_string(temp_dir.path().join("app-data/launch-events.json"))
+            .expect("read launch events");
+
+        assert!(temp_dir
+            .path()
+            .join("app-data/launch-events.json")
+            .is_file());
+        assert!(raw.contains("\"profileId\""));
+        assert!(raw.contains("\"finishedAt\""));
+        assert!(!raw.contains("profile_id"));
+        assert_eq!(loaded.len(), 30);
+        assert_eq!(loaded[0].finished_at, 31);
+        assert_eq!(loaded[29].finished_at, 2);
+    }
+
+    #[test]
+    fn load_browser_launch_events_ignores_corrupt_sidecar() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        init_root(temp_dir.path()).expect("init root");
+        fs::write(
+            temp_dir.path().join("app-data/launch-events.json"),
+            b"{broken",
+        )
+        .expect("write corrupt launch events");
+
+        let loaded = load_browser_launch_events(temp_dir.path()).expect("load launch events");
+
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn load_browser_launch_events_skips_invalid_items() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        init_root(temp_dir.path()).expect("init root");
+        fs::write(
+            temp_dir.path().join("app-data/launch-events.json"),
+            r#"[
+              {
+                "profileId": "account-001",
+                "profileName": "账号 1",
+                "sourceLabel": "批量打开",
+                "url": "https://galxe.com",
+                "ok": true,
+                "message": "已启动",
+                "finishedAt": 2000
+              },
+              { "profileId": "account-002", "finishedAt": "bad" },
+              {
+                "profileId": " ",
+                "profileName": "空账号",
+                "sourceLabel": "批量打开",
+                "url": "https://galxe.com",
+                "ok": true,
+                "message": "已启动",
+                "finishedAt": 3000
+              }
+            ]"#,
+        )
+        .expect("write launch events");
+
+        let loaded = load_browser_launch_events(temp_dir.path()).expect("load launch events");
+
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].profile_id, "account-001");
     }
 
     #[test]

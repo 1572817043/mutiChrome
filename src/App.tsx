@@ -1,52 +1,118 @@
 import {
-  ArrowDown,
-  ArrowUp,
   Chrome,
-  Copy,
   Download,
-  ExternalLink,
   FolderKanban,
   FolderOpen,
   LayoutGrid,
   List,
-  Moon,
-  Pencil,
-  Play,
   Plus,
   Search,
   Settings,
-  ShieldCheck,
-  Sun,
   Tags,
-  Trash2,
-  Upload,
-  UserPlus,
-  Wrench,
-  X
+  UserPlus
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   DEFAULT_BROWSER_PATH,
   formatBytes,
   normalizeSettings,
   profileApi,
   profilePath,
-  type ChromeWindowInfo,
+  type BrowserSessionSnapshot,
+  type BrowserSessionStatus,
   type ChromeStatus,
   type RootStatus,
   type WindowBounds
 } from "./api";
 import {
-  createAccountPlatform,
+  parseBatchProfileLines,
+  type BatchProfileDraft
+} from "./domain/batchProfileParser";
+import { BatchDeleteConfirmDialog } from "./bulk-actions/BatchDeleteConfirmDialog";
+import { BulkActionBar } from "./bulk-actions/BulkActionBar";
+import {
+  cloneProjectForDraft,
+  createProject,
+  duplicateProject,
+  projectOpenUrls,
+  updateProject
+} from "./domain/projectModel";
+import {
+  appendBrowserLaunchEvents,
+  browserLaunchEventFromResult,
+  browserLaunchFailed,
+  browserLaunchSucceeded,
+  formatBulkLaunchQueueMessage,
+  formatProjectLaunchQueueMessage,
+  selectRetryableBrowserLaunchProfileIds,
+  shouldMarkStartingAfterLaunch,
+  summarizeBrowserLaunchQueue,
+  type BrowserLaunchEvent,
+  type BrowserLaunchResult
+} from "./browserSessionLaunch";
+import type { BrowserOperation } from "./browserOperations";
+import { useBrowserOperations } from "./browser/operations/useBrowserOperations";
+import { isSessionRunning, profileSessionStatus } from "./browserSessions";
+import {
+  buildGridWindowLayoutPlan,
+  buildPrimaryWindowRegistry,
+  windowMatchesBounds,
+  type BrowserWindowRegistryInput
+} from "./browserWindows";
+import {
+  cloneProfileForDraft,
   createProfile,
   defaultAccentColor,
   duplicateProfile,
-  PROFILE_ACCENT_COLORS,
-  removeAccountPlatform,
   removeProfile,
-  updateAccountPlatform,
   updateProfile
 } from "./domain/profileModel";
+import { BatchCreateProfilesDialog } from "./profiles/BatchCreateProfilesDialog";
+import {
+  DeleteConfirmDialog,
+  type DeleteMode
+} from "./profiles/DeleteConfirmDialog";
+import { EditProfileDialog } from "./profiles/EditProfileDialog";
+import { ProfileCard, type CardDensity } from "./profiles/ProfileCard";
+import { FullRestoreConfirmDialog } from "./data-safety/FullRestoreConfirmDialog";
+import { EditProjectDialog } from "./projects/EditProjectDialog";
+import { ProjectsView } from "./projects/ProjectsView";
+import {
+  SettingsDialog,
+  type FullBackupScope,
+  type FullBackupWorking
+} from "./settings/SettingsDialog";
+import {
+  createUrlLibraryDraft,
+  createUrlLibraryItem,
+  parseUrlTags,
+  type UrlLibraryDraft
+} from "./domain/urlLibraryModel";
+import {
+  DEFAULT_BULK_OPEN_INTERVAL_SECONDS,
+  formatWindowInspectionSummary,
+  normalizeBulkOpenIntervalSeconds
+} from "./shared/formatHelpers";
+import {
+  availableScreenHeight,
+  availableScreenLeft,
+  availableScreenTop,
+  availableScreenWidth
+} from "./shared/screenWorkArea";
+import {
+  DEFAULT_PROFILE_LAUNCH_URL,
+  displayUrlLabel,
+  normalizeLaunchUrl
+} from "./shared/urlHelpers";
+import {
+  errorMessage,
+  windowAutomationErrorMessage
+} from "./shared/windowAutomationErrors";
+import {
+  UrlLibraryDeleteConfirmDialog,
+  UrlLibraryEditDialog,
+  UrlLibraryView
+} from "./url-library/UrlLibraryView";
 import type {
   AccountPlatform,
   AirdropProject,
@@ -56,59 +122,26 @@ import type {
   FullProfileBackupResult,
   FullProfileRestorePreview,
   ProfileBackupResult,
-  ProfileAccentColor,
-  ProjectUrl,
   ProfileImportCandidate,
+  ProjectUrl,
   ProfileMarker,
   ProfileSettings,
   RootHealthReport,
   RootRepairResult,
   UrlLibraryItem
 } from "./types";
+import { useBrowserSessions } from "./useBrowserSessions";
 
-type DeleteMode = "record" | "data";
-type CardDensity = "standard" | "compact";
 type ActiveView = "accounts" | "projects" | "url-library";
-type FullBackupScope = "all" | "selected";
-type FullBackupWorking = "preview" | "create" | "restore-preview" | "restore";
-type UrlLibraryDraft = Pick<UrlLibraryItem, "name" | "url" | "notes"> & {
-  tags: string;
-};
+interface BulkLaunchRetryState {
+  profileIds: string[];
+  url: string;
+}
 
-const DEFAULT_PROFILE_LAUNCH_URL = "chrome://newtab/";
-const DEFAULT_BULK_OPEN_INTERVAL_SECONDS = "3";
-const MIN_TILED_WINDOW_WIDTH = 320;
-const MIN_TILED_WINDOW_HEIGHT = 240;
-const WINDOW_BOUNDS_TOLERANCE = 8;
 const RUNNING_STATUS_POLL_MS = 5000;
-
-const ACCENT_DETAILS: Record<ProfileAccentColor, { label: string; hex: string }> = {
-  forest: { label: "松绿", hex: "#1f7048" },
-  teal: { label: "青绿", hex: "#279a8d" },
-  blue: { label: "深蓝", hex: "#2f7ec8" },
-  sage: { label: "灰绿", hex: "#6b7c73" },
-  violet: { label: "紫藤", hex: "#7f66ad" },
-  clay: { label: "陶土", hex: "#a15f4a" },
-  amber: { label: "琥珀", hex: "#b7791f" },
-  rose: { label: "玫瑰", hex: "#b64f65" },
-  cyan: { label: "青蓝", hex: "#16859b" },
-  indigo: { label: "靛蓝", hex: "#4f67b0" },
-  olive: { label: "橄榄", hex: "#6f7b2f" },
-  slate: { label: "石板", hex: "#53616f" }
-};
-
-const ACCOUNT_PLATFORM_TEMPLATES: Array<{
-  label: string;
-  platform: string;
-  loginUrl: string;
-}> = [
-  { label: "X", platform: "X", loginUrl: "https://x.com/i/flow/login" },
-  { label: "Discord", platform: "Discord", loginUrl: "https://discord.com/login" },
-  { label: "Telegram", platform: "Telegram", loginUrl: "https://web.telegram.org/" },
-  { label: "Gmail", platform: "Gmail", loginUrl: "https://accounts.google.com/" },
-  { label: "Galxe", platform: "Galxe", loginUrl: "https://galxe.com" },
-  { label: "Zealy", platform: "Zealy", loginUrl: "https://zealy.io" }
-];
+const LAUNCH_CONFIRMATION_DELAY_MS = 2000;
+const MAX_BROWSER_OPERATIONS = 20;
+const BROWSER_COMMAND_TIMEOUT_MS = 120_000;
 
 interface PendingDelete {
   profile: ChromeProfile;
@@ -150,7 +183,6 @@ function App() {
   const [pendingUrlDeleteId, setPendingUrlDeleteId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [profileSizes, setProfileSizes] = useState<Record<string, number | null>>({});
-  const [runningProfileIds, setRunningProfileIds] = useState<string[]>([]);
   const [importPath, setImportPath] = useState("");
   const [importCandidates, setImportCandidates] = useState<ProfileImportCandidate[]>([]);
   const [selectedImportPaths, setSelectedImportPaths] = useState<string[]>([]);
@@ -169,9 +201,15 @@ function App() {
     DEFAULT_BULK_OPEN_INTERVAL_SECONDS
   );
   const [bulkOpenRunning, setBulkOpenRunning] = useState(false);
+  const [lastBulkLaunchRetry, setLastBulkLaunchRetry] =
+    useState<BulkLaunchRetryState | null>(null);
+  const [launchEvents, setLaunchEvents] = useState<BrowserLaunchEvent[]>([]);
+  const launchEventsRef = useRef<BrowserLaunchEvent[]>([]);
+  const launchEventsSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const [windowInspecting, setWindowInspecting] = useState(false);
   const [windowTiling, setWindowTiling] = useState(false);
   const [windowSyncing, setWindowSyncing] = useState(false);
+  const [windowFocusing, setWindowFocusing] = useState(false);
   const [layoutSourceProfileId, setLayoutSourceProfileId] = useState("");
   const [openingProjectId, setOpeningProjectId] = useState<string | null>(null);
   const [healthReport, setHealthReport] = useState<RootHealthReport | null>(null);
@@ -198,6 +236,40 @@ function App() {
   const bulkOpenCancelledRef = useRef(false);
   const projectOpenCancelledRef = useRef(false);
   const bulkOpenDelayResolveRef = useRef<(() => void) | null>(null);
+  const {
+    sessionsById: browserSessionsById,
+    runningProfileIds,
+    applySnapshots: applyBrowserSessionSnapshots,
+    clearSnapshots: clearBrowserSessionSnapshots,
+    nextRequestId: nextBrowserSessionRequestId,
+    isLatestRequest: isLatestBrowserSessionRequest,
+    markStarting: markBrowserSessionStarting,
+    clearLaunchConfirmationRefresh,
+    scheduleLaunchConfirmationRefresh
+  } = useBrowserSessions({
+    launchConfirmationDelayMs: LAUNCH_CONFIRMATION_DELAY_MS
+  });
+  const {
+    browserOperations,
+    startWindowOperation,
+    finishWindowOperation,
+    startProfileOpenOperation,
+    finishProfileOpenOperation,
+    failProfileOpenOperation,
+    startBulkOpenUrlOperation,
+    startProjectOpenOperation,
+    finishLaunchQueueOperation,
+    runBrowserCommandWithTimeout,
+    listProfileWindowsWithTimeout,
+    focusProfileWindowWithTimeout,
+    setProfileWindowBoundsWithTimeout,
+    canStartBrowserOperationForProfiles
+  } = useBrowserOperations({
+    rootPath,
+    maxOperations: MAX_BROWSER_OPERATIONS,
+    commandTimeoutMs: BROWSER_COMMAND_TIMEOUT_MS,
+    onMessage: setMessage
+  });
 
   const editingProfile =
     profiles.find((profile) => profile.id === editingId) ?? null;
@@ -220,11 +292,13 @@ function App() {
     });
   }, [profiles, query]);
 
-  const totalProfiles = profiles.length;
   const selectedProfiles = useMemo(
     () => profiles.filter((profile) => selectedIds.includes(profile.id)),
     [profiles, selectedIds]
   );
+  const profileIds = useMemo(() => profiles.map((profile) => profile.id), [profiles]);
+  const totalProfiles = profiles.length;
+  const hasSelectedProfiles = selectedProfiles.length > 0;
   const runningSelectedProfiles = useMemo(
     () => selectedProfiles.filter((profile) => runningProfileIds.includes(profile.id)),
     [runningProfileIds, selectedProfiles]
@@ -283,17 +357,14 @@ function App() {
         return;
       }
       refreshInFlight = true;
+      const requestId = nextBrowserSessionRequestId();
       try {
-        const runningIds = await profileApi.listRunningProfiles(rootPath);
-        if (!cancelled) {
-          setRunningProfileIds((current) =>
-            sameStringList(current, runningIds) ? current : runningIds
-          );
+        const snapshots = await profileApi.snapshotBrowserSessions(rootPath, profileIds, false);
+        if (!cancelled && isLatestBrowserSessionRequest(requestId)) {
+          applyBrowserSessionSnapshots(snapshots);
         }
       } catch {
-        if (!cancelled) {
-          setRunningProfileIds([]);
-        }
+        // 轻量轮询失败时保留上一次状态，下一轮成功后再纠偏。
       } finally {
         refreshInFlight = false;
       }
@@ -315,7 +386,7 @@ function App() {
       window.removeEventListener("focus", refreshWhenVisible);
       document.removeEventListener("visibilitychange", refreshWhenVisible);
     };
-  }, [activeView, rootPath]);
+  }, [activeView, profileIds, rootPath]);
 
   useEffect(() => {
     if (!editingProfile || !rootPath) {
@@ -388,6 +459,7 @@ function App() {
 
   async function loadRoot(path: string) {
     setMessage("正在检查配置根目录...");
+    clearLaunchConfirmationRefresh();
     setHealthReport(null);
     setRepairResult(null);
     setBackupResult(null);
@@ -396,6 +468,7 @@ function App() {
     const status = await profileApi.initProfileRoot(path);
     const document = await profileApi.loadProfiles(path);
     const loadedSettings = normalizeSettings(document.settings);
+    const loadedLaunchEvents = await loadBrowserLaunchEvents(path);
     const chrome = await profileApi.detectChrome(loadedSettings.browserPath);
     setRootStatus(status);
     setSettings(loadedSettings);
@@ -404,7 +477,9 @@ function App() {
     setChromeStatus(chrome);
     setProfiles(document.profiles);
     setProjects(document.projects);
-    await refreshRunningProfiles(path);
+    launchEventsRef.current = loadedLaunchEvents;
+    setLaunchEvents(loadedLaunchEvents);
+    await refreshRunningProfiles(path, document.profiles);
     setEditingId(null);
     setEditingProfileDraft(null);
     setEditingProjectId(null);
@@ -425,10 +500,13 @@ function App() {
     setSelectedIds([]);
     setBulkTag("");
     setBulkUrl("");
+    setLastBulkLaunchRetry(null);
     setProjectQuery("");
     setBulkOpenRunning(false);
     setWindowInspecting(false);
     setWindowTiling(false);
+    setWindowSyncing(false);
+    setWindowFocusing(false);
     setOpeningProjectId(null);
     bulkOpenCancelledRef.current = false;
     projectOpenCancelledRef.current = false;
@@ -443,17 +521,53 @@ function App() {
     setMessage(status.writable ? "根目录正常" : "根目录不可写");
   }
 
-  async function refreshRunningProfiles(path = rootPath) {
+  async function loadBrowserLaunchEvents(path: string): Promise<BrowserLaunchEvent[]> {
+    try {
+      return await profileApi.loadBrowserLaunchEvents(path);
+    } catch {
+      return [];
+    }
+  }
+
+  async function refreshRunningProfiles(
+    path = rootPath,
+    sourceProfiles = profiles,
+    options: { clearOnFailure?: boolean } = {}
+  ): Promise<BrowserSessionSnapshot[]> {
     if (!path) {
-      setRunningProfileIds([]);
-      return;
+      if (options.clearOnFailure !== false) {
+        clearBrowserSessionSnapshots();
+      }
+      return [];
     }
 
+    const requestId = nextBrowserSessionRequestId();
     try {
-      setRunningProfileIds(await profileApi.listRunningProfiles(path));
+      const snapshots = await profileApi.snapshotBrowserSessions(
+        path,
+        sourceProfiles.map((profile) => profile.id),
+        false
+      );
+      if (isLatestBrowserSessionRequest(requestId)) {
+        applyBrowserSessionSnapshots(snapshots);
+      }
+      return snapshots;
     } catch {
-      setRunningProfileIds([]);
+      if (isLatestBrowserSessionRequest(requestId) && options.clearOnFailure !== false) {
+        clearBrowserSessionSnapshots();
+      }
+      return [];
     }
+  }
+
+  async function refreshSelectedRunningProfiles() {
+    const snapshots = await refreshRunningProfiles(rootPath, profiles);
+    const runningIds = new Set(
+      snapshots
+        .filter(isSessionRunning)
+        .map((snapshot) => snapshot.profileId)
+    );
+    return selectedProfiles.filter((profile) => runningIds.has(profile.id));
   }
 
   function updateRootPathDraft(value: string) {
@@ -631,43 +745,117 @@ function App() {
     setEditingProfileDraft(null);
   }
 
+  function recordLaunchResults(
+    results: BrowserLaunchResult[],
+    profileById: ReadonlyMap<string, ChromeProfile>,
+    sourceLabel: string,
+    launchUrl: string
+  ) {
+    if (results.length === 0) {
+      return;
+    }
+
+    const nextEvents = results.map((result) => {
+      const profile = profileById.get(result.profileId);
+      return browserLaunchEventFromResult(result, {
+        profileName: profile?.name ?? result.profileId,
+        sourceLabel,
+        url: launchUrl
+      });
+    });
+    const mergedEvents = appendBrowserLaunchEvents(launchEventsRef.current, nextEvents);
+    launchEventsRef.current = mergedEvents;
+    setLaunchEvents(mergedEvents);
+    queueLaunchEventsSave(rootPath, mergedEvents).catch(() => {
+      setMessage("最近启动记录保存失败，但不会影响浏览器启动");
+    });
+  }
+
+  function queueLaunchEventsSave(
+    targetRootPath: string,
+    events: BrowserLaunchEvent[]
+  ): Promise<void> {
+    const saveTask = launchEventsSaveQueueRef.current
+      .catch(() => undefined)
+      .then(() => profileApi.saveBrowserLaunchEvents(targetRootPath, events));
+    launchEventsSaveQueueRef.current = saveTask.catch(() => undefined);
+    return saveTask;
+  }
+
   async function openProfile(profile: ChromeProfile) {
     if (launchingProfileIdsRef.current.has(profile.id)) {
       setMessage(`${profile.name} 正在启动，请稍等`);
       return;
     }
+    if (!canStartBrowserOperationForProfiles([profile])) {
+      return;
+    }
 
+    const operation = startProfileOpenOperation("账号启动", profile);
+    let operationFinished = false;
     launchingProfileIdsRef.current.add(profile.id);
 
     try {
-      if (!chromeStatus?.available) {
-        setMessage("未检测到浏览器，请先设置浏览器路径");
-        return;
-      }
-      await profileApi.openProfile(
-        rootPath,
-        profile.id,
-        settings.browserPath,
+      const result = await launchChromeProfile(profile, DEFAULT_PROFILE_LAUNCH_URL);
+      finishProfileOpenOperation(operation, result);
+      operationFinished = true;
+      recordLaunchResults(
+        [result],
+        new Map([[profile.id, profile]]),
+        "账号",
         DEFAULT_PROFILE_LAUNCH_URL
       );
-      setRunningProfileIds((current) =>
-        current.includes(profile.id) ? current : [...current, profile.id]
-      );
+      if (!result.ok) {
+        setMessage(result.message);
+        return;
+      }
       await updateProfileById(
         profile.id,
         { lastOpenedAt: new Date().toISOString() },
         `已启动 ${profile.name}`
       );
     } catch (error) {
+      if (!operationFinished) {
+        failProfileOpenOperation(operation, error);
+      }
       setMessage(errorMessage(error));
     } finally {
       launchingProfileIdsRef.current.delete(profile.id);
     }
   }
 
+  async function launchChromeProfile(
+    profile: ChromeProfile,
+    launchUrl: string
+  ): Promise<BrowserLaunchResult> {
+    if (!chromeStatus?.available) {
+      return browserLaunchFailed(
+        profile.id,
+        new Error("未检测到浏览器，请先设置浏览器路径")
+      );
+    }
+
+    try {
+      const profileDirectory = await runBrowserCommandWithTimeout(
+        profileApi.openProfile(rootPath, profile.id, settings.browserPath, launchUrl),
+        `${profile.name} 启动`
+      );
+      const result = browserLaunchSucceeded(profile.id, profileDirectory);
+      if (shouldMarkStartingAfterLaunch(result)) {
+        markBrowserSessionStarting(profile.id);
+        scheduleLaunchConfirmationRefresh(() => {
+          void refreshRunningProfiles(rootPath, profiles, { clearOnFailure: false });
+        });
+      }
+      return result;
+    } catch (error) {
+      return browserLaunchFailed(profile.id, error);
+    }
+  }
+
   async function focusProfileWindow(profile: ChromeProfile) {
     try {
-      await profileApi.focusProfileWindow(rootPath, profile.id);
+      await focusProfileWindowWithTimeout(profile);
       setMessage(`已切换到 ${profile.name}`);
       await refreshRunningProfiles();
     } catch (error) {
@@ -686,19 +874,35 @@ function App() {
       setMessage("请先设置登录网址");
       return;
     }
+    if (!canStartBrowserOperationForProfiles([profile])) {
+      return;
+    }
 
+    const operation = startProfileOpenOperation(`平台 ${platformLabel}`, profile);
+    let operationFinished = false;
     try {
-      if (!chromeStatus?.available) {
-        setMessage("未检测到浏览器，请先设置浏览器路径");
+      const result = await launchChromeProfile(profile, launchUrl);
+      finishProfileOpenOperation(operation, result);
+      operationFinished = true;
+      recordLaunchResults(
+        [result],
+        new Map([[profile.id, profile]]),
+        `平台 ${platformLabel}`,
+        launchUrl
+      );
+      if (!result.ok) {
+        setMessage(result.message);
         return;
       }
-      await profileApi.openProfile(rootPath, profile.id, settings.browserPath, launchUrl);
       await updateProfileById(
         profile.id,
         { lastOpenedAt: new Date().toISOString() },
         `已打开 ${platformLabel}`
       );
     } catch (error) {
+      if (!operationFinished) {
+        failProfileOpenOperation(operation, error);
+      }
       setMessage(errorMessage(error));
     }
   }
@@ -1202,11 +1406,26 @@ function App() {
       setMessage("请先给项目绑定账号");
       return;
     }
+    if (!canStartBrowserOperationForProfiles(queuedProfiles)) {
+      return;
+    }
 
     const intervalMilliseconds =
       normalizeBulkOpenIntervalSeconds(String(project.intervalSeconds)) * 1000;
     const openedIds = new Set<string>();
-    let failedCount = 0;
+    const launchResults: BrowserLaunchResult[] = [];
+    const profileNameById = new Map(
+      queuedProfiles.map((profile) => [profile.id, profile.name])
+    );
+    const runningOperation = startProjectOpenOperation(
+      `项目 ${project.name}`,
+      {
+        projectId: project.id,
+        projectName: project.name,
+        projectUrlIds: launchUrls.map((projectUrl) => projectUrl.id)
+      },
+      queuedProfiles
+    );
 
     projectOpenCancelledRef.current = false;
     setOpeningProjectId(project.id);
@@ -1217,18 +1436,19 @@ function App() {
         }
 
         setMessage(`正在打开项目 ${project.name} ${index + 1} / ${queuedProfiles.length}`);
-        try {
-          for (const projectUrl of launchUrls) {
-            await profileApi.openProfile(
-              rootPath,
-              profile.id,
-              settings.browserPath,
-              projectUrl.url
-            );
+        let projectProfileResult: BrowserLaunchResult | null = null;
+        for (const projectUrl of launchUrls) {
+          const result = await launchChromeProfile(profile, projectUrl.url);
+          projectProfileResult = result;
+          if (!result.ok) {
+            break;
           }
+        }
+        if (projectProfileResult) {
+          launchResults.push(projectProfileResult);
+        }
+        if (projectProfileResult?.ok) {
           openedIds.add(profile.id);
-        } catch {
-          failedCount += 1;
         }
 
         if (
@@ -1261,12 +1481,24 @@ function App() {
       const urlLabel =
         launchUrls.length === 1 && projectUrlId ? `，${launchUrls[0].name}` : "";
       const urlCountLabel = launchUrls.length > 1 ? `，${launchUrls.length} 个网址` : "";
-      const finalMessage =
+      const launchSummary = summarizeBrowserLaunchQueue(
+        launchResults,
+        profileNameById,
+        queuedProfiles.length,
         stopped
-          ? `已停止项目 ${project.name}，已打开 ${openedIds.size} / ${queuedProfiles.length} 个账号`
-          : failedCount > 0
-          ? `已打开项目 ${project.name}：${openedIds.size} 个账号${urlCountLabel}${urlLabel}，${failedCount} 个失败`
-          : `已打开项目 ${project.name}：${openedIds.size} 个账号${urlCountLabel}${urlLabel}`;
+      );
+      finishLaunchQueueOperation(runningOperation, launchSummary);
+      const finalMessage = formatProjectLaunchQueueMessage(
+        launchSummary,
+        project.name,
+        `${urlCountLabel}${urlLabel}`
+      );
+      recordLaunchResults(
+        launchResults,
+        profileById,
+        `项目 ${project.name}`,
+        launchUrls.length === 1 ? launchUrls[0].url : `${launchUrls.length} 个网址`
+      );
       await persist(nextProfiles, finalMessage, nextSettings, nextProjects);
     } finally {
       projectOpenCancelledRef.current = false;
@@ -1631,12 +1863,13 @@ function App() {
     });
   }
 
-  function selectVisibleProfiles() {
-    setSelectedIds((current) => {
-      const next = new Set(current);
-      visibleProfiles.forEach((profile) => next.add(profile.id));
-      return [...next];
-    });
+  function toggleVisibleProfilesSelection() {
+    if (hasSelectedProfiles) {
+      clearSelection();
+      return;
+    }
+
+    setSelectedIds(visibleProfiles.map((profile) => profile.id));
   }
 
   function clearSelection() {
@@ -1798,6 +2031,11 @@ function App() {
     }
   }
 
+  function updateBulkUrl(value: string) {
+    setBulkUrl(value);
+    setLastBulkLaunchRetry(null);
+  }
+
   function fillBulkUrlFromLibrary(url: string) {
     const launchUrl = normalizeLaunchUrl(url);
     if (!launchUrl) {
@@ -1805,7 +2043,7 @@ function App() {
       return;
     }
 
-    setBulkUrl(launchUrl);
+    updateBulkUrl(launchUrl);
     setActiveView("accounts");
     setMessage("已填入批量打开网址");
   }
@@ -1843,106 +2081,204 @@ function App() {
   }
 
   async function inspectWindowsForSelectedProfiles() {
-    const runningSelectedProfiles = selectedProfiles.filter((profile) =>
-      runningProfileIds.includes(profile.id)
-    );
+    const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
 
-    if (runningSelectedProfiles.length === 0) {
+    if (freshRunningSelectedProfiles.length === 0) {
       setMessage("选中的账号没有运行窗口");
-      await refreshRunningProfiles();
+      return;
+    }
+    if (!canStartBrowserOperationForProfiles(freshRunningSelectedProfiles)) {
       return;
     }
 
+    const operation = startWindowOperation("检查窗口", freshRunningSelectedProfiles);
     setWindowInspecting(true);
     try {
       const summaries: string[] = [];
-      for (const profile of runningSelectedProfiles) {
-        const windows = await profileApi.listProfileWindows(rootPath, profile.id);
+      for (const profile of freshRunningSelectedProfiles) {
+        const windows = await listProfileWindowsWithTimeout(profile, "检查窗口");
         summaries.push(formatWindowInspectionSummary(profile.name, windows));
       }
       setMessage(`窗口检查：${summaries.join("；")}`);
+      finishWindowOperation(operation, "succeeded", {
+        profileCount: freshRunningSelectedProfiles.length,
+        inspectedCount: summaries.length
+      });
       await refreshRunningProfiles();
     } catch (error) {
       setMessage(windowAutomationErrorMessage(error));
+      finishWindowOperation(operation, "failed", {
+        profileCount: freshRunningSelectedProfiles.length
+      });
       await refreshRunningProfiles();
     } finally {
       setWindowInspecting(false);
     }
   }
 
-  async function tileWindowsForSelectedProfiles() {
-    const runningSelectedProfiles = selectedProfiles.filter((profile) =>
-      runningProfileIds.includes(profile.id)
-    );
+  async function focusProfileWindowsInOrder(profilesToFocus: ChromeProfile[]) {
+    let focusedCount = 0;
+    let failedCount = 0;
+    let firstFailedError: unknown = null;
 
-    if (runningSelectedProfiles.length === 0) {
+    for (const profile of profilesToFocus) {
+      try {
+        await focusProfileWindowWithTimeout(profile);
+        focusedCount += 1;
+      } catch (error) {
+        failedCount += 1;
+        firstFailedError ??= error;
+      }
+    }
+
+    return { focusedCount, failedCount, firstFailedError };
+  }
+
+  async function focusWindowsForSelectedProfiles() {
+    const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
+
+    if (freshRunningSelectedProfiles.length === 0) {
       setMessage("选中的账号没有运行窗口");
-      await refreshRunningProfiles();
+      return;
+    }
+    if (!canStartBrowserOperationForProfiles(freshRunningSelectedProfiles)) {
       return;
     }
 
+    const operation = startWindowOperation("前置窗口", freshRunningSelectedProfiles);
+    setWindowFocusing(true);
+    try {
+      const { focusedCount, failedCount, firstFailedError } =
+        await focusProfileWindowsInOrder(freshRunningSelectedProfiles);
+
+      if (focusedCount > 0) {
+        const messageParts = [`已前置 ${focusedCount} 个窗口`];
+        if (failedCount > 0) {
+          messageParts.push(`${failedCount} 个失败`);
+        }
+        setMessage(messageParts.join("，"));
+      } else {
+        setMessage(
+          firstFailedError
+            ? windowAutomationErrorMessage(firstFailedError)
+            : "选中的账号没有可前置窗口"
+        );
+      }
+      finishWindowOperation(
+        operation,
+        focusedCount > 0 && failedCount === 0 ? "succeeded" : "failed",
+        {
+          profileCount: freshRunningSelectedProfiles.length,
+          focusedCount,
+          failedCount
+        }
+      );
+      await refreshRunningProfiles();
+    } finally {
+      setWindowFocusing(false);
+    }
+  }
+
+  async function tileWindowsForSelectedProfiles() {
+    const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
+
+    if (freshRunningSelectedProfiles.length === 0) {
+      setMessage("选中的账号没有运行窗口");
+      return;
+    }
+    if (!canStartBrowserOperationForProfiles(freshRunningSelectedProfiles)) {
+      return;
+    }
+
+    const operation = startWindowOperation("平铺窗口", freshRunningSelectedProfiles);
     setWindowTiling(true);
     try {
-      const tileableProfiles: ChromeProfile[] = [];
-      let noWindowCount = 0;
-      let multiWindowProfileCount = 0;
+      const registryInputs: BrowserWindowRegistryInput[] = [];
       let failedCount = 0;
       let firstFailedError: unknown = null;
 
-      for (const profile of runningSelectedProfiles) {
+      for (const profile of freshRunningSelectedProfiles) {
         try {
-          const windows = await profileApi.listProfileWindows(rootPath, profile.id);
-          if (windows.length > 0) {
-            tileableProfiles.push(profile);
-            if (windows.length > 1) {
-              multiWindowProfileCount += 1;
-            }
-          } else {
-            noWindowCount += 1;
-          }
+          const windows = await listProfileWindowsWithTimeout(profile, "检查平铺窗口");
+          registryInputs.push({
+            profileId: profile.id,
+            profileName: profile.name,
+            windows
+          });
         } catch (error) {
           failedCount += 1;
           firstFailedError ??= error;
+          registryInputs.push({
+            profileId: profile.id,
+            profileName: profile.name,
+            windows: [],
+            windowError: errorMessage(error)
+          });
         }
       }
 
-      if (tileableProfiles.length === 0) {
+      const windowRegistry = buildPrimaryWindowRegistry(registryInputs);
+      const layoutPlan = buildGridWindowLayoutPlan(windowRegistry, {
+        x: availableScreenLeft(),
+        y: availableScreenTop(),
+        width: availableScreenWidth(),
+        height: availableScreenHeight()
+      });
+      const profileById = new Map(
+        freshRunningSelectedProfiles.map((profile) => [profile.id, profile])
+      );
+      const noWindowCount = layoutPlan.skipped.filter(
+        (entry) => entry.reason === "missing-window"
+      ).length;
+      const multiWindowProfileCount = layoutPlan.multiWindowProfileCount;
+
+      if (layoutPlan.tileableCount === 0) {
         setMessage(
           firstFailedError
             ? windowAutomationErrorMessage(firstFailedError)
             : "选中的运行账号没有可平铺窗口"
         );
+        finishWindowOperation(operation, "failed", {
+          profileCount: freshRunningSelectedProfiles.length,
+          tileableCount: 0,
+          noWindowCount,
+          failedCount
+        });
         await refreshRunningProfiles();
         return;
       }
 
-      const screenWidth = availableScreenWidth();
-      const screenHeight = availableScreenHeight();
-      const maxTileableCount = maxTileableWindowCount(screenWidth, screenHeight);
-      if (tileableProfiles.length > maxTileableCount) {
+      if (layoutPlan.capacityExceeded) {
         setMessage(
-          `当前屏幕最多适合平铺 ${maxTileableCount} 个窗口；已选运行窗口 ${tileableProfiles.length} 个，请减少选择或分批平铺`
+          `当前屏幕最多适合平铺 ${layoutPlan.capacity} 个窗口；已选运行窗口 ${layoutPlan.tileableCount} 个，请减少选择或分批平铺`
         );
+        finishWindowOperation(operation, "failed", {
+          profileCount: freshRunningSelectedProfiles.length,
+          tileableCount: layoutPlan.tileableCount,
+          maxTileableCount: layoutPlan.capacity
+        });
         await refreshRunningProfiles();
         return;
       }
 
-      const bounds = tileBoundsForCount(
-        tileableProfiles.length,
-        screenWidth,
-        screenHeight,
-        availableScreenLeft(),
-        availableScreenTop()
-      );
       let tiledCount = 0;
       let unchangedCount = 0;
-      let firstTiledProfileId: string | null = null;
+      let focusFailedCount = 0;
+      const tiledProfiles: ChromeProfile[] = [];
 
-      for (const [index, profile] of tileableProfiles.entries()) {
+      for (const placement of layoutPlan.placements) {
+        const profile = profileById.get(placement.profileId);
+        if (!profile) {
+          continue;
+        }
+
         try {
-          const targetBounds = bounds[index];
-          await profileApi.setProfileWindowBounds(rootPath, profile.id, targetBounds);
-          const updatedWindows = await profileApi.listProfileWindows(rootPath, profile.id);
+          const targetBounds = placement.bounds;
+          await setProfileWindowBoundsWithTimeout(profile, targetBounds, "平铺窗口");
+          const updatedWindows = await listProfileWindowsWithTimeout(
+            profile,
+            "确认平铺窗口"
+          );
           if (
             !updatedWindows[0] ||
             !windowMatchesBounds(updatedWindows[0], targetBounds)
@@ -1951,7 +2287,7 @@ function App() {
             continue;
           }
           tiledCount += 1;
-          firstTiledProfileId ??= profile.id;
+          tiledProfiles.push(profile);
         } catch (error) {
           failedCount += 1;
           firstFailedError ??= error;
@@ -1974,15 +2310,12 @@ function App() {
         if (failedCount > 0) {
           messageParts.push(`${failedCount} 个失败`);
         }
-        let successMessage = messageParts.join("，");
-        if (firstTiledProfileId) {
-          try {
-            await profileApi.focusProfileWindow(rootPath, firstTiledProfileId);
-          } catch (error) {
-            successMessage = `${successMessage}，但未能拉到前台：${errorMessage(error)}`;
-          }
+        const focusResult = await focusProfileWindowsInOrder(tiledProfiles);
+        if (focusResult.failedCount > 0) {
+          focusFailedCount = focusResult.failedCount;
+          messageParts.push(`${focusResult.failedCount} 个未能前置`);
         }
-        setMessage(successMessage);
+        setMessage(messageParts.join("，"));
       } else {
         if (unchangedCount > 0) {
           const messageParts = [`平铺窗口未生效：${unchangedCount} 个未生效`];
@@ -1998,6 +2331,25 @@ function App() {
           );
         }
       }
+      finishWindowOperation(
+        operation,
+        tiledCount > 0 &&
+          unchangedCount === 0 &&
+          failedCount === 0 &&
+          focusFailedCount === 0
+          ? "succeeded"
+          : "failed",
+        {
+          profileCount: freshRunningSelectedProfiles.length,
+          tileableCount: layoutPlan.tileableCount,
+          tiledCount,
+          unchangedCount,
+          noWindowCount,
+          multiWindowProfileCount,
+          failedCount,
+          focusFailedCount
+        }
+      );
       await refreshRunningProfiles();
     } finally {
       setWindowTiling(false);
@@ -2005,37 +2357,51 @@ function App() {
   }
 
   async function syncLayoutForSelectedProfiles() {
-    if (runningSelectedProfiles.length < 2) {
+    const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
+
+    if (freshRunningSelectedProfiles.length < 2) {
       setMessage("至少选择 2 个运行账号才能同步布局");
-      await refreshRunningProfiles();
       return;
     }
 
     const sourceProfile =
-      runningSelectedProfiles.find(
+      freshRunningSelectedProfiles.find(
         (profile) => profile.id === resolvedLayoutSourceProfileId
-      ) ?? runningSelectedProfiles[0];
+      ) ?? freshRunningSelectedProfiles[0];
 
     if (!sourceProfile) {
       setMessage("请选择一个运行账号作为主账号");
-      await refreshRunningProfiles();
+      return;
+    }
+    if (!canStartBrowserOperationForProfiles(freshRunningSelectedProfiles)) {
       return;
     }
 
+    const operation = startWindowOperation("同步布局", freshRunningSelectedProfiles);
     setWindowSyncing(true);
     try {
-      const sourceWindows = await profileApi.listProfileWindows(
-        rootPath,
-        sourceProfile.id
+      const sourceWindows = await listProfileWindowsWithTimeout(
+        sourceProfile,
+        "读取主窗口"
       );
       const sourceWindow = sourceWindows[0];
       if (!sourceWindow) {
         setMessage("主账号没有可同步窗口");
+        finishWindowOperation(operation, "failed", {
+          profileCount: freshRunningSelectedProfiles.length,
+          sourceProfileId: sourceProfile.id,
+          reason: "missing-source-window"
+        });
         await refreshRunningProfiles();
         return;
       }
       if (sourceWindow.minimized) {
         setMessage("主账号窗口已最小化，请先恢复窗口再同步布局");
+        finishWindowOperation(operation, "failed", {
+          profileCount: freshRunningSelectedProfiles.length,
+          sourceProfileId: sourceProfile.id,
+          reason: "minimized-source-window"
+        });
         await refreshRunningProfiles();
         return;
       }
@@ -2051,15 +2417,17 @@ function App() {
       let minimizedCount = 0;
       let unchangedCount = 0;
       let failedCount = 0;
+      let focusFailedCount = 0;
       let firstFailedError: unknown = null;
+      const syncedProfiles: ChromeProfile[] = [];
 
-      for (const profile of runningSelectedProfiles) {
+      for (const profile of freshRunningSelectedProfiles) {
         if (profile.id === sourceProfile.id) {
           continue;
         }
 
         try {
-          const windows = await profileApi.listProfileWindows(rootPath, profile.id);
+          const windows = await listProfileWindowsWithTimeout(profile, "检查同步窗口");
           if (windows.length === 0) {
             noWindowCount += 1;
             continue;
@@ -2068,8 +2436,11 @@ function App() {
             minimizedCount += 1;
             continue;
           }
-          await profileApi.setProfileWindowBounds(rootPath, profile.id, sourceBounds);
-          const updatedWindows = await profileApi.listProfileWindows(rootPath, profile.id);
+          await setProfileWindowBoundsWithTimeout(profile, sourceBounds, "同步布局");
+          const updatedWindows = await listProfileWindowsWithTimeout(
+            profile,
+            "确认同步布局"
+          );
           if (
             !updatedWindows[0] ||
             !windowMatchesBounds(updatedWindows[0], sourceBounds)
@@ -2078,6 +2449,7 @@ function App() {
             continue;
           }
           syncedCount += 1;
+          syncedProfiles.push(profile);
         } catch (error) {
           failedCount += 1;
           firstFailedError ??= error;
@@ -2098,13 +2470,15 @@ function App() {
         if (failedCount > 0) {
           messageParts.push(`${failedCount} 个失败`);
         }
-        let successMessage = messageParts.join("，");
-        try {
-          await profileApi.focusProfileWindow(rootPath, sourceProfile.id);
-        } catch (error) {
-          successMessage = `${successMessage}，但未能拉到前台：${errorMessage(error)}`;
+        const focusResult = await focusProfileWindowsInOrder([
+          ...syncedProfiles,
+          sourceProfile
+        ]);
+        if (focusResult.failedCount > 0) {
+          focusFailedCount = focusResult.failedCount;
+          messageParts.push(`${focusResult.failedCount} 个未能前置`);
         }
-        setMessage(successMessage);
+        setMessage(messageParts.join("，"));
       } else if (firstFailedError) {
         setMessage(windowAutomationErrorMessage(firstFailedError));
       } else {
@@ -2122,9 +2496,32 @@ function App() {
         }
         setMessage(messageParts.join("，"));
       }
+      finishWindowOperation(
+        operation,
+        syncedCount > 0 &&
+          unchangedCount === 0 &&
+          failedCount === 0 &&
+          focusFailedCount === 0
+          ? "succeeded"
+          : "failed",
+        {
+          profileCount: freshRunningSelectedProfiles.length,
+          sourceProfileId: sourceProfile.id,
+          syncedCount,
+          noWindowCount,
+          minimizedCount,
+          unchangedCount,
+          failedCount,
+          focusFailedCount
+        }
+      );
       await refreshRunningProfiles();
     } catch (error) {
       setMessage(windowAutomationErrorMessage(error));
+      finishWindowOperation(operation, "failed", {
+        profileCount: freshRunningSelectedProfiles.length,
+        sourceProfileId: sourceProfile.id
+      });
       await refreshRunningProfiles();
     } finally {
       setWindowSyncing(false);
@@ -2163,21 +2560,29 @@ function App() {
     });
   }
 
-  async function openUrlForSelectedProfiles(urlOverride?: string) {
-    if (selectedProfiles.length === 0) {
-      setMessage("请先选择账号");
+  async function openUrlForProfiles(
+    queuedProfiles: ChromeProfile[],
+    rawLaunchUrl: string,
+    options: {
+      emptyMessage: string;
+      sourceLabel: string;
+    }
+  ) {
+    if (queuedProfiles.length === 0) {
+      setMessage(options.emptyMessage);
       return;
     }
     if (bulkOpenRunning) {
       setMessage("批量打开正在进行");
       return;
     }
-
-    const launchUrl = normalizeLaunchUrl(urlOverride ?? bulkUrl);
-    if (!launchUrl) {
-      setMessage("请先填写要打开的网址");
+    if (!canStartBrowserOperationForProfiles(queuedProfiles)) {
       return;
     }
+
+    const launchUrl = rawLaunchUrl.trim()
+      ? normalizeLaunchUrl(rawLaunchUrl)
+      : DEFAULT_PROFILE_LAUNCH_URL;
     if (!chromeStatus?.available) {
       setMessage("未检测到浏览器，请先设置浏览器路径");
       return;
@@ -2185,11 +2590,20 @@ function App() {
 
     const intervalMilliseconds =
       normalizeBulkOpenIntervalSeconds(bulkOpenIntervalSeconds) * 1000;
-    const queuedProfiles = [...selectedProfiles];
+    const queuedProfileIds = queuedProfiles.map((profile) => profile.id);
     const openedIds = new Set<string>();
-    let failedCount = 0;
+    const launchResults: BrowserLaunchResult[] = [];
+    const profileNameById = new Map(
+      queuedProfiles.map((profile) => [profile.id, profile.name])
+    );
+    const runningOperation = startBulkOpenUrlOperation(
+      options.sourceLabel,
+      launchUrl,
+      queuedProfiles
+    );
 
     bulkOpenCancelledRef.current = false;
+    setLastBulkLaunchRetry(null);
     setBulkOpenRunning(true);
 
     try {
@@ -2199,16 +2613,10 @@ function App() {
         }
 
         setMessage(`正在打开 ${index + 1} / ${queuedProfiles.length}：${profile.name}`);
-        try {
-          await profileApi.openProfile(
-            rootPath,
-            profile.id,
-            settings.browserPath,
-            launchUrl
-          );
+        const result = await launchChromeProfile(profile, launchUrl);
+        launchResults.push(result);
+        if (result.ok) {
           openedIds.add(profile.id);
-        } catch {
-          failedCount += 1;
         }
 
         if (
@@ -2220,13 +2628,29 @@ function App() {
       }
 
       const stopped = bulkOpenCancelledRef.current;
-      const finalMessage = stopped
-        ? `已停止，已打开 ${openedIds.size} / ${queuedProfiles.length} 个账号`
-        : failedCount > 0
-          ? `已为 ${openedIds.size} 个账号打开网址，${failedCount} 个失败`
-          : `已为 ${openedIds.size} 个账号打开网址`;
+      const launchSummary = summarizeBrowserLaunchQueue(
+        launchResults,
+        profileNameById,
+        queuedProfiles.length,
+        stopped
+      );
+      finishLaunchQueueOperation(runningOperation, launchSummary);
+      const finalMessage = formatBulkLaunchQueueMessage(launchSummary);
+      const profileById = new Map(
+        queuedProfiles.map((profile) => [profile.id, profile])
+      );
+      recordLaunchResults(launchResults, profileById, options.sourceLabel, launchUrl);
+      const retryProfileIds = selectRetryableBrowserLaunchProfileIds(
+        launchResults,
+        queuedProfileIds
+      );
+      setLastBulkLaunchRetry(
+        retryProfileIds.length > 0
+          ? { profileIds: retryProfileIds, url: launchUrl }
+          : null
+      );
 
-      if (openedIds.size > 0) {
+      if (launchSummary.successCount > 0) {
         const now = new Date().toISOString();
         const nextProfiles = profiles.map((profile) =>
           openedIds.has(profile.id)
@@ -2235,18 +2659,51 @@ function App() {
         );
         const nextSettings = normalizeSettings({
           ...settings,
-          recentUrls: [launchUrl, ...settings.recentUrls]
+          recentUrls:
+            launchUrl === DEFAULT_PROFILE_LAUNCH_URL
+              ? settings.recentUrls
+              : [launchUrl, ...settings.recentUrls]
         });
         await persist(nextProfiles, finalMessage, nextSettings);
         return;
       }
 
-      setMessage(stopped ? finalMessage : `打开网址失败：${failedCount} 个账号未打开`);
+      setMessage(finalMessage);
     } finally {
       bulkOpenCancelledRef.current = false;
       bulkOpenDelayResolveRef.current = null;
       setBulkOpenRunning(false);
     }
+  }
+
+  async function openUrlForSelectedProfiles(urlOverride?: string) {
+    await openUrlForProfiles([...selectedProfiles], urlOverride ?? bulkUrl, {
+      emptyMessage: "请先选择账号",
+      sourceLabel: "批量打开"
+    });
+  }
+
+  async function retryFailedBulkLaunch() {
+    if (!lastBulkLaunchRetry || lastBulkLaunchRetry.profileIds.length === 0) {
+      setMessage("没有可重试的失败账号");
+      return;
+    }
+
+    const profileById = new Map(profiles.map((profile) => [profile.id, profile]));
+    const retryProfiles = lastBulkLaunchRetry.profileIds
+      .map((profileId) => profileById.get(profileId))
+      .filter((profile): profile is ChromeProfile => Boolean(profile));
+
+    if (retryProfiles.length === 0) {
+      setLastBulkLaunchRetry(null);
+      setMessage("没有可重试的失败账号");
+      return;
+    }
+
+    await openUrlForProfiles(retryProfiles, lastBulkLaunchRetry.url, {
+      emptyMessage: "没有可重试的失败账号",
+      sourceLabel: "重试失败"
+    });
   }
 
   return (
@@ -2272,6 +2729,15 @@ function App() {
         {activeView === "accounts" ? (
           <>
         <section className="launcher-header">
+          <div className="search-box launcher-search">
+            <Search size={16} />
+            <input
+              aria-label="搜索账号"
+              placeholder="搜索名称、标签、备注"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+          </div>
           <div className="header-actions">
             <button
               className="secondary-button"
@@ -2303,59 +2769,55 @@ function App() {
         </section>
 
         <section className="launcher-toolbar">
-          <div className="search-box">
-            <Search size={16} />
-            <input
-              aria-label="搜索账号"
-              placeholder="搜索名称、标签、备注"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-            />
-          </div>
           <div className="toolbar-controls" role="group" aria-label="选择操作">
             <button
               className="secondary-button compact"
               type="button"
-              disabled={visibleProfiles.length === 0}
-              onClick={selectVisibleProfiles}
+              disabled={visibleProfiles.length === 0 && !hasSelectedProfiles}
+              aria-pressed={hasSelectedProfiles}
+              onClick={toggleVisibleProfilesSelection}
             >
-              全选当前
+              {hasSelectedProfiles ? "取消选择" : "全选当前"}
             </button>
             <span className="profile-count">{totalProfiles} 个账号</span>
           </div>
         </section>
 
-        {selectedProfiles.length > 0 ? (
-          <BulkActionBar
-            selectedCount={selectedProfiles.length}
-            bulkTag={bulkTag}
-            bulkUrl={bulkUrl}
-            bulkOpenIntervalSeconds={bulkOpenIntervalSeconds}
-            bulkOpenRunning={bulkOpenRunning}
-            windowInspecting={windowInspecting}
-            windowTiling={windowTiling}
-            windowSyncing={windowSyncing}
-            selectedProfiles={selectedProfiles}
-            runningProfileIds={runningProfileIds}
-            layoutSourceProfileId={resolvedLayoutSourceProfileId}
-            favoriteUrls={settings.favoriteUrls}
-            recentUrls={settings.recentUrls}
-            onBulkTagChange={setBulkTag}
-            onBulkUrlChange={setBulkUrl}
-            onBulkOpenIntervalChange={setBulkOpenIntervalSeconds}
-            onLayoutSourceProfileChange={setLayoutSourceProfileId}
-            onAppendTags={() => void appendBulkTags()}
-            onAddFavoriteUrl={() => void addFavoriteUrl()}
-            onRemoveFavoriteUrl={(url) => void removeFavoriteUrl(url)}
-            onOpenUrl={() => void openUrlForSelectedProfiles()}
-            onInspectWindows={() => void inspectWindowsForSelectedProfiles()}
-            onTileWindows={() => void tileWindowsForSelectedProfiles()}
-            onSyncLayout={() => void syncLayoutForSelectedProfiles()}
-            onStopOpenQueue={stopBulkOpenQueue}
-            onRequestDelete={requestDeleteSelectedProfiles}
-            onClear={clearSelection}
-          />
-        ) : null}
+        <BulkActionBar
+          selectedCount={selectedProfiles.length}
+          bulkTag={bulkTag}
+          bulkUrl={bulkUrl}
+          bulkOpenIntervalSeconds={bulkOpenIntervalSeconds}
+          bulkOpenRunning={bulkOpenRunning}
+          windowInspecting={windowInspecting}
+          windowTiling={windowTiling}
+          windowSyncing={windowSyncing}
+          windowFocusing={windowFocusing}
+          selectedProfiles={selectedProfiles}
+          runningProfileIds={runningProfileIds}
+          layoutSourceProfileId={resolvedLayoutSourceProfileId}
+          browserOperations={browserOperations}
+          launchEvents={launchEvents}
+          favoriteUrls={settings.favoriteUrls}
+          recentUrls={settings.recentUrls}
+          retryFailureCount={lastBulkLaunchRetry?.profileIds.length ?? 0}
+          onBulkTagChange={setBulkTag}
+          onBulkUrlChange={updateBulkUrl}
+          onBulkOpenIntervalChange={setBulkOpenIntervalSeconds}
+          onLayoutSourceProfileChange={setLayoutSourceProfileId}
+          onAppendTags={() => void appendBulkTags()}
+          onAddFavoriteUrl={() => void addFavoriteUrl()}
+          onRemoveFavoriteUrl={(url) => void removeFavoriteUrl(url)}
+          onOpenUrl={() => void openUrlForSelectedProfiles()}
+          onRetryFailures={() => void retryFailedBulkLaunch()}
+          onInspectWindows={() => void inspectWindowsForSelectedProfiles()}
+          onTileWindows={() => void tileWindowsForSelectedProfiles()}
+          onSyncLayout={() => void syncLayoutForSelectedProfiles()}
+          onFocusWindows={() => void focusWindowsForSelectedProfiles()}
+          onStopOpenQueue={stopBulkOpenQueue}
+          onRequestDelete={requestDeleteSelectedProfiles}
+          onClear={clearSelection}
+        />
 
         {showImport ? (
           <section className="import-strip">
@@ -2472,7 +2934,10 @@ function App() {
                 profile={profile}
                 density={cardDensity}
                 selected={selectedIds.includes(profile.id)}
-                running={runningProfileIds.includes(profile.id)}
+                sessionStatus={profileSessionStatus(
+                  browserSessionsById[profile.id],
+                  runningProfileIds.includes(profile.id)
+                )}
                 onLaunch={() => void openProfile(profile)}
                 onFocusWindow={() => void focusProfileWindow(profile)}
                 onEdit={() => openEditor(profile.id)}
@@ -2507,7 +2972,6 @@ function App() {
           <UrlLibraryView
             items={settings.urlLibrary ?? []}
             visibleItems={visibleUrlLibraryItems}
-            recentUrls={settings.recentUrls}
             query={urlLibraryQuery}
             selectedCount={selectedProfiles.length}
             onQueryChange={setUrlLibraryQuery}
@@ -2760,2879 +3224,6 @@ function Sidebar({ activeView, onNavigate, onOpenSettings }: SidebarProps) {
   );
 }
 
-interface UrlLibraryViewProps {
-  items: UrlLibraryItem[];
-  visibleItems: UrlLibraryItem[];
-  recentUrls: string[];
-  query: string;
-  selectedCount: number;
-  onQueryChange: (value: string) => void;
-  onCreate: () => void;
-  onEdit: (item: UrlLibraryItem) => void;
-  onFillBulkUrl: (url: string) => void;
-  onOpenWithSelected: (url: string) => void;
-  onCopy: (url: string) => void;
-  onDelete: (itemId: string) => void;
-}
-
-function UrlLibraryView({
-  items,
-  visibleItems,
-  recentUrls,
-  query,
-  selectedCount,
-  onQueryChange,
-  onCreate,
-  onEdit,
-  onFillBulkUrl,
-  onOpenWithSelected,
-  onCopy,
-  onDelete
-}: UrlLibraryViewProps) {
-  const knownUrls = useMemo(() => new Set(items.map((item) => item.url)), [items]);
-  const visibleRecentUrls = recentUrls.filter((url) => !knownUrls.has(url));
-
-  return (
-    <>
-      <section className="launcher-header url-library-header">
-        <div className="url-library-title">
-          <h1>网址库</h1>
-          <span>{items.length} 个常用网址</span>
-        </div>
-        <label className="search-box">
-          <Search size={16} />
-          <input
-            aria-label="搜索网址"
-            placeholder="搜索网址名称、标签、备注"
-            value={query}
-            onChange={(event) => onQueryChange(event.target.value)}
-          />
-        </label>
-        <div className="header-actions">
-          <button className="primary-button" type="button" onClick={onCreate}>
-            <Plus size={16} />
-            新建网址
-          </button>
-        </div>
-      </section>
-
-      <section className="url-library-table-panel" aria-label="常用网址列表">
-        {items.length === 0 ? (
-          <div className="empty-state url-library-empty">
-            <div>
-              <h3>还没有常用网址</h3>
-              <p>把每天会用到的任务页、项目页或登录页存在这里。</p>
-            </div>
-            <button className="primary-button" type="button" onClick={onCreate}>
-              <Plus size={16} />
-              创建第一个网址
-            </button>
-          </div>
-        ) : visibleItems.length === 0 ? (
-          <div className="empty-state url-library-empty">
-            <div>
-              <h3>没有匹配的网址</h3>
-            </div>
-          </div>
-        ) : (
-          <div className="url-library-table-wrap">
-            <table className="url-library-table" aria-label="网址库表格">
-              <thead>
-                <tr>
-                  <th scope="col">名称</th>
-                  <th scope="col">URL</th>
-                  <th scope="col">标签</th>
-                  <th scope="col">备注</th>
-                  <th scope="col">操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {visibleItems.map((item) => (
-                  <UrlLibraryTableRow
-                    key={item.id}
-                    item={item}
-                    selectedCount={selectedCount}
-                    onEdit={() => onEdit(item)}
-                    onFillBulkUrl={() => onFillBulkUrl(item.url)}
-                    onOpenWithSelected={() => onOpenWithSelected(item.url)}
-                    onCopy={() => onCopy(item.url)}
-                    onDelete={() => onDelete(item.id)}
-                  />
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
-
-      {visibleRecentUrls.length > 0 ? (
-        <section className="url-library-recent" aria-label="最近打开的网址">
-          <strong>最近打开</strong>
-          <div className="url-library-recent-list">
-            {visibleRecentUrls.map((url) => {
-              const label = displayUrlLabel(url);
-              return (
-                <div className="url-library-recent-row" key={url}>
-                  <span>{label}</span>
-                  <div>
-                    <button
-                      className="secondary-button compact"
-                      type="button"
-                      aria-label={`填入批量打开 ${label}`}
-                      onClick={() => onFillBulkUrl(url)}
-                    >
-                      填入
-                    </button>
-                    <button
-                      className="secondary-button compact"
-                      type="button"
-                      aria-label={`用选中账号打开 ${label}`}
-                      onClick={() => onOpenWithSelected(url)}
-                    >
-                      打开
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </section>
-      ) : null}
-    </>
-  );
-}
-
-interface UrlLibraryTableRowProps {
-  item: UrlLibraryItem;
-  selectedCount: number;
-  onEdit: () => void;
-  onFillBulkUrl: () => void;
-  onOpenWithSelected: () => void;
-  onCopy: () => void;
-  onDelete: () => void;
-}
-
-function UrlLibraryTableRow({
-  item,
-  selectedCount,
-  onEdit,
-  onFillBulkUrl,
-  onOpenWithSelected,
-  onCopy,
-  onDelete
-}: UrlLibraryTableRowProps) {
-  const label = item.name || displayUrlLabel(item.url);
-
-  return (
-    <tr>
-      <td className="url-library-name-cell">
-        <strong>{label}</strong>
-      </td>
-      <td className="url-library-url-cell">
-        <code title={item.url}>{item.url}</code>
-      </td>
-      <td>
-        <div className="url-library-table-tags">
-          {item.tags.length > 0 ? (
-            item.tags.map((tag) => <span key={tag}>{tag}</span>)
-          ) : (
-            <span className="muted-cell">未设置</span>
-          )}
-        </div>
-      </td>
-      <td className="url-library-notes-cell">
-        {item.notes ? <p>{item.notes}</p> : <span className="muted-cell">无备注</span>}
-      </td>
-      <td className="url-library-actions-cell">
-        <div className="url-library-row-actions">
-          <button
-            className="secondary-button compact"
-            type="button"
-            aria-label={`填入批量打开 ${label}`}
-            onClick={onFillBulkUrl}
-          >
-            填入
-          </button>
-          <button
-            className="primary-button compact"
-            type="button"
-            aria-label={`用选中账号打开 ${label}`}
-            title={selectedCount > 0 ? undefined : "先选择账号"}
-            onClick={onOpenWithSelected}
-          >
-            <Play size={14} />
-            打开
-          </button>
-          <button
-            className="secondary-button compact icon-only"
-            type="button"
-            aria-label={`复制网址 ${label}`}
-            onClick={onCopy}
-          >
-            <Copy size={14} />
-          </button>
-          <button
-            className="secondary-button compact icon-only"
-            type="button"
-            aria-label={`编辑网址 ${label}`}
-            onClick={onEdit}
-          >
-            <Pencil size={14} />
-          </button>
-          <button
-            className="secondary-button compact icon-only danger"
-            type="button"
-            aria-label={`删除网址 ${label}`}
-            onClick={onDelete}
-          >
-            <Trash2 size={14} />
-          </button>
-        </div>
-      </td>
-    </tr>
-  );
-}
-
-interface UrlLibraryEditDialogProps {
-  title: string;
-  draft: UrlLibraryDraft;
-  onChange: (patch: Partial<UrlLibraryDraft>) => void;
-  onSave: () => void;
-  onClose: () => void;
-}
-
-function UrlLibraryEditDialog({
-  title,
-  draft,
-  onChange,
-  onSave,
-  onClose
-}: UrlLibraryEditDialogProps) {
-  const titleId = "url-library-edit-title";
-
-  return (
-    <div
-      className="modal-backdrop"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) {
-          onClose();
-        }
-      }}
-    >
-      <form
-        className="modal-card url-library-edit-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        onSubmit={(event) => {
-          event.preventDefault();
-          onSave();
-        }}
-      >
-        <div className="modal-header">
-          <div>
-            <h2 id={titleId}>{title}</h2>
-            <p>保存后才会写入网址库。</p>
-          </div>
-          <button
-            className="icon-button"
-            type="button"
-            aria-label="关闭"
-            onClick={onClose}
-          >
-            <X size={18} />
-          </button>
-        </div>
-        <div className="modal-body url-library-edit-body">
-          <label className="field" htmlFor="url-library-name">
-            <span>网址名称</span>
-            <input
-              id="url-library-name"
-              value={draft.name}
-              onChange={(event) => onChange({ name: event.target.value })}
-            />
-          </label>
-          <label className="field" htmlFor="url-library-url">
-            <span>网址 URL</span>
-            <input
-              id="url-library-url"
-              value={draft.url}
-              onChange={(event) => onChange({ url: event.target.value })}
-            />
-          </label>
-          <label className="field" htmlFor="url-library-tags">
-            <span>网址标签</span>
-            <input
-              id="url-library-tags"
-              placeholder="多个标签用逗号分隔"
-              value={draft.tags}
-              onChange={(event) => onChange({ tags: event.target.value })}
-            />
-          </label>
-          <label className="field" htmlFor="url-library-notes">
-            <span>网址备注</span>
-            <textarea
-              id="url-library-notes"
-              value={draft.notes}
-              onChange={(event) => onChange({ notes: event.target.value })}
-            />
-          </label>
-        </div>
-        <div className="modal-footer">
-          <button className="secondary-button" type="button" onClick={onClose}>
-            取消
-          </button>
-          <button className="primary-button" type="submit">
-            保存网址
-          </button>
-        </div>
-      </form>
-    </div>
-  );
-}
-
-interface UrlLibraryDeleteConfirmDialogProps {
-  item: UrlLibraryItem | null;
-  onCancel: () => void;
-  onConfirm: () => void;
-}
-
-function UrlLibraryDeleteConfirmDialog({
-  item,
-  onCancel,
-  onConfirm
-}: UrlLibraryDeleteConfirmDialogProps) {
-  if (!item) {
-    return null;
-  }
-
-  const titleId = "url-library-delete-title";
-  return (
-    <div
-      className="modal-backdrop"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) {
-          onCancel();
-        }
-      }}
-    >
-      <section
-        className="modal-card delete-confirm-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-      >
-        <div className="modal-header">
-          <div>
-            <h2 id={titleId}>确认删除网址</h2>
-            <p>{item.name || displayUrlLabel(item.url)}</p>
-          </div>
-          <button
-            className="icon-button"
-            type="button"
-            aria-label="关闭"
-            onClick={onCancel}
-          >
-            <X size={18} />
-          </button>
-        </div>
-        <p>这条常用网址会从网址库和批量打开常用项里移除。</p>
-        <div className="confirm-actions">
-          <button className="secondary-button" type="button" onClick={onCancel}>
-            取消
-          </button>
-          <button className="primary-button danger" type="button" onClick={onConfirm}>
-            确认删除
-          </button>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-interface ProjectsViewProps {
-  projects: AirdropProject[];
-  profiles: ChromeProfile[];
-  openingProjectId: string | null;
-  projectQuery: string;
-  onProjectQueryChange: (value: string) => void;
-  onCreateProject: () => void;
-  onOpenProject: (project: AirdropProject, projectUrlId?: string) => void;
-  onStopProject: () => void;
-  onEditProject: (projectId: string) => void;
-}
-
-function ProjectsView({
-  projects,
-  profiles,
-  openingProjectId,
-  projectQuery,
-  onProjectQueryChange,
-  onCreateProject,
-  onOpenProject,
-  onStopProject,
-  onEditProject
-}: ProjectsViewProps) {
-  const profileById = useMemo(
-    () => new Map(profiles.map((profile) => [profile.id, profile])),
-    [profiles]
-  );
-  const visibleProjects = useMemo(() => {
-    const normalizedQuery = projectQuery.trim().toLowerCase();
-    if (!normalizedQuery) {
-      return projects;
-    }
-
-    return projects.filter((project) =>
-      [
-        project.name,
-        project.url,
-        project.notes,
-        project.id,
-        ...projectDisplayUrls(project).flatMap((projectUrl) => [
-          projectUrl.name,
-          projectUrl.url,
-          projectUrl.notes
-        ])
-      ]
-        .join(" ")
-        .toLowerCase()
-        .includes(normalizedQuery)
-    );
-  }, [projects, projectQuery]);
-
-  return (
-    <>
-      <section className="launcher-header">
-        <label className="search-box">
-          <Search size={16} />
-          <input
-            aria-label="搜索项目"
-            placeholder="搜索项目名称、网址、备注"
-            value={projectQuery}
-            onChange={(event) => onProjectQueryChange(event.target.value)}
-          />
-        </label>
-        <div className="header-actions">
-          <button className="primary-button" type="button" onClick={onCreateProject}>
-            <Plus size={16} />
-            新建项目
-          </button>
-        </div>
-      </section>
-
-      <section className="project-grid" aria-label="项目列表">
-        {projects.length === 0 ? (
-          <div className="empty-state">
-            <div>
-              <h3>还没有项目</h3>
-              <p>项目用于保存一个入口网址和一批账号，适合每天打卡或重复活动入口。</p>
-            </div>
-            <button className="primary-button" type="button" onClick={onCreateProject}>
-              <Plus size={16} />
-              创建第一个项目
-            </button>
-          </div>
-        ) : visibleProjects.length === 0 ? (
-          <div className="empty-state">
-            <div>
-              <h3>没有匹配的项目</h3>
-              <p>换个名称、网址或备注关键词再试。</p>
-            </div>
-          </div>
-        ) : (
-          visibleProjects.map((project) => (
-            <ProjectCard
-              key={project.id}
-              project={project}
-              profiles={project.profileIds
-                .map((profileId) => profileById.get(profileId))
-                .filter((profile): profile is ChromeProfile => Boolean(profile))}
-              opening={openingProjectId === project.id}
-              disabled={openingProjectId !== null && openingProjectId !== project.id}
-              onOpen={(projectUrlId) => onOpenProject(project, projectUrlId)}
-              onStop={onStopProject}
-              onEdit={() => onEditProject(project.id)}
-            />
-          ))
-        )}
-      </section>
-    </>
-  );
-}
-
-interface ProjectCardProps {
-  project: AirdropProject;
-  profiles: ChromeProfile[];
-  opening: boolean;
-  disabled: boolean;
-  onOpen: (projectUrlId?: string) => void;
-  onStop: () => void;
-  onEdit: () => void;
-}
-
-function ProjectCard({
-  project,
-  profiles,
-  opening,
-  disabled,
-  onOpen,
-  onStop,
-  onEdit
-}: ProjectCardProps) {
-  const [openTarget, setOpenTarget] = useState("all");
-  const projectUrls = projectDisplayUrls(project);
-  const urlCountLabel = projectUrls.length === 0 ? "未设置网址" : `${projectUrls.length} 个网址`;
-  return (
-    <article className="project-card">
-      <div className="project-card-main">
-        <strong>{project.name}</strong>
-        <code>{urlCountLabel}</code>
-      </div>
-      <div className="project-meta-row">
-        <span>{profiles.length} 个账号</span>
-        <span>间隔 {normalizeBulkOpenIntervalSeconds(String(project.intervalSeconds))} 秒</span>
-      </div>
-      {projectUrls.length > 1 ? (
-        <label className="project-url-select">
-          <span>打开范围</span>
-          <select
-            aria-label={`${project.name} 打开网址`}
-            value={openTarget}
-            onChange={(event) => setOpenTarget(event.target.value)}
-            disabled={opening || disabled}
-          >
-            <option value="all">全部网址</option>
-            {projectUrls.map((projectUrl) => (
-              <option key={projectUrl.id} value={projectUrl.id}>
-                {projectUrl.name || displayUrlLabel(projectUrl.url)}
-              </option>
-            ))}
-          </select>
-        </label>
-      ) : null}
-      <div className="project-card-actions">
-        <button
-          className="primary-button compact"
-          type="button"
-          aria-label={`打开项目 ${project.name}`}
-          disabled={opening || disabled}
-          onClick={() => onOpen(openTarget === "all" ? undefined : openTarget)}
-        >
-          <Play size={14} />
-          {opening ? "打开中" : projectUrls.length > 1 ? "打开" : "开始打开"}
-        </button>
-        {opening ? (
-          <button
-            className="secondary-button compact danger"
-            type="button"
-            aria-label={`停止项目 ${project.name}`}
-            onClick={onStop}
-          >
-            <X size={14} />
-            停止
-          </button>
-        ) : null}
-        <button
-          className="secondary-button compact"
-          type="button"
-          aria-label={`编辑项目 ${project.name}`}
-          disabled={disabled}
-          onClick={onEdit}
-        >
-          <Pencil size={14} />
-          编辑
-        </button>
-      </div>
-    </article>
-  );
-}
-
-interface EditProjectDialogProps {
-  project: AirdropProject;
-  profiles: ChromeProfile[];
-  mode?: "edit" | "create";
-  pendingDelete?: boolean;
-  onChange: (patch: Partial<AirdropProject>) => Promise<void>;
-  onSave?: (patch: Partial<AirdropProject>) => Promise<void>;
-  onCopyUrl?: (projectUrl: ProjectUrl) => Promise<void>;
-  onDuplicate?: () => void;
-  onRequestDelete?: () => void;
-  onCancelDelete?: () => void;
-  onConfirmDelete?: () => Promise<void>;
-  onClose: () => void;
-}
-
-function EditProjectDialog({
-  project,
-  profiles,
-  mode = "edit",
-  pendingDelete = false,
-  onChange,
-  onSave,
-  onCopyUrl,
-  onDuplicate,
-  onRequestDelete,
-  onCancelDelete,
-  onConfirmDelete,
-  onClose
-}: EditProjectDialogProps) {
-  const titleId = "edit-project-title";
-  const creating = mode === "create";
-  const [intervalDraft, setIntervalDraft] = useState(String(project.intervalSeconds));
-  const [urlImportOpen, setUrlImportOpen] = useState(false);
-  const [urlImportDraft, setUrlImportDraft] = useState("");
-  const projectUrls = projectEditableUrls(project);
-
-  useEffect(() => {
-    setIntervalDraft(String(project.intervalSeconds));
-    setUrlImportOpen(false);
-    setUrlImportDraft("");
-  }, [project.id]);
-
-  function toggleProfile(profileId: string, checked: boolean) {
-    const nextIds = checked
-      ? [...project.profileIds, profileId]
-      : project.profileIds.filter((id) => id !== profileId);
-    void onChange({ profileIds: [...new Set(nextIds)] });
-  }
-
-  function commitInterval() {
-    const nextInterval = normalizeBulkOpenIntervalSeconds(intervalDraft);
-    setIntervalDraft(String(nextInterval));
-    void onChange({ intervalSeconds: nextInterval });
-  }
-
-  function changeProjectUrl(projectUrlId: string, patch: Partial<ProjectUrl>) {
-    const nextUrls = projectUrls.map((projectUrl) =>
-      projectUrl.id === projectUrlId ? { ...projectUrl, ...patch } : projectUrl
-    );
-    void onChange({
-      urls: nextUrls,
-      url: primaryProjectUrl(nextUrls)
-    });
-  }
-
-  function normalizeProjectUrl(projectUrlId: string) {
-    const nextUrls = projectUrls.map((projectUrl) =>
-      projectUrl.id === projectUrlId
-        ? { ...projectUrl, url: normalizeLaunchUrl(projectUrl.url) }
-        : projectUrl
-    );
-    void onChange({
-      urls: nextUrls,
-      url: primaryProjectUrl(nextUrls)
-    });
-  }
-
-  function addProjectUrl() {
-    const nextUrls = [...projectUrls, createProjectUrl(projectUrls)];
-    void onChange({
-      urls: nextUrls,
-      url: primaryProjectUrl(nextUrls)
-    });
-  }
-
-  function moveProjectUrl(projectUrlId: string, offset: -1 | 1) {
-    const currentIndex = projectUrls.findIndex((projectUrl) => projectUrl.id === projectUrlId);
-    const nextIndex = currentIndex + offset;
-    if (currentIndex < 0 || nextIndex < 0 || nextIndex >= projectUrls.length) {
-      return;
-    }
-
-    const nextUrls = [...projectUrls];
-    const [movedUrl] = nextUrls.splice(currentIndex, 1);
-    nextUrls.splice(nextIndex, 0, movedUrl);
-    void onChange({
-      urls: nextUrls,
-      url: primaryProjectUrl(nextUrls)
-    });
-  }
-
-  function applyProjectUrlImport() {
-    const nextUrls = parseProjectUrlImportLines(urlImportDraft);
-    if (nextUrls.length === 0) {
-      return;
-    }
-
-    void onChange({
-      urls: nextUrls,
-      url: primaryProjectUrl(nextUrls)
-    });
-    setUrlImportDraft("");
-    setUrlImportOpen(false);
-  }
-
-  function removeProjectUrl(projectUrlId: string) {
-    const nextUrls = projectUrls.filter((projectUrl) => projectUrl.id !== projectUrlId);
-    const safeNextUrls =
-      nextUrls.length > 0 ? nextUrls : [createProjectUrl([], { id: "url-001", name: "主入口" })];
-    void onChange({
-      urls: safeNextUrls,
-      url: primaryProjectUrl(safeNextUrls)
-    });
-  }
-
-  function finalProjectPatch(): Partial<AirdropProject> {
-    const nextUrls = normalizeEditableProjectUrls(projectUrls);
-    const nextInterval = normalizeBulkOpenIntervalSeconds(intervalDraft);
-    setIntervalDraft(String(nextInterval));
-    return {
-      url: primaryProjectUrl(nextUrls),
-      urls: nextUrls,
-      intervalSeconds: nextInterval
-    };
-  }
-
-  return (
-    <div
-      className="modal-backdrop"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) {
-          onClose();
-        }
-      }}
-    >
-      <section
-        className="modal-card edit-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-      >
-        <div className="modal-header">
-          <div>
-            <h2 id={titleId}>{creating ? "新建项目" : `编辑项目 ${project.name}`}</h2>
-            <p>
-              {creating
-                ? "保存后才会创建项目记录"
-                : primaryProjectUrl(projectUrls)
-                  ? `${projectUrls.length} 个网址`
-                  : project.id}
-            </p>
-          </div>
-          <button
-            className="icon-button"
-            type="button"
-            aria-label={creating ? "取消新建项目" : "关闭项目编辑"}
-            onClick={onClose}
-          >
-            <X size={18} />
-          </button>
-        </div>
-
-        <div className="modal-body">
-          <div className="field">
-            <label htmlFor="project-name">项目名称</label>
-            <input
-              id="project-name"
-              aria-label="项目名称"
-              value={project.name}
-              onChange={(event) => void onChange({ name: event.target.value })}
-            />
-          </div>
-
-          <div className="field">
-            <div className="field-heading-row">
-              <span className="field-label">项目网址</span>
-              <div className="field-actions">
-                <button
-                  className="secondary-button compact"
-                  type="button"
-                  onClick={() => setUrlImportOpen((current) => !current)}
-                >
-                  <Upload size={14} />
-                  批量导入网址
-                </button>
-                <button className="secondary-button compact" type="button" onClick={addProjectUrl}>
-                  <Plus size={14} />
-                  添加网址
-                </button>
-              </div>
-            </div>
-            {urlImportOpen ? (
-              <div className="project-url-import">
-                <label>
-                  <span>批量网址</span>
-                  <textarea
-                    aria-label="批量网址文本"
-                    rows={5}
-                    value={urlImportDraft}
-                    placeholder="Galxe https://galxe.com/quest 每日任务"
-                    onChange={(event) => setUrlImportDraft(event.target.value)}
-                  />
-                </label>
-                <div className="project-url-import-actions">
-                  <button
-                    className="secondary-button compact"
-                    type="button"
-                    onClick={() => {
-                      setUrlImportDraft("");
-                      setUrlImportOpen(false);
-                    }}
-                  >
-                    取消导入
-                  </button>
-                  <button
-                    className="primary-button compact"
-                    type="button"
-                    onClick={applyProjectUrlImport}
-                  >
-                    应用导入网址
-                  </button>
-                </div>
-              </div>
-            ) : null}
-            <div className="project-url-list">
-              {projectUrls.map((projectUrl, index) => (
-                <div className="project-url-item" key={projectUrl.id}>
-                  <div className="project-url-item-header">
-                    <strong>网址 {index + 1}</strong>
-                    <div className="project-url-actions">
-                      <button
-                        className="icon-button compact"
-                        type="button"
-                        aria-label={`复制网址 ${projectUrl.name || index + 1}`}
-                        onClick={() => void onCopyUrl?.(projectUrl)}
-                      >
-                        <Copy size={14} />
-                      </button>
-                      <button
-                        className="icon-button compact"
-                        type="button"
-                        aria-label={`上移网址 ${projectUrl.name || index + 1}`}
-                        disabled={index === 0}
-                        onClick={() => moveProjectUrl(projectUrl.id, -1)}
-                      >
-                        <ArrowUp size={14} />
-                      </button>
-                      <button
-                        className="icon-button compact"
-                        type="button"
-                        aria-label={`下移网址 ${projectUrl.name || index + 1}`}
-                        disabled={index === projectUrls.length - 1}
-                        onClick={() => moveProjectUrl(projectUrl.id, 1)}
-                      >
-                        <ArrowDown size={14} />
-                      </button>
-                    {projectUrls.length > 1 ? (
-                      <button
-                        className="icon-button compact danger"
-                        type="button"
-                        aria-label={`删除网址 ${projectUrl.name || index + 1}`}
-                        onClick={() => removeProjectUrl(projectUrl.id)}
-                      >
-                        <Trash2 size={14} />
-                      </button>
-                    ) : null}
-                    </div>
-                  </div>
-                  <div className="project-url-fields">
-                    <label>
-                      <span>名称</span>
-                      <input
-                        aria-label={`网址名称 ${index + 1}`}
-                        value={projectUrl.name}
-                        onChange={(event) =>
-                          changeProjectUrl(projectUrl.id, { name: event.target.value })
-                        }
-                      />
-                    </label>
-                    <label>
-                      <span>网址</span>
-                      <input
-                        aria-label={index === 0 ? "项目网址" : `项目网址 ${index + 1}`}
-                        value={projectUrl.url}
-                        onBlur={() => normalizeProjectUrl(projectUrl.id)}
-                        onChange={(event) =>
-                          changeProjectUrl(projectUrl.id, { url: event.target.value })
-                        }
-                      />
-                    </label>
-                  </div>
-                  <label className="project-url-note">
-                    <span>网址备注</span>
-                    <textarea
-                      aria-label={`网址备注 ${index + 1}`}
-                      rows={2}
-                      value={projectUrl.notes}
-                      onChange={(event) =>
-                        changeProjectUrl(projectUrl.id, { notes: event.target.value })
-                      }
-                    />
-                  </label>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="field">
-            <label htmlFor="project-interval">打开间隔</label>
-            <input
-              id="project-interval"
-              aria-label="项目打开间隔秒"
-              type="text"
-              inputMode="numeric"
-              min="1"
-              max="60"
-              step="1"
-              value={intervalDraft}
-              onBlur={commitInterval}
-              onChange={(event) => {
-                const nextValue = event.target.value;
-                setIntervalDraft(nextValue);
-                if (nextValue.trim()) {
-                  void onChange({
-                    intervalSeconds: normalizeBulkOpenIntervalSeconds(nextValue)
-                  });
-                }
-              }}
-            />
-          </div>
-
-          <div className="field">
-            <label htmlFor="project-notes">备注</label>
-            <textarea
-              id="project-notes"
-              rows={3}
-              value={project.notes}
-              onChange={(event) => void onChange({ notes: event.target.value })}
-            />
-          </div>
-
-          <div className="field">
-            <span className="field-label">绑定账号</span>
-            <div className="project-profile-picker">
-              {profiles.map((profile) => {
-                const selected = project.profileIds.includes(profile.id);
-                return (
-                  <button
-                    key={profile.id}
-                    className={`project-profile-option ${selected ? "selected" : ""}`}
-                    type="button"
-                    aria-label={`绑定账号 ${profile.name} ${profile.id}`}
-                    aria-pressed={selected}
-                    onClick={() => toggleProfile(profile.id, !selected)}
-                  >
-                    <span>{profile.name}</span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          {!creating && onDuplicate ? (
-            <div className="project-edit-actions">
-              <span className="field-label">项目操作</span>
-              <button className="secondary-button" type="button" onClick={onDuplicate}>
-                <Copy size={16} />
-                复制项目
-              </button>
-            </div>
-          ) : null}
-
-          {!creating ? (
-            <div className="danger-zone">
-              <div>
-                <strong>危险操作</strong>
-                <p>删除入口只放在这里，避免在项目卡片上误触。</p>
-              </div>
-              <div className="danger-actions">
-                <button
-                  className="primary-button danger"
-                  type="button"
-                  onClick={onRequestDelete}
-                >
-                  <Trash2 size={16} />
-                  删除项目
-                </button>
-              </div>
-            </div>
-          ) : null}
-
-          {!creating && pendingDelete && onCancelDelete && onConfirmDelete ? (
-            <ProjectDeleteConfirmPanel
-              project={project}
-              onCancel={onCancelDelete}
-              onConfirm={onConfirmDelete}
-            />
-          ) : null}
-        </div>
-
-        <div className="modal-footer">
-          <button className="secondary-button" type="button" onClick={onClose}>
-            取消
-          </button>
-          <button
-            className="primary-button"
-            type="button"
-            onClick={() => void onSave?.(finalProjectPatch())}
-          >
-            保存项目
-          </button>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-interface BatchProfileDraft {
-  name: string;
-  tags: string[];
-  notes: string;
-}
-
-interface BatchCreateProfilesDialogProps {
-  value: string;
-  onChange: (value: string) => void;
-  onSave: () => void;
-  onClose: () => void;
-}
-
-function BatchCreateProfilesDialog({
-  value,
-  onChange,
-  onSave,
-  onClose
-}: BatchCreateProfilesDialogProps) {
-  const titleId = "batch-profile-title";
-  const drafts = parseBatchProfileLines(value);
-
-  return (
-    <div
-      className="modal-backdrop"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) {
-          onClose();
-        }
-      }}
-    >
-      <section
-        className="modal-card edit-modal batch-profile-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-      >
-        <div className="modal-header">
-          <div>
-            <h2 id={titleId}>批量新建账号</h2>
-            <p>{drafts.length > 0 ? `${drafts.length} 个账号待创建` : "保存后才会创建账号记录"}</p>
-          </div>
-          <button
-            className="icon-button"
-            type="button"
-            aria-label="取消批量新建"
-            onClick={onClose}
-          >
-            <X size={18} />
-          </button>
-        </div>
-
-        <div className="modal-body">
-          <div className="field">
-            <label htmlFor="batch-profile-text">账号文本</label>
-            <textarea
-              id="batch-profile-text"
-              aria-label="批量账号文本"
-              rows={9}
-              value={value}
-              placeholder="测试号一, galxe x, Google 已登录"
-              onChange={(event) => onChange(event.target.value)}
-            />
-          </div>
-
-          {drafts.length > 0 ? (
-            <div className="batch-profile-preview" aria-label="批量账号预览">
-              {drafts.slice(0, 5).map((draft, index) => (
-                <div key={`${draft.name}-${index}`} className="batch-profile-preview-row">
-                  <strong>{draft.name}</strong>
-                  <span>{draft.tags.length > 0 ? draft.tags.join(", ") : "无标签"}</span>
-                  <small>{draft.notes || "无备注"}</small>
-                </div>
-              ))}
-              {drafts.length > 5 ? <small className="muted-line">另有 {drafts.length - 5} 个账号</small> : null}
-            </div>
-          ) : null}
-        </div>
-
-        <div className="modal-footer">
-          <button className="secondary-button" type="button" onClick={onClose}>
-            取消
-          </button>
-          <button
-            className="primary-button"
-            type="button"
-            disabled={drafts.length === 0}
-            onClick={onSave}
-          >
-            创建 {drafts.length} 个账号
-          </button>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-interface BulkActionBarProps {
-  selectedCount: number;
-  bulkTag: string;
-  bulkUrl: string;
-  bulkOpenIntervalSeconds: string;
-  bulkOpenRunning: boolean;
-  windowInspecting: boolean;
-  windowTiling: boolean;
-  windowSyncing: boolean;
-  selectedProfiles: ChromeProfile[];
-  runningProfileIds: string[];
-  layoutSourceProfileId: string;
-  favoriteUrls: string[];
-  recentUrls: string[];
-  onBulkTagChange: (value: string) => void;
-  onBulkUrlChange: (value: string) => void;
-  onBulkOpenIntervalChange: (value: string) => void;
-  onLayoutSourceProfileChange: (value: string) => void;
-  onAppendTags: () => void;
-  onAddFavoriteUrl: () => void;
-  onRemoveFavoriteUrl: (url: string) => void;
-  onOpenUrl: () => void;
-  onInspectWindows: () => void;
-  onTileWindows: () => void;
-  onSyncLayout: () => void;
-  onStopOpenQueue: () => void;
-  onRequestDelete: () => void;
-  onClear: () => void;
-}
-
-function BulkActionBar({
-  selectedCount,
-  bulkTag,
-  bulkUrl,
-  bulkOpenIntervalSeconds,
-  bulkOpenRunning,
-  windowInspecting,
-  windowTiling,
-  windowSyncing,
-  selectedProfiles,
-  runningProfileIds,
-  layoutSourceProfileId,
-  favoriteUrls,
-  recentUrls,
-  onBulkTagChange,
-  onBulkUrlChange,
-  onBulkOpenIntervalChange,
-  onLayoutSourceProfileChange,
-  onAppendTags,
-  onAddFavoriteUrl,
-  onRemoveFavoriteUrl,
-  onOpenUrl,
-  onInspectWindows,
-  onTileWindows,
-  onSyncLayout,
-  onStopOpenQueue,
-  onRequestDelete,
-  onClear
-}: BulkActionBarProps) {
-  const visibleRecentUrls = recentUrls.filter((url) => !favoriteUrls.includes(url));
-  const runningSelectedProfiles = selectedProfiles.filter((profile) =>
-    runningProfileIds.includes(profile.id)
-  );
-  const windowActionDisabled =
-    bulkOpenRunning || windowInspecting || windowTiling || windowSyncing;
-
-  return (
-    <section className="bulk-action-bar" aria-label="批量操作">
-      <strong>已选择 {selectedCount} 个账号</strong>
-      <div className="bulk-url-form">
-        <input
-          aria-label="批量打开网址"
-          placeholder="输入网址"
-          value={bulkUrl}
-          disabled={bulkOpenRunning}
-          onChange={(event) => onBulkUrlChange(event.target.value)}
-        />
-        <label className="bulk-interval-control">
-          <span>间隔</span>
-          <input
-            aria-label="批量打开间隔秒"
-            type="number"
-            min="1"
-            max="60"
-            step="1"
-            value={bulkOpenIntervalSeconds}
-            disabled={bulkOpenRunning}
-            onChange={(event) => onBulkOpenIntervalChange(event.target.value)}
-          />
-          <span>秒</span>
-        </label>
-        <button
-          className="primary-button compact"
-          type="button"
-          disabled={bulkOpenRunning}
-          onClick={onOpenUrl}
-        >
-          {bulkOpenRunning ? "打开中" : "打开网址"}
-        </button>
-        {bulkOpenRunning ? (
-          <button
-            className="secondary-button compact danger"
-            type="button"
-            onClick={onStopOpenQueue}
-          >
-            停止
-          </button>
-        ) : null}
-        <button
-          className="secondary-button compact"
-          type="button"
-          disabled={bulkOpenRunning}
-          onClick={onAddFavoriteUrl}
-        >
-          设为常用
-        </button>
-        <button
-          className="secondary-button compact"
-          type="button"
-          disabled={windowActionDisabled}
-          onClick={onInspectWindows}
-        >
-          <List size={15} />
-          {windowInspecting ? "检查中" : "检查窗口"}
-        </button>
-        <button
-          className="secondary-button compact"
-          type="button"
-          disabled={windowActionDisabled}
-          onClick={onTileWindows}
-        >
-          <LayoutGrid size={15} />
-          {windowTiling ? "平铺中" : "平铺窗口"}
-        </button>
-        <label className="bulk-source-control">
-          <span>主账号</span>
-          <select
-            aria-label="布局同步主账号"
-            value={layoutSourceProfileId}
-            disabled={windowActionDisabled || runningSelectedProfiles.length === 0}
-            onChange={(event) => onLayoutSourceProfileChange(event.target.value)}
-          >
-            {runningSelectedProfiles.length === 0 ? (
-              <option value="">无运行账号</option>
-            ) : (
-              runningSelectedProfiles.map((profile) => (
-                <option key={profile.id} value={profile.id}>
-                  {profile.name}
-                </option>
-              ))
-            )}
-          </select>
-        </label>
-        <button
-          className="secondary-button compact"
-          type="button"
-          disabled={windowActionDisabled}
-          onClick={onSyncLayout}
-        >
-          {windowSyncing ? "同步中" : "同步布局"}
-        </button>
-      </div>
-      {favoriteUrls.length > 0 || visibleRecentUrls.length > 0 ? (
-        <div className="url-shortcut-panel">
-          {favoriteUrls.length > 0 ? (
-            <UrlShortcutGroup
-              label="常用"
-              urls={favoriteUrls}
-              actionLabel="使用常用网址"
-              onPick={onBulkUrlChange}
-              onRemove={onRemoveFavoriteUrl}
-            />
-          ) : null}
-          {visibleRecentUrls.length > 0 ? (
-            <UrlShortcutGroup
-              label="最近"
-              urls={visibleRecentUrls}
-              actionLabel="使用最近网址"
-              onPick={onBulkUrlChange}
-            />
-          ) : null}
-        </div>
-      ) : null}
-      <div className="bulk-tag-form">
-        <input
-          aria-label="批量追加标签"
-          placeholder="追加标签，逗号分隔"
-          value={bulkTag}
-          onChange={(event) => onBulkTagChange(event.target.value)}
-        />
-        <button className="primary-button compact" type="button" onClick={onAppendTags}>
-          追加标签
-        </button>
-      </div>
-      <button className="secondary-button compact" type="button" onClick={onClear}>
-        取消选择
-      </button>
-      <button
-        className="secondary-button compact danger"
-        type="button"
-        disabled={bulkOpenRunning}
-        onClick={onRequestDelete}
-      >
-        删除选中
-      </button>
-    </section>
-  );
-}
-
-interface UrlShortcutGroupProps {
-  label: string;
-  urls: string[];
-  actionLabel: string;
-  onPick: (url: string) => void;
-  onRemove?: (url: string) => void;
-}
-
-function UrlShortcutGroup({
-  label,
-  urls,
-  actionLabel,
-  onPick,
-  onRemove
-}: UrlShortcutGroupProps) {
-  return (
-    <div className="url-shortcut-group">
-      <span>{label}</span>
-      <div className="url-shortcut-list">
-        {urls.map((url) => {
-          const displayLabel = displayUrlLabel(url);
-          return (
-            <span className="url-shortcut-chip" key={url}>
-              <button
-                className="url-shortcut-button"
-                type="button"
-                aria-label={`${actionLabel} ${displayLabel}`}
-                onClick={() => onPick(url)}
-              >
-                {displayLabel}
-              </button>
-              {onRemove ? (
-                <button
-                  className="url-shortcut-remove"
-                  type="button"
-                  aria-label={`删除常用网址 ${displayLabel}`}
-                  onClick={() => onRemove(url)}
-                >
-                  <X size={12} />
-                </button>
-              ) : null}
-            </span>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-interface ProfileCardProps {
-  profile: ChromeProfile;
-  density: CardDensity;
-  selected: boolean;
-  running: boolean;
-  onLaunch: () => void;
-  onFocusWindow: () => void;
-  onEdit: () => void;
-  onToggleSelection: (selected: boolean) => void;
-}
-
-function ProfileCard({
-  profile,
-  density,
-  selected,
-  running,
-  onLaunch,
-  onFocusWindow,
-  onEdit,
-  onToggleSelection
-}: ProfileCardProps) {
-  const accent = accentDetailsForProfile(profile);
-  const cardStyle = { "--profile-accent": accent.hex } as CSSProperties;
-
-  return (
-    <article
-      className={`profile-card-shell ${selected ? "selected" : ""}`}
-      style={cardStyle}
-    >
-      <label className="profile-select-control">
-        <input
-          type="checkbox"
-          aria-label={`选择 ${profile.name}`}
-          checked={selected}
-          onChange={(event) => onToggleSelection(event.target.checked)}
-        />
-      </label>
-      <button
-        className={`profile-card ${density}`}
-        type="button"
-        aria-label={`启动 ${profile.name}`}
-        onClick={onLaunch}
-      >
-        <span className="profile-avatar" aria-label={`颜色 ${accent.label}`}>
-          {profileIndexLabel(profile.id)}
-        </span>
-        <span className="profile-card-main">
-          <strong>{profile.name}</strong>
-          <small>{profile.notes || profile.id}</small>
-          <span className="tag-list">
-            {profile.tags.length > 0 ? (
-              profile.tags.slice(0, 2).map((tag) => (
-                <span key={tag}>{tag}</span>
-              ))
-            ) : (
-              <small>未设置标签</small>
-            )}
-          </span>
-        </span>
-        {running ? (
-          <span className="profile-card-side">
-            <span className="profile-running-badge">运行中</span>
-          </span>
-        ) : null}
-      </button>
-      <button
-        className="profile-focus-button"
-        type="button"
-        aria-label={`切换到 ${profile.name}`}
-        onClick={onFocusWindow}
-        hidden={!running}
-      >
-        <ExternalLink size={14} />
-      </button>
-      <button
-        className="profile-edit-button"
-        type="button"
-        aria-label={`编辑 ${profile.name}`}
-        onClick={onEdit}
-      >
-        <Pencil size={15} />
-      </button>
-    </article>
-  );
-}
-
-interface EditProfileDialogProps {
-  profile: ChromeProfile;
-  rootPath: string;
-  selectedSize: number | null;
-  mode?: "edit" | "create";
-  onChange: (patch: Partial<ChromeProfile>) => Promise<void>;
-  onReveal?: () => Promise<void>;
-  onDuplicate?: () => Promise<void>;
-  onOpenAccountPlatform?: (accountPlatform: AccountPlatform) => void;
-  onCopyAccountPlatformUsername?: (accountPlatform: AccountPlatform) => void;
-  onDeleteRecord?: () => void;
-  onDeleteWithData?: () => void;
-  onSave?: () => Promise<void>;
-  onClose: () => void;
-}
-
-function EditProfileDialog({
-  profile,
-  rootPath,
-  selectedSize,
-  mode = "edit",
-  onChange,
-  onReveal,
-  onDuplicate,
-  onOpenAccountPlatform,
-  onCopyAccountPlatformUsername,
-  onDeleteRecord,
-  onDeleteWithData,
-  onSave,
-  onClose
-}: EditProfileDialogProps) {
-  const titleId = "edit-profile-title";
-  const creating = mode === "create";
-
-  return (
-    <div
-      className="modal-backdrop"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) {
-          onClose();
-        }
-      }}
-    >
-      <section
-        className="modal-card edit-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-      >
-        <div className="modal-header">
-          <div>
-            <h2 id={titleId}>{creating ? "新建账号" : `编辑 ${profile.name}`}</h2>
-            <p>{creating ? "保存后才会创建配置目录和账号记录" : profile.notes || profile.id}</p>
-          </div>
-          <div className="modal-header-actions">
-            <button
-              className="icon-button"
-              type="button"
-              aria-label={creating ? "取消新建账号" : "关闭编辑"}
-              onClick={onClose}
-            >
-              <X size={18} />
-            </button>
-          </div>
-        </div>
-
-        <div className="modal-body">
-          <div className="field">
-            <label htmlFor="profile-name">名称</label>
-            <input
-              id="profile-name"
-              value={profile.name}
-              onChange={(event) => void onChange({ name: event.target.value })}
-            />
-          </div>
-
-          <div className="field">
-            <span className="field-label">颜色</span>
-            <AccentColorPicker profile={profile} onChange={onChange} />
-          </div>
-
-          <div className="field">
-            <label htmlFor="profile-tags">
-              <Tags size={14} />
-              标签
-            </label>
-            <input
-              id="profile-tags"
-              value={profile.tags.join(", ")}
-              onChange={(event) =>
-                void onChange({
-                  tags: event.target.value.split(",").map((tag) => tag.trim())
-                })
-              }
-            />
-          </div>
-
-          <div className="field">
-            <label htmlFor="profile-notes">备注</label>
-            <textarea
-              id="profile-notes"
-              rows={3}
-              value={profile.notes}
-              onChange={(event) => void onChange({ notes: event.target.value })}
-            />
-          </div>
-
-          <AccountPlatformEditor
-            accountPlatforms={profile.accountPlatforms}
-            onChange={(accountPlatforms) => void onChange({ accountPlatforms })}
-            onOpen={creating ? undefined : onOpenAccountPlatform}
-            onCopyUsername={creating ? undefined : onCopyAccountPlatformUsername}
-          />
-
-          {!creating ? (
-            <>
-              <div className="field">
-                <span className="field-label">配置文件夹</span>
-                <div className="path-row">
-                  <code>{profilePath(rootPath, profile.id)}</code>
-                  <button
-                    className="secondary-button compact"
-                    type="button"
-                    onClick={() => void onReveal?.()}
-                  >
-                    <FolderOpen size={15} />
-                    打开文件夹
-                  </button>
-                </div>
-                <small className="muted-line">目录大小：{formatBytes(selectedSize)}</small>
-              </div>
-
-              <div className="action-grid">
-                <button
-                  className="secondary-button"
-                  type="button"
-                  onClick={() => void onDuplicate?.()}
-                >
-                  <Copy size={16} />
-                  复制账号
-                </button>
-              </div>
-
-              <div className="danger-zone">
-                <div>
-                  <strong>危险操作</strong>
-                  <p>删除入口只放在这里，避免在账号卡片上误触。</p>
-                </div>
-                <div className="danger-actions">
-                  <button
-                    className="secondary-button danger"
-                    type="button"
-                    onClick={onDeleteRecord}
-                  >
-                    <Trash2 size={16} />
-                    只删除记录
-                  </button>
-                  <button
-                    className="primary-button danger"
-                    type="button"
-                    onClick={onDeleteWithData}
-                  >
-                    <Trash2 size={16} />
-                    删除记录和文件夹
-                  </button>
-                </div>
-              </div>
-            </>
-          ) : null}
-
-        </div>
-
-        <div className="modal-footer">
-          <button className="secondary-button" type="button" onClick={onClose}>
-            取消
-          </button>
-          <button
-            className="primary-button"
-            type="button"
-            onClick={() => void onSave?.()}
-          >
-            保存账号
-          </button>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-interface AccountPlatformEditorProps {
-  accountPlatforms: AccountPlatform[];
-  onChange: (accountPlatforms: AccountPlatform[]) => void;
-  onOpen?: (accountPlatform: AccountPlatform) => void;
-  onCopyUsername?: (accountPlatform: AccountPlatform) => void;
-}
-
-function AccountPlatformEditor({
-  accountPlatforms,
-  onChange,
-  onOpen,
-  onCopyUsername
-}: AccountPlatformEditorProps) {
-  const [expandedIds, setExpandedIds] = useState<string[]>([]);
-
-  function addAccountPlatform() {
-    const accountPlatform = createAccountPlatform(accountPlatforms);
-    setExpandedIds((current) => [...current, accountPlatform.id]);
-    onChange([...accountPlatforms, accountPlatform]);
-  }
-
-  function patchAccountPlatform(
-    accountPlatformId: string,
-    patch: Partial<AccountPlatform>
-  ) {
-    onChange(updateAccountPlatform(accountPlatforms, accountPlatformId, patch));
-  }
-
-  function deleteAccountPlatform(accountPlatformId: string) {
-    setExpandedIds((current) => current.filter((id) => id !== accountPlatformId));
-    onChange(removeAccountPlatform(accountPlatforms, accountPlatformId));
-  }
-
-  function applyAccountPlatformTemplate(
-    accountPlatformId: string,
-    template: (typeof ACCOUNT_PLATFORM_TEMPLATES)[number]
-  ) {
-    patchAccountPlatform(accountPlatformId, {
-      platform: template.platform,
-      loginUrl: template.loginUrl
-    });
-  }
-
-  function toggleAccountPlatform(accountPlatformId: string) {
-    setExpandedIds((current) =>
-      current.includes(accountPlatformId)
-        ? current.filter((id) => id !== accountPlatformId)
-        : [...current, accountPlatformId]
-    );
-  }
-
-  return (
-    <section className="account-platform-section" aria-label="账号平台">
-      <div className="account-platform-header">
-        <span className="field-label">账号平台</span>
-        <button
-          className="secondary-button compact"
-          type="button"
-          onClick={addAccountPlatform}
-        >
-          <Plus size={15} />
-          添加账号平台
-        </button>
-      </div>
-
-      {accountPlatforms.length === 0 ? (
-        <p className="empty-inline">还没有保存平台登录资料。</p>
-      ) : (
-        <div className="account-platform-list">
-          {accountPlatforms.map((accountPlatform) => {
-            const label = accountPlatform.platform || "未命名平台";
-            const expanded = expandedIds.includes(accountPlatform.id);
-            return (
-              <article
-                className={`account-platform-card ${expanded ? "expanded" : ""}`}
-                key={accountPlatform.id}
-              >
-                <div className="account-platform-summary">
-                  <div className="account-platform-title">
-                    <strong>{label}</strong>
-                    <span>
-                      {accountPlatform.username ||
-                        displayUrlLabel(accountPlatform.loginUrl) ||
-                        "未填写用户名"}
-                    </span>
-                  </div>
-                  {accountPlatform.notes ? <p>{accountPlatform.notes}</p> : null}
-                  <div className="account-platform-actions">
-                    {onOpen && accountPlatform.loginUrl ? (
-                      <button
-                        className="icon-button compact"
-                        type="button"
-                        aria-label={`打开账号平台 ${label}`}
-                        onClick={() => onOpen(accountPlatform)}
-                      >
-                        <ExternalLink size={15} />
-                      </button>
-                    ) : null}
-                    {onCopyUsername && accountPlatform.username ? (
-                      <button
-                        className="icon-button compact"
-                        type="button"
-                        aria-label={`复制用户名 ${label}`}
-                        onClick={() => onCopyUsername(accountPlatform)}
-                      >
-                        <Copy size={15} />
-                      </button>
-                    ) : null}
-                    <button
-                      className="icon-button compact"
-                      type="button"
-                      aria-label={
-                        expanded ? `收起账号平台 ${label}` : `编辑账号平台 ${label}`
-                      }
-                      onClick={() => toggleAccountPlatform(accountPlatform.id)}
-                    >
-                      {expanded ? <X size={15} /> : <Pencil size={15} />}
-                    </button>
-                    <button
-                      className="icon-button compact danger"
-                      type="button"
-                      aria-label={`删除账号平台 ${label}`}
-                      onClick={() => deleteAccountPlatform(accountPlatform.id)}
-                    >
-                      <Trash2 size={15} />
-                    </button>
-                  </div>
-                </div>
-
-                {expanded ? (
-                  <div className="account-platform-expanded">
-                    <div className="platform-template-row">
-                      <span>常用</span>
-                      {ACCOUNT_PLATFORM_TEMPLATES.map((template) => (
-                        <button
-                          className="platform-template-button"
-                          type="button"
-                          aria-label={`套用 ${template.label} 模板`}
-                          key={template.label}
-                          onClick={() =>
-                            applyAccountPlatformTemplate(accountPlatform.id, template)
-                          }
-                        >
-                          {template.label}
-                        </button>
-                      ))}
-                    </div>
-                    <div className="account-platform-grid">
-                      <div className="field">
-                        <label htmlFor={`platform-name-${accountPlatform.id}`}>平台名称</label>
-                        <input
-                          id={`platform-name-${accountPlatform.id}`}
-                          value={accountPlatform.platform}
-                          placeholder="X / Galxe / Discord"
-                          onChange={(event) =>
-                            patchAccountPlatform(accountPlatform.id, {
-                              platform: event.target.value
-                            })
-                          }
-                        />
-                      </div>
-                      <div className="field">
-                        <label htmlFor={`platform-url-${accountPlatform.id}`}>登录网址</label>
-                        <input
-                          id={`platform-url-${accountPlatform.id}`}
-                          value={accountPlatform.loginUrl}
-                          placeholder="https://example.com/login"
-                          onChange={(event) =>
-                            patchAccountPlatform(accountPlatform.id, {
-                              loginUrl: event.target.value
-                            })
-                          }
-                          onBlur={(event) =>
-                            patchAccountPlatform(accountPlatform.id, {
-                              loginUrl: normalizeLaunchUrl(event.target.value)
-                            })
-                          }
-                        />
-                      </div>
-                      <div className="field">
-                        <label htmlFor={`platform-username-${accountPlatform.id}`}>
-                          平台用户名
-                        </label>
-                        <input
-                          id={`platform-username-${accountPlatform.id}`}
-                          value={accountPlatform.username}
-                          placeholder="用户名 / 邮箱"
-                          onChange={(event) =>
-                            patchAccountPlatform(accountPlatform.id, {
-                              username: event.target.value
-                            })
-                          }
-                        />
-                      </div>
-                      <div className="field">
-                        <label htmlFor={`platform-notes-${accountPlatform.id}`}>平台备注</label>
-                        <textarea
-                          id={`platform-notes-${accountPlatform.id}`}
-                          rows={2}
-                          value={accountPlatform.notes}
-                          placeholder="用途、登录状态、注意事项"
-                          onChange={(event) =>
-                            patchAccountPlatform(accountPlatform.id, {
-                              notes: event.target.value
-                            })
-                          }
-                        />
-                      </div>
-                    </div>
-                  </div>
-                ) : null}
-              </article>
-            );
-          })}
-        </div>
-      )}
-    </section>
-  );
-}
-
-interface AccentColorPickerProps {
-  profile: ChromeProfile;
-  onChange: (patch: Partial<ChromeProfile>) => Promise<void>;
-}
-
-function AccentColorPicker({ profile, onChange }: AccentColorPickerProps) {
-  const currentColor = resolveAccentColor(profile);
-
-  return (
-    <div className="color-swatch-row">
-      {PROFILE_ACCENT_COLORS.map((color) => {
-        const accent = ACCENT_DETAILS[color];
-        return (
-          <button
-            key={color}
-            className={`color-swatch-button ${currentColor === color ? "active" : ""}`}
-            type="button"
-            aria-label={`选择颜色 ${accent.label}`}
-            onClick={() => void onChange({ accentColor: color })}
-          >
-            <span
-              className="color-swatch"
-              style={{ "--profile-accent": accent.hex } as CSSProperties}
-            />
-            {accent.label}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-interface SettingsDialogProps {
-  rootPath: string;
-  rootStatus: RootStatus | null;
-  chromeStatus: ChromeStatus | null;
-  healthReport: RootHealthReport | null;
-  healthChecking: boolean;
-  healthRepairing: boolean;
-  orphanRegisteringId: string | null;
-  repairResult: RootRepairResult | null;
-  backupResult: ProfileBackupResult | null;
-  backupPathDraft: string;
-  backupWorking: "create" | "restore" | null;
-  restoreConfirmOpen: boolean;
-  fullBackupScope: FullBackupScope;
-  fullBackupPreview: FullProfileBackupPreview | null;
-  fullBackupResult: FullProfileBackupResult | null;
-  fullBackupPathDraft: string;
-  fullRestorePreview: FullProfileRestorePreview | null;
-  fullBackupWorking: FullBackupWorking | null;
-  selectedProfileCount: number;
-  browserPathDraft: string;
-  themeDraft: AppTheme;
-  onRootPathChange: (value: string) => void;
-  onBrowserPathChange: (value: string) => void;
-  onThemeChange: (value: AppTheme) => void;
-  onApplyRootPath: () => Promise<void>;
-  onSaveSettings: () => Promise<void>;
-  onHealthCheck: () => Promise<void>;
-  onRepairHealth: () => Promise<void>;
-  onRegisterOrphanProfile: (profileId: string) => Promise<void>;
-  onCreateBackup: () => Promise<void>;
-  onRequestRestoreBackup: () => void;
-  onConfirmRestoreBackup: () => Promise<void>;
-  onCancelRestoreBackup: () => void;
-  onFullBackupScopeChange: (scope: FullBackupScope) => void;
-  onPreviewFullBackup: () => Promise<void>;
-  onCreateFullBackup: () => Promise<void>;
-  onPreviewFullRestore: () => Promise<void>;
-  onRequestFullRestore: () => void;
-  onRevealRootDirectory: () => Promise<void>;
-  onRevealBackupsDirectory: () => Promise<void>;
-  onBackupPathChange: (value: string) => void;
-  onFullBackupPathChange: (value: string) => void;
-  onClose: () => void;
-}
-
-function SettingsDialog({
-  rootPath,
-  rootStatus,
-  chromeStatus,
-  healthReport,
-  healthChecking,
-  healthRepairing,
-  orphanRegisteringId,
-  repairResult,
-  backupResult,
-  backupPathDraft,
-  backupWorking,
-  restoreConfirmOpen,
-  fullBackupScope,
-  fullBackupPreview,
-  fullBackupResult,
-  fullBackupPathDraft,
-  fullRestorePreview,
-  fullBackupWorking,
-  selectedProfileCount,
-  browserPathDraft,
-  themeDraft,
-  onRootPathChange,
-  onBrowserPathChange,
-  onThemeChange,
-  onApplyRootPath,
-  onSaveSettings,
-  onHealthCheck,
-  onRepairHealth,
-  onRegisterOrphanProfile,
-  onCreateBackup,
-  onRequestRestoreBackup,
-  onConfirmRestoreBackup,
-  onCancelRestoreBackup,
-  onFullBackupScopeChange,
-  onPreviewFullBackup,
-  onCreateFullBackup,
-  onPreviewFullRestore,
-  onRequestFullRestore,
-  onRevealRootDirectory,
-  onRevealBackupsDirectory,
-  onBackupPathChange,
-  onFullBackupPathChange,
-  onClose
-}: SettingsDialogProps) {
-  const titleId = "settings-title";
-
-  return (
-    <div
-      className="modal-backdrop"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) {
-          onClose();
-        }
-      }}
-    >
-      <section
-        className="modal-card settings-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-      >
-        <div className="modal-header">
-          <div>
-            <h2 id={titleId}>设置</h2>
-            <p>数据目录与浏览器路径</p>
-          </div>
-          <button className="icon-button" type="button" aria-label="关闭设置" onClick={onClose}>
-            <X size={18} />
-          </button>
-        </div>
-
-        <div className="field">
-          <label htmlFor="root-path">配置根目录</label>
-          <div className="path-row">
-            <input
-              id="root-path"
-              value={rootPath}
-              onChange={(event) => onRootPathChange(event.target.value)}
-            />
-            <button className="secondary-button compact" type="button" onClick={onApplyRootPath}>
-              检测
-            </button>
-          </div>
-          <div className="settings-inline-actions">
-            <button
-              className="secondary-button compact"
-              type="button"
-              onClick={() => void onRevealRootDirectory()}
-            >
-              <FolderOpen size={15} />
-              打开数据目录
-            </button>
-            <button
-              className="secondary-button compact"
-              type="button"
-              onClick={() => void onRevealBackupsDirectory()}
-            >
-              <FolderOpen size={15} />
-              打开备份目录
-            </button>
-          </div>
-        </div>
-
-        <div className="field">
-          <label htmlFor="browser-path">Chrome 路径</label>
-          <div className="path-row">
-            <input
-              id="browser-path"
-              value={browserPathDraft}
-              onChange={(event) => onBrowserPathChange(event.target.value)}
-            />
-            <button className="secondary-button compact" type="button" onClick={onSaveSettings}>
-              检测
-            </button>
-          </div>
-        </div>
-
-        <div className="field">
-          <span className="field-label">外观</span>
-          <div className="theme-toggle" role="group" aria-label="外观主题">
-            <button
-              className={themeDraft === "light" ? "active" : ""}
-              type="button"
-              aria-pressed={themeDraft === "light"}
-              onClick={() => onThemeChange("light")}
-            >
-              <Sun size={15} />
-              白天
-            </button>
-            <button
-              className={themeDraft === "dark" ? "active" : ""}
-              type="button"
-              aria-pressed={themeDraft === "dark"}
-              onClick={() => onThemeChange("dark")}
-            >
-              <Moon size={15} />
-              夜晚
-            </button>
-          </div>
-        </div>
-
-        <div className="settings-status">
-          <span className={`status-badge ${rootStatus?.writable ? "active" : "needs_check"}`}>
-            {rootStatus?.writable ? "根目录正常" : "根目录待检测"}
-          </span>
-          <span className={`status-badge ${chromeStatus?.available ? "active" : "needs_check"}`}>
-            {chromeStatus?.available ? "浏览器正常" : "浏览器待检测"}
-          </span>
-        </div>
-
-        <div className="settings-health">
-          <div className="settings-health-header">
-            <div>
-              <strong>目录健康</strong>
-              <p>检查索引、Profile 文件夹和未登记目录。</p>
-            </div>
-            <div className="settings-health-actions">
-              <button
-                className="secondary-button compact"
-                type="button"
-                disabled={healthChecking}
-                onClick={() => void onHealthCheck()}
-              >
-                <ShieldCheck size={15} />
-                {healthChecking ? "检查中" : "健康检查"}
-              </button>
-              <button
-                className="secondary-button compact"
-                type="button"
-                disabled={healthRepairing}
-                onClick={() => void onRepairHealth()}
-              >
-                <Wrench size={15} />
-                {healthRepairing ? "修复中" : "修复可自动处理项"}
-              </button>
-            </div>
-          </div>
-          {healthReport ? (
-            <HealthReportPanel
-              report={healthReport}
-              registeringOrphanId={orphanRegisteringId}
-              onRegisterOrphan={onRegisterOrphanProfile}
-            />
-          ) : (
-            <p className="health-empty">尚未运行健康检查。</p>
-          )}
-          {repairResult ? <RepairResultPanel result={repairResult} /> : null}
-        </div>
-
-        <div className="settings-backup">
-          <div className="settings-health-header">
-            <div>
-              <strong>数据备份</strong>
-              <p>备份账号索引和设置，不包含 Chrome profile 文件夹。</p>
-            </div>
-            <button
-              className="secondary-button compact"
-              type="button"
-              disabled={backupWorking !== null}
-              onClick={() => void onCreateBackup()}
-            >
-              <Download size={15} />
-              {backupWorking === "create" ? "备份中" : "创建备份"}
-            </button>
-          </div>
-          <div className="backup-restore-row">
-            <input
-              aria-label="备份文件路径"
-              placeholder="粘贴备份 JSON 路径"
-              value={backupPathDraft}
-              onChange={(event) => onBackupPathChange(event.target.value)}
-            />
-            <button
-              className="secondary-button compact"
-              type="button"
-              disabled={backupWorking !== null}
-              onClick={onRequestRestoreBackup}
-            >
-              <Upload size={15} />
-              {backupWorking === "restore" ? "恢复中" : "从备份恢复"}
-            </button>
-          </div>
-          {restoreConfirmOpen ? (
-            <div className="confirm-panel compact-confirm">
-              <div>
-                <strong>确认从备份恢复</strong>
-                <p>会覆盖当前账号索引和设置，不会删除已有 Chrome profile 文件夹。</p>
-              </div>
-              <div className="confirm-actions">
-                <button
-                  className="secondary-button compact"
-                  type="button"
-                  onClick={onCancelRestoreBackup}
-                >
-                  取消
-                </button>
-                <button
-                  className="primary-button compact"
-                  type="button"
-                  disabled={backupWorking !== null}
-                  onClick={() => void onConfirmRestoreBackup()}
-                >
-                  确认恢复
-                </button>
-              </div>
-            </div>
-          ) : null}
-          {backupResult ? (
-            <div className="backup-result">
-              <span>{backupResult.profileCount} 个账号</span>
-              <code>{backupResult.path}</code>
-            </div>
-          ) : (
-            <p className="health-empty">尚未创建本轮备份。</p>
-          )}
-        </div>
-
-        <div className="settings-backup full-backup-section">
-          <div className="settings-health-header">
-            <div>
-              <strong>完整备份</strong>
-              <p>备份账号索引、设置和 Chrome profile 文件夹。</p>
-            </div>
-          </div>
-
-          <div className="full-backup-controls">
-            <div className="theme-toggle" role="group" aria-label="完整备份范围">
-              <button
-                className={fullBackupScope === "all" ? "active" : ""}
-                type="button"
-                aria-pressed={fullBackupScope === "all"}
-                onClick={() => onFullBackupScopeChange("all")}
-              >
-                全部账号
-              </button>
-              <button
-                className={fullBackupScope === "selected" ? "active" : ""}
-                type="button"
-                aria-pressed={fullBackupScope === "selected"}
-                onClick={() => onFullBackupScopeChange("selected")}
-              >
-                选中账号
-              </button>
-            </div>
-            <span className="profile-count">{selectedProfileCount} 个已选</span>
-            <button
-              className="secondary-button compact"
-              type="button"
-              disabled={fullBackupWorking !== null}
-              onClick={() => void onPreviewFullBackup()}
-            >
-              {fullBackupWorking === "preview" ? "预览中" : "预览完整备份"}
-            </button>
-            <button
-              className="primary-button compact"
-              type="button"
-              disabled={fullBackupWorking !== null}
-              onClick={() => void onCreateFullBackup()}
-            >
-              {fullBackupWorking === "create" ? "备份中" : "创建完整备份"}
-            </button>
-          </div>
-
-          {fullBackupPreview ? (
-            <div className="backup-result">
-              <div className="backup-summary-row">
-                <span>{fullBackupPreview.profileCount} 个账号</span>
-                <span>预计 {formatBytes(fullBackupPreview.totalBytes)}</span>
-              </div>
-              <code>{fullBackupPreview.destinationDir}</code>
-            </div>
-          ) : (
-            <p className="health-empty">预览后可以确认本次会备份哪些 profile 文件夹。</p>
-          )}
-
-          {fullBackupResult ? (
-            <div className="backup-result">
-              <div className="backup-summary-row">
-                <span>{fullBackupResult.profileCount} 个账号</span>
-                <span>{formatBytes(fullBackupResult.totalBytes)}</span>
-              </div>
-              <code>{fullBackupResult.path}</code>
-            </div>
-          ) : null}
-
-          <div className="backup-restore-row">
-            <input
-              aria-label="完整备份目录路径"
-              placeholder="粘贴完整备份目录路径"
-              value={fullBackupPathDraft}
-              onChange={(event) => onFullBackupPathChange(event.target.value)}
-            />
-            <button
-              className="secondary-button compact"
-              type="button"
-              disabled={fullBackupWorking !== null}
-              onClick={() => void onPreviewFullRestore()}
-            >
-              {fullBackupWorking === "restore-preview" ? "扫描中" : "扫描完整备份"}
-            </button>
-          </div>
-
-          {fullRestorePreview ? (
-            <div className="backup-result full-restore-preview">
-              <div className="backup-summary-row">
-                <span>{fullRestorePreview.profileCount} 个账号</span>
-                <span>新增 {fullRestorePreview.newProfileIds.length} 个</span>
-                <span>覆盖 {fullRestorePreview.overwriteProfileIds.length} 个</span>
-                <span>{formatBytes(fullRestorePreview.totalBytes)}</span>
-              </div>
-              <code>{fullRestorePreview.path}</code>
-              <button
-                className="primary-button danger compact"
-                type="button"
-                disabled={fullBackupWorking !== null}
-                onClick={onRequestFullRestore}
-              >
-                恢复完整备份
-              </button>
-            </div>
-          ) : null}
-        </div>
-
-        <div className="modal-footer">
-          <button className="primary-button" type="button" onClick={onSaveSettings}>
-            保存设置
-          </button>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-interface HealthReportPanelProps {
-  report: RootHealthReport;
-  registeringOrphanId: string | null;
-  onRegisterOrphan: (profileId: string) => Promise<void>;
-}
-
-interface RepairResultPanelProps {
-  result: RootRepairResult;
-}
-
-function RepairResultPanel({ result }: RepairResultPanelProps) {
-  return (
-    <div className="repair-result" aria-label="自动修复结果">
-      <strong>自动修复结果</strong>
-      {result.actions.length === 0 ? (
-        <p className="health-empty">没有可自动修复的问题。</p>
-      ) : (
-        <ul className="repair-action-list">
-          {result.actions.map((action) => (
-            <li key={`${action.code}-${action.profileId ?? action.path ?? action.title}`}>
-              <div>
-                <strong>{action.title}</strong>
-                {action.profileId ? <span>{action.profileId}</span> : null}
-              </div>
-              <p>{action.detail}</p>
-              {action.path ? <code>{action.path}</code> : null}
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-function HealthReportPanel({
-  report,
-  registeringOrphanId,
-  onRegisterOrphan
-}: HealthReportPanelProps) {
-  const { profileCount, warningCount, errorCount } = report.summary;
-  const isClean = report.issues.length === 0;
-
-  return (
-    <div className="health-report" aria-label="目录健康检查结果">
-      <div className="health-summary">
-        <span>{profileCount} 个账号</span>
-        {errorCount > 0 ? <span className="health-chip error">{errorCount} 个错误</span> : null}
-        {warningCount > 0 ? (
-          <span className="health-chip warning">{warningCount} 个提醒</span>
-        ) : null}
-        {isClean ? <span className="health-chip active">未发现问题</span> : null}
-      </div>
-
-      {isClean ? (
-        <p className="health-empty">索引和配置目录当前一致。</p>
-      ) : (
-        <ul className="health-issue-list">
-          {report.issues.map((issue) => {
-            const orphanProfileId =
-              issue.code === "orphan_profile_dir" ? issue.profileId : null;
-            return (
-              <li key={`${issue.code}-${issue.profileId ?? issue.path ?? issue.title}`}>
-                <div>
-                  <span className={`health-severity ${issue.severity}`}>
-                    {issue.severity === "error" ? "错误" : "提醒"}
-                  </span>
-                  <strong>{issue.title}</strong>
-                </div>
-                <p>{issue.detail}</p>
-                {issue.path ? <code>{issue.path}</code> : null}
-                {orphanProfileId ? (
-                  <button
-                    className="secondary-button compact health-issue-action"
-                    type="button"
-                    aria-label={`登记为账号 ${orphanProfileId}`}
-                    disabled={registeringOrphanId === orphanProfileId}
-                    onClick={() => void onRegisterOrphan(orphanProfileId)}
-                  >
-                    <UserPlus size={15} />
-                    {registeringOrphanId === orphanProfileId ? "登记中" : "登记为账号"}
-                  </button>
-                ) : null}
-              </li>
-            );
-          })}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-interface DeleteConfirmPanelProps {
-  pendingDelete: PendingDelete;
-  onCancel: () => void;
-  onConfirm: () => Promise<void>;
-}
-
-interface ProjectDeleteConfirmPanelProps {
-  project: AirdropProject;
-  onCancel: () => void;
-  onConfirm: () => Promise<void>;
-}
-
-function ProjectDeleteConfirmPanel({
-  project,
-  onCancel,
-  onConfirm
-}: ProjectDeleteConfirmPanelProps) {
-  return (
-    <div className="confirm-panel">
-      <div>
-        <strong>确认删除项目</strong>
-        <p>{project.name} 会从项目列表移除，不会删除任何 Chrome profile。</p>
-      </div>
-      <div className="confirm-actions">
-        <button className="secondary-button compact" type="button" onClick={onCancel}>
-          取消
-        </button>
-        <button
-          className="primary-button compact danger"
-          type="button"
-          aria-label="确认删除项目"
-          onClick={() => void onConfirm()}
-        >
-          确认删除
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function DeleteConfirmDialog({
-  pendingDelete,
-  onCancel,
-  onConfirm
-}: DeleteConfirmPanelProps) {
-  const deletingData = pendingDelete.mode === "data";
-  const titleId = "account-delete-confirm-title";
-  const title = deletingData ? "确认删除账号和文件夹" : "确认只删除账号记录";
-
-  return (
-    <div
-      className="modal-backdrop"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) {
-          onCancel();
-        }
-      }}
-    >
-      <section
-        className="modal-card delete-confirm-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-      >
-        <div className="modal-header">
-          <div>
-            <h2 id={titleId}>{title}</h2>
-            <p>删除前再确认一次，避免误触。</p>
-          </div>
-          <button className="icon-button" type="button" aria-label="取消删除账号" onClick={onCancel}>
-            <X size={18} />
-          </button>
-        </div>
-        <p>
-          {deletingData
-            ? `${pendingDelete.profile.name} 的记录和 profile 文件夹都会被删除。`
-            : `${pendingDelete.profile.name} 会从列表移除，profile 文件夹会保留。`}
-        </p>
-        <div className="confirm-actions">
-          <button className="secondary-button" type="button" onClick={onCancel}>
-            取消
-          </button>
-          <button
-            className={`primary-button ${deletingData ? "danger" : ""}`}
-            type="button"
-            onClick={() => void onConfirm()}
-          >
-            确认删除
-          </button>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-interface BatchDeleteConfirmDialogProps {
-  profiles: ChromeProfile[];
-  working: DeleteMode | null;
-  onCancel: () => void;
-  onConfirm: (mode: DeleteMode) => Promise<void>;
-}
-
-function BatchDeleteConfirmDialog({
-  profiles,
-  working,
-  onCancel,
-  onConfirm
-}: BatchDeleteConfirmDialogProps) {
-  const titleId = "batch-delete-confirm-title";
-
-  return (
-    <div
-      className="modal-backdrop"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) {
-          onCancel();
-        }
-      }}
-    >
-      <section
-        className="modal-card delete-confirm-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-      >
-        <div className="modal-header">
-          <div>
-            <h2 id={titleId}>确认批量删除账号</h2>
-            <p>删除前再确认一次，避免误触。</p>
-          </div>
-          <button
-            className="icon-button"
-            type="button"
-            aria-label="取消批量删除账号"
-            onClick={onCancel}
-          >
-            <X size={18} />
-          </button>
-        </div>
-        <p>将删除 {profiles.length} 个账号。</p>
-        <div className="confirm-actions">
-          <button className="secondary-button" type="button" onClick={onCancel}>
-            取消
-          </button>
-          <button
-            className="secondary-button danger"
-            type="button"
-            disabled={working !== null}
-            onClick={() => void onConfirm("record")}
-          >
-            {working === "record" ? "删除中" : "只删除记录"}
-          </button>
-          <button
-            className="primary-button danger"
-            type="button"
-            disabled={working !== null}
-            onClick={() => void onConfirm("data")}
-          >
-            {working === "data" ? "删除中" : "删除记录和文件夹"}
-          </button>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-interface FullRestoreConfirmDialogProps {
-  preview: FullProfileRestorePreview;
-  working: boolean;
-  onCancel: () => void;
-  onConfirm: () => Promise<void>;
-}
-
-function FullRestoreConfirmDialog({
-  preview,
-  working,
-  onCancel,
-  onConfirm
-}: FullRestoreConfirmDialogProps) {
-  const titleId = "full-restore-confirm-title";
-
-  return (
-    <div
-      className="modal-backdrop"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) {
-          onCancel();
-        }
-      }}
-    >
-      <section
-        className="modal-card delete-confirm-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-      >
-        <div className="modal-header">
-          <div>
-            <h2 id={titleId}>确认恢复完整备份</h2>
-            <p>恢复前再确认一次，避免误触。</p>
-          </div>
-          <button
-            className="icon-button"
-            type="button"
-            aria-label="取消恢复完整备份"
-            onClick={onCancel}
-          >
-            <X size={18} />
-          </button>
-        </div>
-        <p>
-          将恢复 {preview.profileCount} 个账号，新增 {preview.newProfileIds.length} 个，
-          覆盖 {preview.overwriteProfileIds.length} 个已存在的 profile 文件夹。
-        </p>
-        <code className="confirm-path">{preview.path}</code>
-        <div className="confirm-actions">
-          <button className="secondary-button" type="button" onClick={onCancel}>
-            取消
-          </button>
-          <button
-            className="primary-button danger"
-            type="button"
-            disabled={working}
-            onClick={() => void onConfirm()}
-          >
-            {working ? "恢复中" : "确认恢复"}
-          </button>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function profileIndexLabel(profileId: string): string {
-  const match = profileId.match(/(\d+)$/);
-  if (!match) {
-    return "01";
-  }
-  return match[1].slice(-2).padStart(2, "0");
-}
-
-function resolveAccentColor(profile: ChromeProfile): ProfileAccentColor {
-  if (profile.accentColor && profile.accentColor in ACCENT_DETAILS) {
-    return profile.accentColor;
-  }
-  return defaultAccentColor(profile.id);
-}
-
-function accentDetailsForProfile(profile: ChromeProfile) {
-  return ACCENT_DETAILS[resolveAccentColor(profile)];
-}
-
-function sameStringList(left: string[], right: string[]): boolean {
-  if (left.length !== right.length) {
-    return false;
-  }
-  return left.every((value, index) => value === right[index]);
-}
-
-function normalizeLaunchUrl(value: string): string {
-  const cleaned = value.trim();
-  if (!cleaned) {
-    return "";
-  }
-  if (/^https?:\/\//i.test(cleaned)) {
-    return cleaned;
-  }
-  return `https://${cleaned}`;
-}
-
-function createUrlLibraryDraft(item?: UrlLibraryItem | null): UrlLibraryDraft {
-  return {
-    name: item?.name ?? "",
-    url: item?.url ?? "",
-    tags: item?.tags.join(", ") ?? "",
-    notes: item?.notes ?? ""
-  };
-}
-
-function createUrlLibraryItem(
-  item: Pick<UrlLibraryItem, "name" | "url" | "tags" | "notes">,
-  existingItems: UrlLibraryItem[],
-  now: string
-): UrlLibraryItem {
-  return {
-    id: nextUrlLibraryId(existingItems),
-    name: item.name,
-    url: normalizeLaunchUrl(item.url),
-    tags: [...new Set(item.tags.map((tag) => tag.trim()).filter(Boolean))],
-    notes: item.notes,
-    createdAt: now,
-    updatedAt: now
-  };
-}
-
-function nextUrlLibraryId(items: UrlLibraryItem[]): string {
-  const usedIds = new Set(items.map((item) => item.id));
-  let index = items.length + 1;
-  let id = `url-${String(index).padStart(3, "0")}`;
-  while (usedIds.has(id)) {
-    index += 1;
-    id = `url-${String(index).padStart(3, "0")}`;
-  }
-  return id;
-}
-
-function parseUrlTags(value: string): string[] {
-  return [
-    ...new Set(
-      value
-        .split(/[,，]/)
-        .map((tag) => tag.trim())
-        .filter(Boolean)
-    )
-  ];
-}
-
-function normalizeBulkOpenIntervalSeconds(value: string): number {
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed)) {
-    return Number.parseInt(DEFAULT_BULK_OPEN_INTERVAL_SECONDS, 10);
-  }
-
-  return Math.min(60, Math.max(1, parsed));
-}
-
-function displayUrlLabel(url: string): string {
-  try {
-    const parsed = new URL(url);
-    const path = `${parsed.pathname}${parsed.search}`.replace(/\/$/, "");
-    return `${parsed.host}${path}`;
-  } catch {
-    return url.replace(/^https?:\/\//i, "");
-  }
-}
-
-function formatWindowInspectionSummary(
-  profileName: string,
-  windows: ChromeWindowInfo[]
-): string {
-  const firstWindow = windows[0];
-  const minimizedText = firstWindow?.minimized ? "，已最小化" : "";
-  const firstWindowDetail = firstWindow
-    ? `（${firstWindow.width}x${firstWindow.height} @ ${firstWindow.x},${firstWindow.y}${minimizedText}）`
-    : "";
-
-  return `${profileName} ${windows.length} 个窗口${firstWindowDetail}`;
-}
-
-function availableScreenWidth(): number {
-  return Math.max(1, window.screen.availWidth || window.innerWidth || 1);
-}
-
-function availableScreenHeight(): number {
-  return Math.max(1, window.screen.availHeight || window.innerHeight || 1);
-}
-
-function availableScreenLeft(): number {
-  return finiteScreenOffset(screenOffset("availLeft"));
-}
-
-function availableScreenTop(): number {
-  return finiteScreenOffset(screenOffset("availTop"));
-}
-
-function screenOffset(property: "availLeft" | "availTop"): number {
-  const screenWithOffsets = window.screen as Screen &
-    Partial<Record<"availLeft" | "availTop", number>>;
-  return screenWithOffsets[property] ?? 0;
-}
-
-function finiteScreenOffset(value: number): number {
-  return Number.isFinite(value) ? value : 0;
-}
-
-function maxTileableWindowCount(screenWidth: number, screenHeight: number): number {
-  const columns = Math.max(1, Math.floor(screenWidth / MIN_TILED_WINDOW_WIDTH));
-  const rows = Math.max(1, Math.floor(screenHeight / MIN_TILED_WINDOW_HEIGHT));
-  return columns * rows;
-}
-
-function tileBoundsForCount(
-  count: number,
-  screenWidth: number,
-  screenHeight: number,
-  originX = 0,
-  originY = 0
-): WindowBounds[] {
-  if (count <= 0) {
-    return [];
-  }
-
-  const columns = Math.ceil(Math.sqrt(count));
-  const rows = Math.ceil(count / columns);
-  const tileWidth = Math.floor(screenWidth / columns);
-  const tileHeight = Math.floor(screenHeight / rows);
-
-  return Array.from({ length: count }, (_, index) => {
-    const column = index % columns;
-    const row = Math.floor(index / columns);
-    return {
-      x: originX + column * tileWidth,
-      y: originY + row * tileHeight,
-      width: tileWidth,
-      height: tileHeight
-    };
-  });
-}
-
-function windowMatchesBounds(windowInfo: ChromeWindowInfo, bounds: WindowBounds): boolean {
-  return (
-    Math.abs(windowInfo.x - bounds.x) <= WINDOW_BOUNDS_TOLERANCE &&
-    Math.abs(windowInfo.y - bounds.y) <= WINDOW_BOUNDS_TOLERANCE &&
-    Math.abs(windowInfo.width - bounds.width) <= WINDOW_BOUNDS_TOLERANCE &&
-    Math.abs(windowInfo.height - bounds.height) <= WINDOW_BOUNDS_TOLERANCE
-  );
-}
-
-function parseBatchProfileLines(value: string): BatchProfileDraft[] {
-  return value
-    .split(/\r?\n/)
-    .map((line) => parseBatchProfileLine(line))
-    .filter((profile): profile is BatchProfileDraft => Boolean(profile));
-}
-
-function parseBatchProfileLine(line: string): BatchProfileDraft | null {
-  const cleanedLine = line.trim();
-  if (!cleanedLine) {
-    return null;
-  }
-
-  const parts = cleanedLine.includes("\t")
-    ? cleanedLine.split("\t").map((part) => part.trim())
-    : cleanedLine.includes("|")
-      ? cleanedLine.split("|").map((part) => part.trim())
-      : cleanedLine.split(/[,，]/).map((part) => part.trim());
-  const [name = "", tagsRaw = "", ...noteParts] = parts;
-  const cleanedName = name.trim();
-  if (!cleanedName) {
-    return null;
-  }
-
-  return {
-    name: cleanedName,
-    tags: parseBatchProfileTags(tagsRaw),
-    notes: noteParts.join(", ").trim()
-  };
-}
-
-function parseBatchProfileTags(value: string): string[] {
-  const seen = new Set<string>();
-  const tags: string[] = [];
-
-  for (const tag of value.split(/[\s,，、;；]+/)) {
-    const cleaned = tag.trim();
-    if (!cleaned || seen.has(cleaned)) {
-      continue;
-    }
-    seen.add(cleaned);
-    tags.push(cleaned);
-  }
-
-  return tags;
-}
-
 function isImportCandidateSelectable(candidate: ProfileImportCandidate): boolean {
   return candidate.confidence !== "skipped" && !candidate.duplicateProfileId;
 }
@@ -5656,320 +3247,6 @@ function createProfileUid(): string {
   }
 
   return `profile-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-function parseProjectUrlImportLines(value: string): ProjectUrl[] {
-  return value
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .reduce<ProjectUrl[]>((urls, line) => {
-      const parsed = parseProjectUrlImportLine(line, urls.length);
-      return parsed ? [...urls, parsed] : urls;
-    }, []);
-}
-
-function parseProjectUrlImportLine(line: string, index: number): ProjectUrl | null {
-  const urlMatch = line.match(
-    /https?:\/\/[^\s]+|(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}(?:\/[^\s]*)?/i
-  );
-  if (!urlMatch || urlMatch.index === undefined) {
-    return null;
-  }
-
-  const rawUrl = trimImportedUrl(urlMatch[0]);
-  const url = normalizeLaunchUrl(rawUrl);
-  if (!url) {
-    return null;
-  }
-
-  const beforeUrl = line.slice(0, urlMatch.index).trim();
-  const afterUrl = line.slice(urlMatch.index + urlMatch[0].length).trim();
-  const notes = afterUrl.replace(/^[-:：,，\s]+/, "").trim();
-
-  return {
-    id: `url-${String(index + 1).padStart(3, "0")}`,
-    name: beforeUrl || displayUrlLabel(url),
-    url,
-    notes
-  };
-}
-
-function trimImportedUrl(value: string): string {
-  return value.trim().replace(/[),，。；;、]+$/g, "");
-}
-
-function projectDisplayUrls(project: AirdropProject): ProjectUrl[] {
-  return normalizeProjectUrlsForStorage(project.urls).filter((projectUrl) => projectUrl.url);
-}
-
-function projectEditableUrls(project: AirdropProject): ProjectUrl[] {
-  const urls = cleanEditableProjectUrls(project.urls);
-  if (urls.length > 0) {
-    return urls;
-  }
-
-  const legacyUrl = normalizeLaunchUrl(project.url);
-  return [
-    {
-      id: "url-001",
-      name: "主入口",
-      url: legacyUrl,
-      notes: ""
-    }
-  ];
-}
-
-function projectOpenUrls(project: AirdropProject): ProjectUrl[] {
-  const urls = projectDisplayUrls(project);
-  if (urls.length > 0) {
-    return urls;
-  }
-
-  const legacyUrl = normalizeLaunchUrl(project.url);
-  return legacyUrl
-    ? [
-        {
-          id: "url-001",
-          name: "主入口",
-          url: legacyUrl,
-          notes: ""
-        }
-      ]
-    : [];
-}
-
-function normalizeEditableProjectUrls(urls: ProjectUrl[] | undefined): ProjectUrl[] {
-  return normalizeProjectUrlsForStorage(urls);
-}
-
-function cleanEditableProjectUrls(urls: ProjectUrl[] | undefined): ProjectUrl[] {
-  if (!Array.isArray(urls)) {
-    return [];
-  }
-
-  const seen = new Set<string>();
-  return urls
-    .filter((projectUrl) => projectUrl && typeof projectUrl.id === "string")
-    .map((projectUrl, index) => {
-      const id = uniqueProjectUrlId(projectUrl.id, index, seen);
-      return {
-        id,
-        name: typeof projectUrl.name === "string" ? projectUrl.name : `网址 ${index + 1}`,
-        url: typeof projectUrl.url === "string" ? projectUrl.url : "",
-        notes: typeof projectUrl.notes === "string" ? projectUrl.notes : ""
-      };
-    });
-}
-
-function normalizeProjectUrlsForStorage(urls: ProjectUrl[] | undefined): ProjectUrl[] {
-  return cleanEditableProjectUrls(urls).map((projectUrl, index) => ({
-    ...projectUrl,
-    name: projectUrl.name.trim() || `网址 ${index + 1}`,
-    url: normalizeLaunchUrl(projectUrl.url),
-    notes: projectUrl.notes.trim()
-  }));
-}
-
-function createProjectUrl(
-  existingUrls: ProjectUrl[],
-  overrides: Partial<ProjectUrl> = {}
-): ProjectUrl {
-  const id = overrides.id ?? nextProjectUrlId(existingUrls);
-  const index = existingUrls.length + 1;
-  return {
-    id,
-    name: overrides.name ?? `网址 ${index}`,
-    url: overrides.url ?? "",
-    notes: overrides.notes ?? ""
-  };
-}
-
-function nextProjectUrlId(urls: ProjectUrl[]): string {
-  const used = new Set(urls.map((projectUrl) => projectUrl.id));
-  for (let index = 1; index < 10000; index += 1) {
-    const id = `url-${String(index).padStart(3, "0")}`;
-    if (!used.has(id)) {
-      return id;
-    }
-  }
-
-  return `url-${Date.now()}`;
-}
-
-function uniqueProjectUrlId(id: string, index: number, seen: Set<string>): string {
-  const cleanedId = id.trim();
-  const fallback = `url-${String(index + 1).padStart(3, "0")}`;
-  let nextId = cleanedId || fallback;
-  if (!seen.has(nextId)) {
-    seen.add(nextId);
-    return nextId;
-  }
-
-  for (let offset = index + 1; offset < 10000; offset += 1) {
-    nextId = `url-${String(offset).padStart(3, "0")}`;
-    if (!seen.has(nextId)) {
-      seen.add(nextId);
-      return nextId;
-    }
-  }
-
-  nextId = `url-${Date.now()}`;
-  seen.add(nextId);
-  return nextId;
-}
-
-function primaryProjectUrl(urls: ProjectUrl[]): string {
-  return cleanEditableProjectUrls(urls).find((projectUrl) => projectUrl.url.trim())?.url ?? "";
-}
-
-function cloneProfileForDraft(profile: ChromeProfile): ChromeProfile {
-  return {
-    ...profile,
-    tags: [...profile.tags],
-    accountPlatforms: profile.accountPlatforms.map((accountPlatform) => ({
-      ...accountPlatform
-    }))
-  };
-}
-
-function cloneProjectForDraft(project: AirdropProject): AirdropProject {
-  return {
-    ...project,
-    urls: projectEditableUrls(project).map((projectUrl) => ({ ...projectUrl })),
-    profileIds: [...project.profileIds]
-  };
-}
-
-function createProject(
-  existingProjects: AirdropProject[],
-  initialProfileIds: string[],
-  now: string
-): AirdropProject {
-  const id = nextProjectId(existingProjects);
-  return {
-    id,
-    name: `项目 ${existingProjects.length + 1}`,
-    url: "",
-    urls: [createProjectUrl([], { id: "url-001", name: "主入口" })],
-    notes: "",
-    profileIds: [...new Set(initialProfileIds)],
-    intervalSeconds: Number.parseInt(DEFAULT_BULK_OPEN_INTERVAL_SECONDS, 10),
-    createdAt: now,
-    updatedAt: now,
-    lastOpenedAt: null
-  };
-}
-
-function updateProject(
-  project: AirdropProject,
-  patch: Partial<AirdropProject>,
-  now: string
-): AirdropProject {
-  const nextUrls = Array.isArray(patch.urls)
-    ? cleanEditableProjectUrls(patch.urls)
-    : typeof patch.url === "string"
-      ? updatePrimaryProjectUrl(projectEditableUrls(project), patch.url)
-      : projectEditableUrls(project);
-  const nextUrl =
-    typeof patch.url === "string" && !Array.isArray(patch.urls)
-      ? normalizeLaunchUrl(patch.url)
-      : primaryProjectUrl(nextUrls);
-
-  return {
-    ...project,
-    ...patch,
-    name: typeof patch.name === "string" ? patch.name : project.name,
-    url: nextUrl,
-    urls: nextUrls,
-    notes: typeof patch.notes === "string" ? patch.notes : project.notes,
-    profileIds: Array.isArray(patch.profileIds)
-      ? [...new Set(patch.profileIds)]
-      : project.profileIds,
-    intervalSeconds:
-      typeof patch.intervalSeconds === "number"
-        ? normalizeBulkOpenIntervalSeconds(String(patch.intervalSeconds))
-        : project.intervalSeconds,
-    updatedAt: now
-  };
-}
-
-function duplicateProject(
-  source: AirdropProject,
-  existingProjects: AirdropProject[],
-  now: string
-): AirdropProject {
-  return {
-    ...source,
-    id: nextProjectId(existingProjects),
-    name: `${source.name} 副本`,
-    profileIds: [...source.profileIds],
-    createdAt: now,
-    updatedAt: now,
-    lastOpenedAt: null
-  };
-}
-
-function updatePrimaryProjectUrl(urls: ProjectUrl[], url: string): ProjectUrl[] {
-  const safeUrls = urls.length > 0 ? urls : [createProjectUrl([], { id: "url-001", name: "主入口" })];
-  return safeUrls.map((projectUrl, index) =>
-    index === 0 ? { ...projectUrl, url } : projectUrl
-  );
-}
-
-function nextProjectId(projects: AirdropProject[]): string {
-  const used = new Set(projects.map((project) => project.id));
-  for (let index = 1; index < 10000; index += 1) {
-    const id = `project-${String(index).padStart(3, "0")}`;
-    if (!used.has(id)) {
-      return id;
-    }
-  }
-  return `project-${Date.now()}`;
-}
-
-function errorMessage(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message;
-  }
-  return String(error);
-}
-
-function windowAutomationErrorMessage(error: unknown): string {
-  const message = errorMessage(error);
-  if (isLikelyOsascriptAccessibilityError(message)) {
-    return `窗口操作失败：macOS 当前拦截的是 /usr/bin/osascript。请在系统设置 > 隐私与安全性 > 辅助功能 中同时允许 MultiChrome 和 /usr/bin/osascript。原始错误：${message}`;
-  }
-  if (isLikelyWindowAutomationPermissionError(message)) {
-    return `窗口操作失败：可能需要在 macOS 系统设置 > 隐私与安全性 > 辅助功能 中允许 MultiChrome 控制电脑。原始错误：${message}`;
-  }
-
-  return `窗口操作失败：${message}`;
-}
-
-function isLikelyOsascriptAccessibilityError(message: string): boolean {
-  const normalized = message.toLowerCase();
-  return (
-    normalized.includes("osascript") &&
-    (message.includes("不允许辅助访问") ||
-      normalized.includes("-25211") ||
-      normalized.includes("not allowed assistive"))
-  );
-}
-
-function isLikelyWindowAutomationPermissionError(message: string): boolean {
-  const normalized = message.toLowerCase();
-  return [
-    "system events",
-    "osascript",
-    "not authorized",
-    "not permitted",
-    "operation not permitted",
-    "permission",
-    "辅助功能",
-    "权限",
-    "apple events"
-  ].some((keyword) => normalized.includes(keyword));
 }
 
 export default App;

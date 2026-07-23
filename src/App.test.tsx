@@ -8,7 +8,7 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { normalizeSettings, profileApi } from "./api";
+import { normalizeSettings, profileApi, type BrowserSessionSnapshot } from "./api";
 import App from "./App";
 import type { ChromeProfile, ProfileDocument } from "./types";
 
@@ -76,11 +76,11 @@ describe("App launcher layout", () => {
     );
   });
 
-  test("点击账号卡片会直接启动对应 Chrome profile", async () => {
+  test("点击打开按钮会直接启动对应 Chrome profile", async () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await user.click(await screen.findByRole("button", { name: "启动 主号" }));
+    await user.click(await screen.findByRole("button", { name: "打开 主号" }));
 
     expect(await screen.findByText("已启动 主号")).toBeTruthy();
     await waitFor(() => {
@@ -89,12 +89,331 @@ describe("App launcher layout", () => {
     });
   });
 
+  test("单个账号启动后会在更多操作里显示最近启动记录", async () => {
+    const user = userEvent.setup();
+    const openProfileSpy = vi.spyOn(profileApi, "openProfile").mockResolvedValue(
+      "/tmp/account-001"
+    );
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "打开 主号" }));
+    await screen.findByText("已启动 主号");
+    await user.click(screen.getByRole("button", { name: "更多操作" }));
+
+    const launchList = screen.getByRole("list", { name: "最近启动记录" });
+    expect(within(launchList).getByText("主号")).toBeTruthy();
+    expect(within(launchList).getByText("账号")).toBeTruthy();
+    expect(within(launchList).getByText("成功")).toBeTruthy();
+    openProfileSpy.mockRestore();
+  });
+
+  test("启动页会加载持久化最近启动记录", async () => {
+    const user = userEvent.setup();
+    const loadLaunchEventsSpy = vi
+      .spyOn(profileApi as typeof profileApi & {
+        loadBrowserLaunchEvents: typeof profileApi.loadBrowserLaunchEvents;
+      }, "loadBrowserLaunchEvents")
+      .mockResolvedValue([
+        {
+          profileId: "account-001",
+          profileName: "主号",
+          sourceLabel: "批量打开",
+          url: "https://galxe.com",
+          ok: true,
+          message: "已启动",
+          finishedAt: 1000
+        }
+      ]);
+    render(<App />);
+
+    await screen.findByText("根目录正常");
+    await user.click(screen.getByRole("button", { name: "更多操作" }));
+
+    const launchList = screen.getByRole("list", { name: "最近启动记录" });
+    expect(within(launchList).getByText("主号")).toBeTruthy();
+    expect(within(launchList).getByText("批量打开")).toBeTruthy();
+    expect(within(launchList).getByText("galxe.com")).toBeTruthy();
+    expect(loadLaunchEventsSpy).toHaveBeenCalledWith("~/MultiChromeProfiles");
+    loadLaunchEventsSpy.mockRestore();
+  });
+
+  test("新增启动记录会写入持久化最近启动记录", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(profileApi, "openProfile").mockResolvedValue("/tmp/account-001");
+    vi.spyOn(profileApi as typeof profileApi & {
+      loadBrowserLaunchEvents: typeof profileApi.loadBrowserLaunchEvents;
+    }, "loadBrowserLaunchEvents").mockResolvedValue([]);
+    const saveLaunchEventsSpy = vi
+      .spyOn(profileApi as typeof profileApi & {
+        saveBrowserLaunchEvents: typeof profileApi.saveBrowserLaunchEvents;
+      }, "saveBrowserLaunchEvents")
+      .mockResolvedValue();
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "打开 主号" }));
+
+    await waitFor(() => {
+      expect(saveLaunchEventsSpy).toHaveBeenCalledWith(
+        "~/MultiChromeProfiles",
+        expect.arrayContaining([
+          expect.objectContaining({
+            profileId: "account-001",
+            profileName: "主号",
+            sourceLabel: "账号",
+            ok: true
+          })
+        ])
+      );
+    });
+    vi.restoreAllMocks();
+  });
+
+  test("连续启动账号时最近启动记录会按顺序串行保存", async () => {
+    const user = userEvent.setup();
+    let releaseFirstSave: (() => void) | null = null;
+    vi.spyOn(profileApi, "openProfile").mockResolvedValue("/tmp/profile");
+    vi.spyOn(profileApi as typeof profileApi & {
+      loadBrowserLaunchEvents: typeof profileApi.loadBrowserLaunchEvents;
+    }, "loadBrowserLaunchEvents").mockResolvedValue([]);
+    const saveLaunchEventsSpy = vi
+      .spyOn(profileApi as typeof profileApi & {
+        saveBrowserLaunchEvents: typeof profileApi.saveBrowserLaunchEvents;
+      }, "saveBrowserLaunchEvents")
+      .mockImplementation(() => {
+        if (!releaseFirstSave) {
+          return new Promise<void>((resolve) => {
+            releaseFirstSave = resolve;
+          });
+        }
+        return Promise.resolve();
+      });
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "打开 主号" }));
+    await screen.findByText("已启动 主号");
+    await user.click(screen.getByRole("button", { name: "打开 抽奖号" }));
+    await screen.findByText("已启动 抽奖号");
+
+    expect(saveLaunchEventsSpy).toHaveBeenCalledTimes(1);
+
+    const releaseSave = releaseFirstSave as unknown as (() => void) | null;
+    if (!releaseSave) {
+      throw new Error("第一笔最近启动记录保存没有进入等待状态");
+    }
+    releaseSave();
+    await waitFor(() => {
+      expect(saveLaunchEventsSpy).toHaveBeenCalledTimes(2);
+    });
+    expect(saveLaunchEventsSpy.mock.calls[1][1]).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ profileId: "account-001" }),
+        expect.objectContaining({ profileId: "account-002" })
+      ])
+    );
+    vi.restoreAllMocks();
+  });
+
+  test("启动命令成功后先标记为启动中而不是运行中", async () => {
+    const user = userEvent.setup();
+    const openProfileSpy = vi.spyOn(profileApi, "openProfile").mockResolvedValue(
+      "~/MultiChromeProfiles/profiles/account-001"
+    );
+    render(<App />);
+
+    const card = await screen.findByRole("button", { name: "选择 主号" });
+
+    await user.click(screen.getByRole("button", { name: "打开 主号" }));
+
+    expect(within(card).getByText("启动中")).toBeTruthy();
+    expect(within(card).queryByText("运行中")).toBeNull();
+    expect(screen.queryByRole("button", { name: "切换到 主号" })).toBeNull();
+    expect(openProfileSpy).toHaveBeenCalledOnce();
+    openProfileSpy.mockRestore();
+  });
+
+  test("启动后会短延迟刷新会话并确认运行状态", async () => {
+    vi.useFakeTimers();
+    const openProfileSpy = vi.spyOn(profileApi, "openProfile").mockResolvedValue(
+      "~/MultiChromeProfiles/profiles/account-001"
+    );
+    const snapshotSpy = vi
+      .spyOn(profileApi, "snapshotBrowserSessions")
+      .mockResolvedValueOnce([
+        browserSessionSnapshot("account-001", false),
+        browserSessionSnapshot("account-002", false)
+      ])
+      .mockResolvedValueOnce([
+        browserSessionSnapshot("account-001", true),
+        browserSessionSnapshot("account-002", false)
+      ]);
+    render(<App />);
+
+    await flushPromises();
+    const card = screen.getByRole("button", { name: "选择 主号" });
+
+    fireEvent.click(screen.getByRole("button", { name: "打开 主号" }));
+    await flushPromises();
+
+    expect(within(card).getByText("启动中")).toBeTruthy();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    await flushPromises();
+
+    expect(within(card).getByText("运行中")).toBeTruthy();
+    expect(snapshotSpy).toHaveBeenCalledTimes(2);
+    expect(openProfileSpy).toHaveBeenCalledOnce();
+    openProfileSpy.mockRestore();
+    snapshotSpy.mockRestore();
+  });
+
+  test("启动确认扫到停止时会短暂保留启动中状态", async () => {
+    vi.useFakeTimers();
+    const openProfileSpy = vi.spyOn(profileApi, "openProfile").mockResolvedValue(
+      "~/MultiChromeProfiles/profiles/account-001"
+    );
+    const snapshotSpy = vi
+      .spyOn(profileApi, "snapshotBrowserSessions")
+      .mockResolvedValueOnce([
+        browserSessionSnapshot("account-001", false),
+        browserSessionSnapshot("account-002", false)
+      ])
+      .mockResolvedValueOnce([
+        browserSessionSnapshot("account-001", false),
+        browserSessionSnapshot("account-002", false)
+      ]);
+    render(<App />);
+
+    await flushPromises();
+    const card = screen.getByRole("button", { name: "选择 主号" });
+
+    fireEvent.click(screen.getByRole("button", { name: "打开 主号" }));
+    await flushPromises();
+
+    expect(within(card).getByText("启动中")).toBeTruthy();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    await flushPromises();
+
+    expect(within(card).getByText("启动中")).toBeTruthy();
+    expect(within(card).queryByText("运行中")).toBeNull();
+    expect(snapshotSpy).toHaveBeenCalledTimes(2);
+    expect(openProfileSpy).toHaveBeenCalledOnce();
+    openProfileSpy.mockRestore();
+    snapshotSpy.mockRestore();
+  });
+
+  test("启动确认刷新失败不会清空已有运行状态", async () => {
+    vi.useFakeTimers();
+    const openProfileSpy = vi.spyOn(profileApi, "openProfile").mockResolvedValue(
+      "~/MultiChromeProfiles/profiles/account-001"
+    );
+    const snapshotSpy = vi
+      .spyOn(profileApi, "snapshotBrowserSessions")
+      .mockResolvedValueOnce([
+        browserSessionSnapshot("account-001", false),
+        browserSessionSnapshot("account-002", true)
+      ])
+      .mockRejectedValueOnce(new Error("ps failed"));
+    render(<App />);
+
+    await flushPromises();
+    const firstCard = screen.getByRole("button", { name: "选择 主号" });
+    const secondCard = screen.getByRole("button", { name: "选择 抽奖号" });
+    expect(within(secondCard).getByText("运行中")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "打开 主号" }));
+    await flushPromises();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    await flushPromises();
+
+    expect(within(firstCard).getByText("启动中")).toBeTruthy();
+    expect(within(secondCard).getByText("运行中")).toBeTruthy();
+    expect(snapshotSpy).toHaveBeenCalledTimes(2);
+    expect(openProfileSpy).toHaveBeenCalledOnce();
+    openProfileSpy.mockRestore();
+    snapshotSpy.mockRestore();
+  });
+
+  test("较旧的会话快照晚返回时不会覆盖较新的运行状态", async () => {
+    let resolveOlderSnapshot: (snapshots: BrowserSessionSnapshot[]) => void = () => {};
+    let resolveNewerSnapshot: (snapshots: BrowserSessionSnapshot[]) => void = () => {};
+    const olderSnapshot = new Promise<BrowserSessionSnapshot[]>((resolve) => {
+      resolveOlderSnapshot = resolve;
+    });
+    const newerSnapshot = new Promise<BrowserSessionSnapshot[]>((resolve) => {
+      resolveNewerSnapshot = resolve;
+    });
+    const snapshotSpy = vi
+      .spyOn(profileApi, "snapshotBrowserSessions")
+      .mockReturnValueOnce(olderSnapshot)
+      .mockReturnValueOnce(newerSnapshot);
+
+    render(<App />);
+    await waitFor(() => expect(snapshotSpy).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await waitFor(() => expect(snapshotSpy).toHaveBeenCalledTimes(2));
+
+    resolveNewerSnapshot([
+      browserSessionSnapshot("account-001", true),
+      browserSessionSnapshot("account-002", false)
+    ]);
+    await flushPromises();
+
+    const card = screen.getByRole("button", { name: "选择 主号" });
+    expect(within(card).getByText("运行中")).toBeTruthy();
+
+    resolveOlderSnapshot([
+      browserSessionSnapshot("account-001", false),
+      browserSessionSnapshot("account-002", false)
+    ]);
+    await flushPromises();
+
+    expect(within(card).getByText("运行中")).toBeTruthy();
+    snapshotSpy.mockRestore();
+  });
+
+  test("账号卡片点击只切换选择，打开按钮才启动 profile", async () => {
+    const user = userEvent.setup();
+    const openProfileSpy = vi.spyOn(profileApi, "openProfile");
+    render(<App />);
+
+    const selectionCard = await screen.findByRole("button", { name: "选择 主号" });
+    expect(screen.queryByRole("checkbox", { name: "选择 主号" })).toBeNull();
+
+    await user.click(selectionCard);
+
+    expect(openProfileSpy).not.toHaveBeenCalled();
+    expect(screen.getByText("已选择 1 个账号")).toBeTruthy();
+    expect(selectionCard.getAttribute("aria-pressed")).toBe("true");
+
+    await user.click(selectionCard);
+
+    expect(screen.getByText("未选择账号")).toBeTruthy();
+    expect(selectionCard.getAttribute("aria-pressed")).toBe("false");
+
+    await user.click(screen.getByRole("button", { name: "打开 主号" }));
+
+    expect(await screen.findByText("已启动 主号")).toBeTruthy();
+    expect(openProfileSpy).toHaveBeenCalledTimes(1);
+    openProfileSpy.mockRestore();
+  });
+
   test("重复点击账号会再次请求打开同一 profile 的新标签", async () => {
     const user = userEvent.setup();
     const openProfileSpy = vi.spyOn(profileApi, "openProfile");
     render(<App />);
 
-    const launchButton = await screen.findByRole("button", { name: "启动 主号" });
+    const launchButton = await screen.findByRole("button", { name: "打开 主号" });
     await user.click(launchButton);
     await screen.findByText("已启动 主号");
     await user.click(launchButton);
@@ -122,12 +441,51 @@ describe("App launcher layout", () => {
     vi.spyOn(profileApi, "listRunningProfiles").mockResolvedValue(["account-001"]);
     render(<App />);
 
-    const runningCard = await screen.findByRole("button", { name: "启动 主号" });
-    const idleCard = await screen.findByRole("button", { name: "启动 抽奖号" });
+    const runningCard = await screen.findByRole("button", { name: "选择 主号" });
+    const idleCard = await screen.findByRole("button", { name: "选择 抽奖号" });
 
     expect(within(runningCard).getByText("运行中")).toBeTruthy();
     expect(within(idleCard).queryByText("运行中")).toBeNull();
     vi.mocked(profileApi.listRunningProfiles).mockRestore();
+  });
+
+  test("账号卡片运行状态来自浏览器会话快照", async () => {
+    const snapshotSpy = vi
+      .spyOn(profileApi, "snapshotBrowserSessions")
+      .mockResolvedValue([
+        {
+          profileId: "account-001",
+          status: "running",
+          running: true,
+          pid: 1201,
+          windowCount: null,
+          windows: [],
+          windowError: null,
+          checkedAt: 1
+        },
+        {
+          profileId: "account-002",
+          status: "stopped",
+          running: false,
+          pid: null,
+          windowCount: 0,
+          windows: [],
+          windowError: null,
+          checkedAt: 1
+        }
+      ]);
+    render(<App />);
+
+    const runningCard = await screen.findByRole("button", { name: "选择 主号" });
+    const idleCard = await screen.findByRole("button", { name: "选择 抽奖号" });
+
+    expect(within(runningCard).getByText("运行中")).toBeTruthy();
+    expect(within(idleCard).queryByText("运行中")).toBeNull();
+    expect(snapshotSpy).toHaveBeenCalledWith("~/MultiChromeProfiles", [
+      "account-001",
+      "account-002"
+    ], false);
+    snapshotSpy.mockRestore();
   });
 
   test("运行状态会轻量动态刷新并移除已退出账号", async () => {
@@ -140,7 +498,7 @@ describe("App launcher layout", () => {
 
     await flushPromises();
 
-    const runningCard = screen.getByRole("button", { name: "启动 主号" });
+    const runningCard = screen.getByRole("button", { name: "选择 主号" });
     expect(within(runningCard).getByText("运行中")).toBeTruthy();
 
     await act(async () => {
@@ -153,6 +511,32 @@ describe("App launcher layout", () => {
     listRunningSpy.mockRestore();
   });
 
+  test("运行状态轻量刷新失败时保留上一次会话状态", async () => {
+    vi.useFakeTimers();
+    const snapshotSpy = vi
+      .spyOn(profileApi, "snapshotBrowserSessions")
+      .mockResolvedValueOnce([
+        browserSessionSnapshot("account-001", true),
+        browserSessionSnapshot("account-002", false)
+      ])
+      .mockRejectedValueOnce(new Error("ps failed"));
+    render(<App />);
+
+    await flushPromises();
+
+    const runningCard = screen.getByRole("button", { name: "选择 主号" });
+    expect(within(runningCard).getByText("运行中")).toBeTruthy();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    await flushPromises();
+
+    expect(within(runningCard).getByText("运行中")).toBeTruthy();
+    expect(snapshotSpy).toHaveBeenCalledTimes(2);
+    snapshotSpy.mockRestore();
+  });
+
   test("账号卡片不显示目录大小，编辑时只刷新当前账号大小", async () => {
     const sizeSpy = vi
       .spyOn(profileApi, "profileDirectorySize")
@@ -160,7 +544,7 @@ describe("App launcher layout", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    const card = await screen.findByRole("button", { name: "启动 主号" });
+    const card = await screen.findByRole("button", { name: "选择 主号" });
 
     expect(screen.queryByRole("button", { name: "刷新大小" })).toBeNull();
     expect(within(card).queryByText("未检测")).toBeNull();
@@ -182,8 +566,8 @@ describe("App launcher layout", () => {
     const focusSpy = vi.spyOn(profileApi, "focusProfileWindow").mockResolvedValue();
     render(<App />);
 
-    const runningCard = await screen.findByRole("button", { name: "启动 主号" });
-    const idleCard = await screen.findByRole("button", { name: "启动 抽奖号" });
+    const runningCard = await screen.findByRole("button", { name: "选择 主号" });
+    const idleCard = await screen.findByRole("button", { name: "选择 抽奖号" });
 
     expect(within(runningCard).getByText("运行中")).toBeTruthy();
     expect(
@@ -230,7 +614,8 @@ describe("App launcher layout", () => {
       );
     render(<App />);
 
-    await user.click(await screen.findByRole("checkbox", { name: "选择 主号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await openBulkMore(user);
     await user.click(screen.getByRole("button", { name: "检查窗口" }));
 
     expect(
@@ -259,14 +644,154 @@ describe("App launcher layout", () => {
       ]);
     render(<App />);
 
-    await user.click(await screen.findByRole("checkbox", { name: "选择 主号" }));
-    await user.click(screen.getByRole("checkbox", { name: "选择 抽奖号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "选择 抽奖号" }));
+    await openBulkMore(user);
     await user.click(screen.getByRole("button", { name: "检查窗口" }));
 
     expect(listWindowsSpy).toHaveBeenCalledTimes(1);
     expect(listWindowsSpy).toHaveBeenCalledWith("~/MultiChromeProfiles", "account-001");
     expect(await screen.findByText("窗口检查：主号 1 个窗口（1280x720 @ 12,34）")).toBeTruthy();
     vi.mocked(profileApi.listRunningProfiles).mockRestore();
+    listWindowsSpy.mockRestore();
+  });
+
+  test("检查窗口完成后会登记窗口操作", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(profileApi, "listRunningProfiles").mockResolvedValue(["account-001"]);
+    const listWindowsSpy = vi
+      .spyOn(profileApi, "listProfileWindows")
+      .mockResolvedValue([
+        {
+          index: 1,
+          title: "Galxe",
+          x: 12,
+          y: 34,
+          width: 1280,
+          height: 720
+        }
+      ]);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await openBulkMore(user);
+    await user.click(screen.getByRole("button", { name: "检查窗口" }));
+
+    expect(await screen.findByText("窗口检查：主号 1 个窗口（1280x720 @ 12,34）")).toBeTruthy();
+    const operationList = await screen.findByRole("list", { name: "最近操作记录" });
+    expect(within(operationList).getByText("成功")).toBeTruthy();
+    expect(within(operationList).getByText("窗口操作")).toBeTruthy();
+    expect(within(operationList).getByText("检查窗口")).toBeTruthy();
+    expect(within(operationList).getByText("1 个账号")).toBeTruthy();
+    vi.mocked(profileApi.listRunningProfiles).mockRestore();
+    listWindowsSpy.mockRestore();
+  });
+
+  test("窗口操作前会刷新轻量会话状态", async () => {
+    const user = userEvent.setup();
+    const idleSnapshots = [
+      browserSessionSnapshot("account-001", false),
+      browserSessionSnapshot("account-002", false)
+    ];
+    const runningSnapshots = [
+      browserSessionSnapshot("account-001", true),
+      browserSessionSnapshot("account-002", false)
+    ];
+    const snapshotSpy = vi
+      .spyOn(profileApi, "snapshotBrowserSessions")
+      .mockResolvedValue(idleSnapshots);
+    const listWindowsSpy = vi
+      .spyOn(profileApi, "listProfileWindows")
+      .mockResolvedValue([
+        {
+          index: 1,
+          title: "Galxe",
+          x: 12,
+          y: 34,
+          width: 1280,
+          height: 720
+        }
+      ]);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await openBulkMore(user);
+    expect(
+      within(screen.getByRole("button", { name: "选择 主号" })).queryByText("运行中")
+    ).toBeNull();
+
+    snapshotSpy.mockResolvedValue(runningSnapshots);
+    await user.click(screen.getByRole("button", { name: "检查窗口" }));
+
+    expect(snapshotSpy).toHaveBeenLastCalledWith(
+      "~/MultiChromeProfiles",
+      ["account-001", "account-002"],
+      false
+    );
+    expect(listWindowsSpy).toHaveBeenCalledWith("~/MultiChromeProfiles", "account-001");
+    expect(await screen.findByText("窗口检查：主号 1 个窗口（1280x720 @ 12,34）")).toBeTruthy();
+    snapshotSpy.mockRestore();
+    listWindowsSpy.mockRestore();
+  });
+
+  test("窗口操作会使用自身刷新结果，即使后续后台快照占用最新序号", async () => {
+    const user = userEvent.setup();
+    let resolveOperationSnapshot: (snapshots: BrowserSessionSnapshot[]) => void = () => {};
+    let resolveBackgroundSnapshot: (snapshots: BrowserSessionSnapshot[]) => void = () => {};
+    const operationSnapshot = new Promise<BrowserSessionSnapshot[]>((resolve) => {
+      resolveOperationSnapshot = resolve;
+    });
+    const backgroundSnapshot = new Promise<BrowserSessionSnapshot[]>((resolve) => {
+      resolveBackgroundSnapshot = resolve;
+    });
+    const snapshotSpy = vi
+      .spyOn(profileApi, "snapshotBrowserSessions")
+      .mockResolvedValueOnce([
+        browserSessionSnapshot("account-001", false),
+        browserSessionSnapshot("account-002", false)
+      ])
+      .mockReturnValueOnce(operationSnapshot)
+      .mockReturnValueOnce(backgroundSnapshot);
+    const listWindowsSpy = vi
+      .spyOn(profileApi, "listProfileWindows")
+      .mockResolvedValue([
+        {
+          index: 1,
+          title: "Galxe",
+          x: 12,
+          y: 34,
+          width: 1280,
+          height: 720
+        }
+      ]);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await openBulkMore(user);
+    fireEvent.click(screen.getByRole("button", { name: "检查窗口" }));
+    await waitFor(() => expect(snapshotSpy).toHaveBeenCalledTimes(2));
+
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await waitFor(() => expect(snapshotSpy).toHaveBeenCalledTimes(3));
+
+    resolveOperationSnapshot([
+      browserSessionSnapshot("account-001", true),
+      browserSessionSnapshot("account-002", false)
+    ]);
+    await flushPromises();
+
+    expect(listWindowsSpy).toHaveBeenCalledWith("~/MultiChromeProfiles", "account-001");
+    expect(await screen.findByText("窗口检查：主号 1 个窗口（1280x720 @ 12,34）")).toBeTruthy();
+
+    resolveBackgroundSnapshot([
+      browserSessionSnapshot("account-001", true),
+      browserSessionSnapshot("account-002", false)
+    ]);
+    await flushPromises();
+
+    snapshotSpy.mockRestore();
     listWindowsSpy.mockRestore();
   });
 
@@ -288,7 +813,8 @@ describe("App launcher layout", () => {
       ]);
     render(<App />);
 
-    await user.click(await screen.findByRole("checkbox", { name: "选择 主号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await openBulkMore(user);
     await user.click(screen.getByRole("button", { name: "检查窗口" }));
 
     expect(
@@ -360,8 +886,9 @@ describe("App launcher layout", () => {
     const focusSpy = vi.spyOn(profileApi, "focusProfileWindow").mockResolvedValue();
     render(<App />);
 
-    await user.click(await screen.findByRole("checkbox", { name: "选择 主号" }));
-    await user.click(screen.getByRole("checkbox", { name: "选择 抽奖号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "选择 抽奖号" }));
+    await openBulkMore(user);
     await user.click(screen.getByRole("button", { name: "平铺窗口" }));
 
     expect(listWindowsSpy).toHaveBeenCalledTimes(4);
@@ -378,11 +905,51 @@ describe("App launcher layout", () => {
       "account-002",
       { x: 600, y: 0, width: 600, height: 800 }
     );
-    expect(focusSpy).toHaveBeenCalledWith("~/MultiChromeProfiles", "account-001");
+    expect(focusSpy).toHaveBeenCalledTimes(2);
+    expect(focusSpy).toHaveBeenNthCalledWith(
+      1,
+      "~/MultiChromeProfiles",
+      "account-001"
+    );
+    expect(focusSpy).toHaveBeenNthCalledWith(
+      2,
+      "~/MultiChromeProfiles",
+      "account-002"
+    );
     expect(await screen.findByText("已平铺 2 个窗口")).toBeTruthy();
     vi.mocked(profileApi.listRunningProfiles).mockRestore();
     listWindowsSpy.mockRestore();
     setBoundsSpy.mockRestore();
+    focusSpy.mockRestore();
+  });
+
+  test("批量栏可以前置选中运行账号窗口", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(profileApi, "listRunningProfiles").mockResolvedValue([
+      "account-001",
+      "account-002"
+    ]);
+    const focusSpy = vi.spyOn(profileApi, "focusProfileWindow").mockResolvedValue();
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "选择 抽奖号" }));
+    await openBulkMore(user);
+    await user.click(screen.getByRole("button", { name: "前置窗口" }));
+
+    expect(focusSpy).toHaveBeenCalledTimes(2);
+    expect(focusSpy).toHaveBeenNthCalledWith(
+      1,
+      "~/MultiChromeProfiles",
+      "account-001"
+    );
+    expect(focusSpy).toHaveBeenNthCalledWith(
+      2,
+      "~/MultiChromeProfiles",
+      "account-002"
+    );
+    expect(await screen.findByText("已前置 2 个窗口")).toBeTruthy();
+    vi.mocked(profileApi.listRunningProfiles).mockRestore();
     focusSpy.mockRestore();
   });
 
@@ -425,7 +992,8 @@ describe("App launcher layout", () => {
     const focusSpy = vi.spyOn(profileApi, "focusProfileWindow").mockResolvedValue();
     render(<App />);
 
-    await user.click(await screen.findByRole("checkbox", { name: "选择 主号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await openBulkMore(user);
     await user.click(screen.getByRole("button", { name: "平铺窗口" }));
 
     expect(listWindowsSpy).toHaveBeenCalledTimes(2);
@@ -510,8 +1078,9 @@ describe("App launcher layout", () => {
     const focusSpy = vi.spyOn(profileApi, "focusProfileWindow").mockResolvedValue();
     render(<App />);
 
-    await user.click(await screen.findByRole("checkbox", { name: "选择 主号" }));
-    await user.click(screen.getByRole("checkbox", { name: "选择 抽奖号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "选择 抽奖号" }));
+    await openBulkMore(user);
     await user.click(screen.getByRole("button", { name: "平铺窗口" }));
 
     expect(listWindowsSpy).toHaveBeenCalledTimes(4);
@@ -568,8 +1137,9 @@ describe("App launcher layout", () => {
     const focusSpy = vi.spyOn(profileApi, "focusProfileWindow").mockResolvedValue();
     render(<App />);
 
-    await user.click(await screen.findByRole("checkbox", { name: "选择 主号" }));
-    await user.click(screen.getByRole("checkbox", { name: "选择 抽奖号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "选择 抽奖号" }));
+    await openBulkMore(user);
     await user.click(screen.getByRole("button", { name: "同步布局" }));
 
     expect(listWindowsSpy).toHaveBeenCalledTimes(3);
@@ -645,8 +1215,9 @@ describe("App launcher layout", () => {
       .mockResolvedValue();
     render(<App />);
 
-    await user.click(await screen.findByRole("checkbox", { name: "选择 主号" }));
-    await user.click(screen.getByRole("checkbox", { name: "选择 抽奖号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "选择 抽奖号" }));
+    await openBulkMore(user);
     await user.click(screen.getByRole("button", { name: "同步布局" }));
 
     expect(listWindowsSpy).toHaveBeenCalledTimes(3);
@@ -685,8 +1256,9 @@ describe("App launcher layout", () => {
       .mockResolvedValue();
     render(<App />);
 
-    await user.click(await screen.findByRole("checkbox", { name: "选择 主号" }));
-    await user.click(screen.getByRole("checkbox", { name: "选择 抽奖号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "选择 抽奖号" }));
+    await openBulkMore(user);
     await user.click(screen.getByRole("button", { name: "同步布局" }));
 
     expect(listWindowsSpy).toHaveBeenCalledTimes(1);
@@ -697,6 +1269,44 @@ describe("App launcher layout", () => {
     vi.mocked(profileApi.listRunningProfiles).mockRestore();
     listWindowsSpy.mockRestore();
     setBoundsSpy.mockRestore();
+  });
+
+  test("同步布局失败后会登记窗口操作失败", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(profileApi, "listRunningProfiles").mockResolvedValue([
+      "account-001",
+      "account-002"
+    ]);
+    const listWindowsSpy = vi
+      .spyOn(profileApi, "listProfileWindows")
+      .mockResolvedValueOnce([
+        {
+          index: 1,
+          title: "主窗口",
+          x: 80,
+          y: 120,
+          width: 960,
+          height: 720,
+          minimized: true
+        }
+      ]);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "选择 抽奖号" }));
+    await openBulkMore(user);
+    await user.click(screen.getByRole("button", { name: "同步布局" }));
+
+    expect(
+      await screen.findByText("主账号窗口已最小化，请先恢复窗口再同步布局")
+    ).toBeTruthy();
+    const operationList = await screen.findByRole("list", { name: "最近操作记录" });
+    expect(within(operationList).getByText("失败")).toBeTruthy();
+    expect(within(operationList).getByText("窗口操作")).toBeTruthy();
+    expect(within(operationList).getByText("同步布局")).toBeTruthy();
+    expect(within(operationList).getByText("2 个账号")).toBeTruthy();
+    vi.mocked(profileApi.listRunningProfiles).mockRestore();
+    listWindowsSpy.mockRestore();
   });
 
   test("布局同步会跳过已最小化的目标窗口", async () => {
@@ -733,8 +1343,9 @@ describe("App launcher layout", () => {
       .mockResolvedValue();
     render(<App />);
 
-    await user.click(await screen.findByRole("checkbox", { name: "选择 主号" }));
-    await user.click(screen.getByRole("checkbox", { name: "选择 抽奖号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "选择 抽奖号" }));
+    await openBulkMore(user);
     await user.click(screen.getByRole("button", { name: "同步布局" }));
 
     expect(listWindowsSpy).toHaveBeenCalledTimes(2);
@@ -787,8 +1398,9 @@ describe("App launcher layout", () => {
       .mockResolvedValue();
     render(<App />);
 
-    await user.click(await screen.findByRole("checkbox", { name: "选择 主号" }));
-    await user.click(screen.getByRole("checkbox", { name: "选择 抽奖号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "选择 抽奖号" }));
+    await openBulkMore(user);
     await user.click(screen.getByRole("button", { name: "平铺窗口" }));
 
     expect(listWindowsSpy).toHaveBeenCalledTimes(3);
@@ -890,8 +1502,9 @@ describe("App launcher layout", () => {
       .mockResolvedValue();
     render(<App />);
 
-    await user.click(await screen.findByRole("checkbox", { name: "选择 主号" }));
-    await user.click(screen.getByRole("checkbox", { name: "选择 抽奖号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "选择 抽奖号" }));
+    await openBulkMore(user);
     await user.click(screen.getByRole("button", { name: "平铺窗口" }));
 
     expect(setBoundsSpy).toHaveBeenNthCalledWith(
@@ -952,6 +1565,7 @@ describe("App launcher layout", () => {
     render(<App />);
 
     await user.click(await screen.findByRole("button", { name: "全选当前" }));
+    await openBulkMore(user);
     await user.click(screen.getByRole("button", { name: "平铺窗口" }));
 
     expect(listWindowsSpy).toHaveBeenCalledTimes(10);
@@ -980,8 +1594,9 @@ describe("App launcher layout", () => {
       .mockResolvedValue();
     render(<App />);
 
-    await user.click(await screen.findByRole("checkbox", { name: "选择 主号" }));
-    await user.click(screen.getByRole("checkbox", { name: "选择 抽奖号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "选择 抽奖号" }));
+    await openBulkMore(user);
     await user.click(screen.getByRole("button", { name: "平铺窗口" }));
 
     expect(setBoundsSpy).not.toHaveBeenCalled();
@@ -1027,7 +1642,7 @@ describe("App launcher layout", () => {
     await waitFor(() => {
       expect(deleteSpy).toHaveBeenCalledWith("~/MultiChromeProfiles", "account-001");
     });
-    expect(screen.queryByRole("button", { name: "启动 主号" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "选择 主号" })).toBeNull();
     deleteSpy.mockRestore();
   });
 
@@ -1036,8 +1651,9 @@ describe("App launcher layout", () => {
     const deleteSpy = vi.spyOn(profileApi, "deleteProfileData").mockResolvedValue();
     render(<App />);
 
-    await user.click(await screen.findByRole("checkbox", { name: "选择 主号" }));
-    await user.click(screen.getByRole("checkbox", { name: "选择 抽奖号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "选择 抽奖号" }));
+    await openBulkMore(user);
     await user.click(screen.getByRole("button", { name: "删除选中" }));
 
     expect(deleteSpy).not.toHaveBeenCalled();
@@ -1052,8 +1668,8 @@ describe("App launcher layout", () => {
       expect(savedDocument().profiles).toEqual([]);
     });
     expect(deleteSpy).not.toHaveBeenCalled();
-    expect(screen.queryByRole("button", { name: "启动 主号" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "启动 抽奖号" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "选择 主号" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "选择 抽奖号" })).toBeNull();
     deleteSpy.mockRestore();
   });
 
@@ -1064,8 +1680,9 @@ describe("App launcher layout", () => {
       .mockRejectedValueOnce(new Error("删除失败"));
     render(<App />);
 
-    await user.click(await screen.findByRole("checkbox", { name: "选择 主号" }));
-    await user.click(screen.getByRole("checkbox", { name: "选择 抽奖号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "选择 抽奖号" }));
+    await openBulkMore(user);
     await user.click(screen.getByRole("button", { name: "删除选中" }));
     const confirmDialog = await screen.findByRole("dialog", { name: "确认批量删除账号" });
     await user.click(within(confirmDialog).getByRole("button", { name: "删除记录和文件夹" }));
@@ -1094,7 +1711,7 @@ describe("App launcher layout", () => {
     await user.click(within(dialog).getByRole("button", { name: "取消新建账号" }));
 
     expect(savedDocument().profiles).toHaveLength(2);
-    expect(screen.queryByRole("button", { name: "启动 账号 3" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "选择 账号 3" })).toBeNull();
   });
 
   test("新建账号保存后才创建账号", async () => {
@@ -1112,7 +1729,7 @@ describe("App launcher layout", () => {
 
     await user.click(within(dialog).getByRole("button", { name: "保存账号" }));
 
-    await screen.findByRole("button", { name: "启动 测试号" });
+    await screen.findByRole("button", { name: "选择 测试号" });
     const created = savedDocument().profiles[2];
     expect(created.name).toBe("测试号");
     expect(created.tags).toEqual(["galxe"]);
@@ -1132,7 +1749,7 @@ describe("App launcher layout", () => {
     await user.click(within(dialog).getByRole("button", { name: "取消批量新建" }));
 
     expect(savedDocument().profiles).toHaveLength(2);
-    expect(screen.queryByRole("button", { name: "启动 测试号" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "选择 测试号" })).toBeNull();
   });
 
   test("批量新建账号按 Esc 会关闭且不会写入账号", async () => {
@@ -1149,7 +1766,7 @@ describe("App launcher layout", () => {
       expect(screen.queryByRole("dialog", { name: "批量新建账号" })).toBeNull();
     });
     expect(savedDocument().profiles).toHaveLength(2);
-    expect(screen.queryByRole("button", { name: "启动 测试号" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "选择 测试号" })).toBeNull();
   });
 
   test("可以批量新建账号并解析标签和备注", async () => {
@@ -1168,9 +1785,9 @@ describe("App launcher layout", () => {
     );
     await user.click(within(dialog).getByRole("button", { name: "创建 3 个账号" }));
 
-    await screen.findByRole("button", { name: "启动 测试号一" });
-    await screen.findByRole("button", { name: "启动 测试号二" });
-    await screen.findByRole("button", { name: "启动 测试号三" });
+    await screen.findByRole("button", { name: "选择 测试号一" });
+    await screen.findByRole("button", { name: "选择 测试号二" });
+    await screen.findByRole("button", { name: "选择 测试号三" });
 
     const createdProfiles = savedDocument().profiles.slice(2);
     expect(createdProfiles.map((profile) => profile.id)).toEqual([
@@ -1208,8 +1825,8 @@ describe("App launcher layout", () => {
     });
     await user.click(within(dialog).getByRole("button", { name: "创建 2 个账号" }));
 
-    await screen.findByRole("button", { name: "启动 表格号一" });
-    await screen.findByRole("button", { name: "启动 表格号二" });
+    await screen.findByRole("button", { name: "选择 表格号一" });
+    await screen.findByRole("button", { name: "选择 表格号二" });
 
     const createdProfiles = savedDocument().profiles.slice(2);
     expect(createdProfiles[0]).toMatchObject({
@@ -1371,8 +1988,8 @@ describe("App launcher layout", () => {
     await user.click(screen.getByRole("button", { name: "扫描导入目录" }));
     await user.click(await screen.findByRole("button", { name: "导入选中 2 个" }));
 
-    await screen.findByRole("button", { name: "启动 推特主号" });
-    await screen.findByRole("button", { name: "启动 Galxe 01" });
+    await screen.findByRole("button", { name: "选择 推特主号" });
+    await screen.findByRole("button", { name: "选择 Galxe 01" });
     expect(importSpy).toHaveBeenNthCalledWith(
       1,
       "~/MultiChromeProfiles",
@@ -1455,7 +2072,7 @@ describe("App launcher layout", () => {
 
     expect(await screen.findByText("复制失败")).toBeTruthy();
     expect(savedDocument().profiles).toHaveLength(2);
-    expect(screen.queryByRole("button", { name: "启动 推特主号" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "选择 推特主号" })).toBeNull();
     expect(deleteSpy).toHaveBeenCalledWith("~/MultiChromeProfiles", "account-003");
     scanSpy.mockRestore();
     importSpy.mockRestore();
@@ -1465,7 +2082,7 @@ describe("App launcher layout", () => {
   test("主界面不显示说明性标题和副标题", async () => {
     render(<App />);
 
-    await screen.findByRole("button", { name: "启动 主号" });
+    await screen.findByRole("button", { name: "选择 主号" });
 
     expect(screen.queryByText("账号启动器")).toBeNull();
     expect(screen.queryByText("本机配置档案")).toBeNull();
@@ -1495,11 +2112,38 @@ describe("App launcher layout", () => {
     expect(within(toolbarGroup).getByText("2 个账号")).toBeTruthy();
   });
 
+  test("选择任意账号后顶部按钮变成取消选择并可清空", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+
+    expect(screen.getByRole("button", { name: "取消选择" })).toBeTruthy();
+    expect(screen.getByText("已选择 1 个账号")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "选择 主号" }).getAttribute("aria-pressed")).toBe(
+      "true"
+    );
+    expect(screen.getByRole("button", { name: "选择 抽奖号" }).getAttribute("aria-pressed")).toBe(
+      "false"
+    );
+
+    await user.click(screen.getByRole("button", { name: "取消选择" }));
+
+    expect(screen.getByRole("button", { name: "全选当前" })).toBeTruthy();
+    expect(screen.getByText("未选择账号")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "选择 主号" }).getAttribute("aria-pressed")).toBe(
+      "false"
+    );
+    expect(screen.getByRole("button", { name: "选择 抽奖号" }).getAttribute("aria-pressed")).toBe(
+      "false"
+    );
+  });
+
   test("界面不再显示账号状态管理入口", async () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await screen.findByRole("button", { name: "启动 主号" });
+    await screen.findByRole("button", { name: "选择 主号" });
 
     expect(screen.queryByRole("button", { name: "正常" })).toBeNull();
     expect(screen.queryByRole("button", { name: "待检查" })).toBeNull();
@@ -1529,8 +2173,8 @@ describe("App launcher layout", () => {
 
     await user.click(within(dialog).getByRole("button", { name: "关闭编辑" }));
 
-    expect(await screen.findByRole("button", { name: "启动 主号" })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "启动 改名主号" })).toBeNull();
+    expect(await screen.findByRole("button", { name: "选择 主号" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "选择 改名主号" })).toBeNull();
     expect(savedDocument().profiles[0].name).toBe("主号");
   });
 
@@ -1566,7 +2210,7 @@ describe("App launcher layout", () => {
       expect(screen.queryByRole("dialog")).toBeNull();
     });
     expect(savedDocument().profiles[0].name).toBe("主号");
-    expect(screen.queryByRole("button", { name: "启动 Esc 关闭" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "选择 Esc 关闭" })).toBeNull();
   });
 
   test("编辑已有账号点击保存后才写入修改", async () => {
@@ -1584,7 +2228,7 @@ describe("App launcher layout", () => {
 
     await user.click(within(dialog).getByRole("button", { name: "保存账号" }));
 
-    expect(await screen.findByRole("button", { name: "启动 保存后的主号" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "选择 保存后的主号" })).toBeTruthy();
     expect(savedDocument().profiles[0].name).toBe("保存后的主号");
     expect(savedDocument().profiles[0].tags).toEqual(["galxe", "x"]);
   });
@@ -1618,7 +2262,7 @@ describe("App launcher layout", () => {
         }
       ]);
     });
-    expect(await screen.findByRole("button", { name: "启动 主号" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "选择 主号" })).toBeTruthy();
   });
 
   test("账号平台资料可以打开网址并复制用户名", async () => {
@@ -1785,15 +2429,16 @@ describe("App launcher layout", () => {
       const stored = savedDocument();
       expect(stored.profiles[0].accountPlatforms).toEqual([]);
     });
-    expect(await screen.findByRole("button", { name: "启动 主号" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "选择 主号" })).toBeTruthy();
   });
 
   test("可以多选账号并批量追加标签", async () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await user.click(await screen.findByRole("checkbox", { name: "选择 主号" }));
-    await user.click(await screen.findByRole("checkbox", { name: "选择 抽奖号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 抽奖号" }));
+    await openBulkMore(user);
     await user.type(await screen.findByLabelText("批量追加标签"), "galxe");
     await user.click(screen.getByRole("button", { name: "追加标签" }));
 
@@ -1810,13 +2455,13 @@ describe("App launcher layout", () => {
     const openProfileSpy = vi.spyOn(profileApi, "openProfile").mockResolvedValue("/tmp/profile");
     render(<App />);
 
-    await user.click(await screen.findByRole("checkbox", { name: "选择 主号" }));
-    await user.click(await screen.findByRole("checkbox", { name: "选择 抽奖号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 抽奖号" }));
     await user.type(await screen.findByLabelText("批量打开网址"), "galxe.com");
 
     vi.useFakeTimers();
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "打开网址" }));
+      fireEvent.click(screen.getByRole("button", { name: "打开指定网址" }));
       await vi.advanceTimersByTimeAsync(3000);
     });
 
@@ -1836,20 +2481,486 @@ describe("App launcher layout", () => {
     openProfileSpy.mockRestore();
   });
 
+  test("批量打开会标记启动中并触发短确认刷新", async () => {
+    const user = userEvent.setup();
+    const openProfileSpy = vi.spyOn(profileApi, "openProfile").mockResolvedValue("/tmp/profile");
+    const snapshotSpy = vi
+      .spyOn(profileApi, "snapshotBrowserSessions")
+      .mockResolvedValueOnce([
+        browserSessionSnapshot("account-001", false),
+        browserSessionSnapshot("account-002", false)
+      ])
+      .mockResolvedValueOnce([
+        browserSessionSnapshot("account-001", true),
+        browserSessionSnapshot("account-002", false)
+      ]);
+    render(<App />);
+
+    const card = await screen.findByRole("button", { name: "选择 主号" });
+    await user.click(card);
+    await user.type(await screen.findByLabelText("批量打开网址"), "galxe.com");
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "打开指定网址" }));
+    await flushPromises();
+
+    expect(within(card).getByText("启动中")).toBeTruthy();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    await flushPromises();
+
+    expect(within(card).getByText("运行中")).toBeTruthy();
+    expect(snapshotSpy).toHaveBeenCalledTimes(2);
+    expect(openProfileSpy).toHaveBeenCalledOnce();
+    openProfileSpy.mockRestore();
+    snapshotSpy.mockRestore();
+  });
+
+  test("批量打开网址为空时会打开默认新标签页", async () => {
+    const user = userEvent.setup();
+    const openProfileSpy = vi.spyOn(profileApi, "openProfile").mockResolvedValue("/tmp/profile");
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 抽奖号" }));
+
+    vi.useFakeTimers();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "打开新标签" }));
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+
+    expect(screen.getByText("已为 2 个账号打开网址")).toBeTruthy();
+    expect(openProfileSpy).toHaveBeenCalledWith(
+      "~/MultiChromeProfiles",
+      "account-001",
+      "/Applications/Google Chrome.app",
+      "chrome://newtab/"
+    );
+    expect(openProfileSpy).toHaveBeenCalledWith(
+      "~/MultiChromeProfiles",
+      "account-002",
+      "/Applications/Google Chrome.app",
+      "chrome://newtab/"
+    );
+    expect(savedDocument().settings.recentUrls).toEqual([]);
+    openProfileSpy.mockRestore();
+  });
+
+  test("批量打开部分失败时会提示失败账号和原因", async () => {
+    const user = userEvent.setup();
+    const openProfileSpy = vi
+      .spyOn(profileApi, "openProfile")
+      .mockResolvedValueOnce("/tmp/profile")
+      .mockRejectedValueOnce(new Error("Chrome 启动失败"));
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 抽奖号" }));
+    await user.type(await screen.findByLabelText("批量打开网址"), "galxe.com");
+
+    vi.useFakeTimers();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "打开指定网址" }));
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+
+    expect(
+      screen.getByText("已为 1 个账号打开网址，1 个失败（抽奖号：Chrome 启动失败）")
+    ).toBeTruthy();
+    openProfileSpy.mockRestore();
+  });
+
+  test("批量打开失败后可以只重试失败账号", async () => {
+    const user = userEvent.setup();
+    const openProfileSpy = vi
+      .spyOn(profileApi, "openProfile")
+      .mockResolvedValueOnce("/tmp/profile")
+      .mockRejectedValueOnce(new Error("Chrome 启动失败"))
+      .mockResolvedValueOnce("/tmp/profile");
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 抽奖号" }));
+    await user.type(await screen.findByLabelText("批量打开网址"), "galxe.com");
+
+    vi.useFakeTimers();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "打开指定网址" }));
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+
+    expect(screen.getByRole("button", { name: "重试最近失败 1" })).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "重试最近失败 1" }));
+    });
+
+    expect(openProfileSpy).toHaveBeenCalledTimes(3);
+    expect(openProfileSpy).toHaveBeenNthCalledWith(
+      3,
+      "~/MultiChromeProfiles",
+      "account-002",
+      "/Applications/Google Chrome.app",
+      "https://galxe.com"
+    );
+    expect(screen.getByText("已为 1 个账号打开网址")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "重试最近失败 1" })).toBeNull();
+    openProfileSpy.mockRestore();
+  });
+
+  test("修改批量网址会清空旧重试入口", async () => {
+    const user = userEvent.setup();
+    const openProfileSpy = vi
+      .spyOn(profileApi, "openProfile")
+      .mockResolvedValueOnce("/tmp/profile")
+      .mockRejectedValueOnce(new Error("Chrome 启动失败"));
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 抽奖号" }));
+    await user.type(await screen.findByLabelText("批量打开网址"), "galxe.com");
+
+    vi.useFakeTimers();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "打开指定网址" }));
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+
+    expect(screen.getByRole("button", { name: "重试最近失败 1" })).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText("批量打开网址"), {
+      target: { value: "zealy.io" }
+    });
+
+    expect(screen.queryByRole("button", { name: "重试最近失败 1" })).toBeNull();
+    openProfileSpy.mockRestore();
+  });
+
+  test("新一轮批量打开开始时会清空旧重试入口", async () => {
+    const user = userEvent.setup();
+    let releaseSecondRun: (() => void) | null = null;
+    const openProfileSpy = vi
+      .spyOn(profileApi, "openProfile")
+      .mockResolvedValueOnce("/tmp/profile")
+      .mockRejectedValueOnce(new Error("Chrome 启动失败"))
+      .mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            releaseSecondRun = () => resolve("/tmp/profile");
+          })
+      );
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 抽奖号" }));
+    await user.type(await screen.findByLabelText("批量打开网址"), "galxe.com");
+
+    vi.useFakeTimers();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "打开指定网址" }));
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(screen.getByRole("button", { name: "重试最近失败 1" })).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "打开指定网址" }));
+      await flushPromises();
+    });
+
+    expect(screen.queryByRole("button", { name: "重试最近失败 1" })).toBeNull();
+
+    const releaseRun = releaseSecondRun as unknown as (() => void) | null;
+    if (!releaseRun) {
+      throw new Error("第二轮批量打开没有进入等待状态");
+    }
+    await act(async () => {
+      releaseRun();
+      await flushPromises();
+    });
+    openProfileSpy.mockRestore();
+  });
+
+  test("批量打开结果会在更多操作里按账号记录成功和失败", async () => {
+    const user = userEvent.setup();
+    const openProfileSpy = vi
+      .spyOn(profileApi, "openProfile")
+      .mockResolvedValueOnce("/tmp/profile")
+      .mockRejectedValueOnce(new Error("Chrome 启动失败"));
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 抽奖号" }));
+    await user.type(await screen.findByLabelText("批量打开网址"), "galxe.com");
+
+    vi.useFakeTimers();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "打开指定网址" }));
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "更多操作" }));
+
+    const launchList = screen.getByRole("list", { name: "最近启动记录" });
+    expect(within(launchList).getByText("主号")).toBeTruthy();
+    expect(within(launchList).getByText("抽奖号")).toBeTruthy();
+    expect(within(launchList).getAllByText("批量打开")).toHaveLength(2);
+    expect(within(launchList).getAllByText("galxe.com")).toHaveLength(2);
+    expect(within(launchList).getByText("Chrome 启动失败")).toBeTruthy();
+    openProfileSpy.mockRestore();
+  });
+
+  test("批量打开完成后会登记最近操作", async () => {
+    const user = userEvent.setup();
+    const openProfileSpy = vi.spyOn(profileApi, "openProfile").mockResolvedValue("/tmp/profile");
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 抽奖号" }));
+    await user.type(await screen.findByLabelText("批量打开网址"), "galxe.com");
+
+    vi.useFakeTimers();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "打开指定网址" }));
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "更多操作" }));
+
+    const operationList = screen.getByRole("list", { name: "最近操作记录" });
+    expect(within(operationList).getByText("批量打开")).toBeTruthy();
+    expect(within(operationList).getByText("成功")).toBeTruthy();
+    expect(within(operationList).getByText("2 / 2")).toBeTruthy();
+    expect(within(operationList).getByText("galxe.com")).toBeTruthy();
+    openProfileSpy.mockRestore();
+  });
+
+  test("批量打开进行中会单独显示当前操作", async () => {
+    const user = userEvent.setup();
+    let resolveFirstLaunch: ((value: string) => void) | null = null;
+    const openProfileSpy = vi
+      .spyOn(profileApi, "openProfile")
+      .mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            resolveFirstLaunch = resolve;
+          })
+      )
+      .mockResolvedValue("/tmp/profile");
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 抽奖号" }));
+    await user.type(await screen.findByLabelText("批量打开网址"), "galxe.com");
+
+    fireEvent.click(screen.getByRole("button", { name: "打开指定网址" }));
+    fireEvent.click(screen.getByRole("button", { name: "更多操作" }));
+
+    const currentList = await screen.findByRole("list", { name: "当前操作记录" });
+    expect(within(currentList).getByText("批量打开")).toBeTruthy();
+    expect(within(currentList).getByText("运行中")).toBeTruthy();
+    expect(within(currentList).getByText("galxe.com")).toBeTruthy();
+    expect(within(currentList).getByText("2 个账号")).toBeTruthy();
+    expect(screen.getByText("还没有最近操作")).toBeTruthy();
+
+    await act(async () => {
+      resolveFirstLaunch?.("/tmp/profile");
+      await Promise.resolve();
+      fireEvent.click(screen.getByRole("button", { name: "停止" }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    openProfileSpy.mockRestore();
+  });
+
+  test("项目打开会避开正在执行批量打开的同账号", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem(
+      "multichrome.profileDocument",
+      JSON.stringify(
+        documentWith(
+          [
+            profile({ id: "account-001", name: "主号" }),
+            profile({ id: "account-002", name: "抽奖号" })
+          ],
+          [
+            project({
+              id: "project-001",
+              name: "Galxe 每日",
+              url: "https://galxe.com/quest",
+              profileIds: ["account-001"],
+              intervalSeconds: 3
+            })
+          ]
+        )
+      )
+    );
+    let resolveBulkLaunch: ((value: string) => void) | null = null;
+    const openProfileSpy = vi
+      .spyOn(profileApi, "openProfile")
+      .mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            resolveBulkLaunch = resolve;
+          })
+      )
+      .mockResolvedValue("/tmp/project-profile");
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.type(await screen.findByLabelText("批量打开网址"), "galxe.com");
+    fireEvent.click(screen.getByRole("button", { name: "打开指定网址" }));
+
+    await user.click(screen.getByRole("button", { name: "项目" }));
+    fireEvent.click(await screen.findByRole("button", { name: "打开项目 Galxe 每日" }));
+
+    expect(await screen.findByText("主号 正在执行批量打开，请稍后再试")).toBeTruthy();
+    expect(openProfileSpy).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveBulkLaunch?.("/tmp/profile");
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    openProfileSpy.mockRestore();
+  });
+
+  test("批量打开会避开正在执行项目的同账号", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem(
+      "multichrome.profileDocument",
+      JSON.stringify(
+        documentWith(
+          [
+            profile({ id: "account-001", name: "主号" }),
+            profile({ id: "account-002", name: "抽奖号" })
+          ],
+          [
+            project({
+              id: "project-001",
+              name: "Galxe 每日",
+              url: "https://galxe.com/quest",
+              profileIds: ["account-001"],
+              intervalSeconds: 3
+            })
+          ]
+        )
+      )
+    );
+    let resolveProjectLaunch: ((value: string) => void) | null = null;
+    const openProfileSpy = vi
+      .spyOn(profileApi, "openProfile")
+      .mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            resolveProjectLaunch = resolve;
+          })
+      )
+      .mockResolvedValue("/tmp/bulk-profile");
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "项目" }));
+    fireEvent.click(await screen.findByRole("button", { name: "打开项目 Galxe 每日" }));
+
+    await user.click(screen.getByRole("button", { name: "账号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.type(await screen.findByLabelText("批量打开网址"), "zealy.io");
+    fireEvent.click(screen.getByRole("button", { name: "打开指定网址" }));
+
+    expect(
+      await screen.findByText("主号 正在执行项目 Galxe 每日，请稍后再试")
+    ).toBeTruthy();
+    expect(openProfileSpy).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveProjectLaunch?.("/tmp/profile");
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    openProfileSpy.mockRestore();
+  });
+
+  test("批量打开会避开正在单独启动的同账号", async () => {
+    const user = userEvent.setup();
+    let resolveProfileLaunch: ((value: string) => void) | null = null;
+    const openProfileSpy = vi
+      .spyOn(profileApi, "openProfile")
+      .mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            resolveProfileLaunch = resolve;
+          })
+      )
+      .mockResolvedValue("/tmp/bulk-profile");
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开 主号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.type(await screen.findByLabelText("批量打开网址"), "zealy.io");
+    fireEvent.click(screen.getByRole("button", { name: "打开指定网址" }));
+
+    expect(await screen.findByText("主号 正在执行账号启动，请稍后再试")).toBeTruthy();
+    expect(openProfileSpy).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveProfileLaunch?.("/tmp/profile");
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    openProfileSpy.mockRestore();
+  });
+
+  test("单账号启动超时后会释放同账号操作守卫", async () => {
+    const openProfileSpy = vi
+      .spyOn(profileApi, "openProfile")
+      .mockImplementationOnce(() => new Promise<string>(() => undefined))
+      .mockResolvedValue("/tmp/bulk-profile");
+    render(<App />);
+
+    const openButton = await screen.findByRole("button", { name: "打开 主号" });
+    vi.useFakeTimers();
+    fireEvent.click(openButton);
+    await flushPromises();
+
+    fireEvent.click(screen.getByRole("button", { name: "选择 主号" }));
+    fireEvent.change(screen.getByLabelText("批量打开网址"), {
+      target: { value: "zealy.io" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "打开指定网址" }));
+
+    expect(screen.getByText("主号 正在执行账号启动，请稍后再试")).toBeTruthy();
+    expect(openProfileSpy).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(120_000);
+    });
+    await flushPromises();
+
+    expect(screen.getByText("主号 启动超时，请稍后再试")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "打开指定网址" }));
+    await flushPromises();
+
+    expect(openProfileSpy).toHaveBeenCalledTimes(2);
+    openProfileSpy.mockRestore();
+  });
+
   test("批量打开网址会按自定义间隔逐个启动", async () => {
     const user = userEvent.setup();
     const openProfileSpy = vi.spyOn(profileApi, "openProfile").mockResolvedValue("/tmp/profile");
     render(<App />);
 
-    await user.click(await screen.findByRole("checkbox", { name: "选择 主号" }));
-    await user.click(await screen.findByRole("checkbox", { name: "选择 抽奖号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 抽奖号" }));
     await user.clear(screen.getByLabelText("批量打开间隔秒"));
     await user.type(screen.getByLabelText("批量打开间隔秒"), "5");
     await user.type(screen.getByLabelText("批量打开网址"), "galxe.com");
 
     vi.useFakeTimers();
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "打开网址" }));
+      fireEvent.click(screen.getByRole("button", { name: "打开指定网址" }));
     });
 
     expect(openProfileSpy).toHaveBeenCalledTimes(1);
@@ -1885,14 +2996,14 @@ describe("App launcher layout", () => {
     const openProfileSpy = vi.spyOn(profileApi, "openProfile").mockResolvedValue("/tmp/profile");
     render(<App />);
 
-    await user.click(await screen.findByRole("checkbox", { name: "选择 主号" }));
-    await user.click(await screen.findByRole("checkbox", { name: "选择 抽奖号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 抽奖号" }));
     expect(screen.getByLabelText("批量打开间隔秒")).toBeTruthy();
     await user.type(screen.getByLabelText("批量打开网址"), "galxe.com");
 
     vi.useFakeTimers();
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "打开网址" }));
+      fireEvent.click(screen.getByRole("button", { name: "打开指定网址" }));
     });
 
     expect(openProfileSpy).toHaveBeenCalledTimes(1);
@@ -1911,18 +3022,47 @@ describe("App launcher layout", () => {
     openProfileSpy.mockRestore();
   });
 
+  test("停止批量打开后会把最近操作标记为已取消", async () => {
+    const user = userEvent.setup();
+    const openProfileSpy = vi.spyOn(profileApi, "openProfile").mockResolvedValue("/tmp/profile");
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 抽奖号" }));
+    await user.type(screen.getByLabelText("批量打开网址"), "galxe.com");
+
+    vi.useFakeTimers();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "打开指定网址" }));
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "停止" }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "更多操作" }));
+
+    const operationList = screen.getByRole("list", { name: "最近操作记录" });
+    expect(within(operationList).getByText("批量打开")).toBeTruthy();
+    expect(within(operationList).getByText("已取消")).toBeTruthy();
+    expect(within(operationList).getByText("1 / 2")).toBeTruthy();
+    openProfileSpy.mockRestore();
+  });
+
   test("批量打开网址后会记录最近网址并可回填", async () => {
     const user = userEvent.setup();
     const openProfileSpy = vi.spyOn(profileApi, "openProfile").mockResolvedValue("/tmp/profile");
     render(<App />);
 
-    await user.click(await screen.findByRole("checkbox", { name: "选择 主号" }));
-    await user.click(await screen.findByRole("checkbox", { name: "选择 抽奖号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 抽奖号" }));
     await user.type(screen.getByLabelText("批量打开网址"), "daily.example.com/checkin");
 
     vi.useFakeTimers();
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "打开网址" }));
+      fireEvent.click(screen.getByRole("button", { name: "打开指定网址" }));
       await vi.advanceTimersByTimeAsync(3000);
     });
 
@@ -1933,6 +3073,7 @@ describe("App launcher layout", () => {
     fireEvent.change(screen.getByLabelText("批量打开网址"), {
       target: { value: "" }
     });
+    fireEvent.click(screen.getByRole("button", { name: "更多操作" }));
     fireEvent.click(
       screen.getByRole("button", { name: "使用最近网址 daily.example.com/checkin" })
     );
@@ -1947,8 +3088,9 @@ describe("App launcher layout", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await user.click(await screen.findByRole("checkbox", { name: "选择 主号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
     await user.type(screen.getByLabelText("批量打开网址"), "daily.example.com/checkin");
+    await openBulkMore(user);
     await user.click(screen.getByRole("button", { name: "设为常用" }));
 
     expect(await screen.findByText("已添加常用网址")).toBeTruthy();
@@ -1984,24 +3126,89 @@ describe("App launcher layout", () => {
     localStorage.setItem("multichrome.profileDocument", JSON.stringify(document));
     render(<App />);
 
-    await user.click(await screen.findByRole("checkbox", { name: "选择 主号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
     await user.click(screen.getByRole("button", { name: "网址库" }));
 
     expect(await screen.findByRole("heading", { name: "网址库" })).toBeTruthy();
     const table = screen.getByRole("table", { name: "网址库表格" });
     expect(within(table).getByRole("columnheader", { name: "名称" })).toBeTruthy();
-    expect(within(table).getByRole("columnheader", { name: "URL" })).toBeTruthy();
+    expect(within(table).getByRole("columnheader", { name: "网址" })).toBeTruthy();
     expect(within(table).getByRole("columnheader", { name: "标签" })).toBeTruthy();
-    expect(within(table).getByRole("columnheader", { name: "备注" })).toBeTruthy();
+    expect(within(table).getByRole("columnheader", { name: "描述" })).toBeTruthy();
+    expect(within(table).getByRole("columnheader", { name: "操作" })).toBeTruthy();
+    expect(within(table).queryByRole("columnheader", { name: "分类" })).toBeNull();
+    expect(within(table).queryByRole("columnheader", { name: "常用" })).toBeNull();
     expect(within(table).getByText("galxe.com")).toBeTruthy();
-    expect(screen.getByText("zealy.io")).toBeTruthy();
+    expect(within(table).queryByText("zealy.io")).toBeNull();
+    expect(screen.queryByRole("button", { name: "新建网址" })).toBeNull();
+    expect(screen.getByRole("button", { name: "新建" })).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: "填入批量打开 galxe.com" }));
 
-    expect(await screen.findByRole("button", { name: "启动 主号" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "选择 主号" })).toBeTruthy();
     expect((screen.getByLabelText("批量打开网址") as HTMLInputElement).value).toBe(
       "https://galxe.com"
     );
+  });
+
+  test("网址库填入网址后未选账号也会显示紧凑批量栏", async () => {
+    const user = userEvent.setup();
+    const document = documentWith([
+      profile({ id: "account-001", name: "主号" }),
+      profile({ id: "account-002", name: "抽奖号" })
+    ]);
+    document.settings.favoriteUrls = ["https://galxe.com"];
+    localStorage.setItem("multichrome.profileDocument", JSON.stringify(document));
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "网址库" }));
+    await user.click(await screen.findByRole("button", { name: "填入批量打开 galxe.com" }));
+
+    expect(await screen.findByRole("button", { name: "选择 主号" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "批量操作" })).toBeTruthy();
+    expect(screen.getByText("未选择账号")).toBeTruthy();
+    expect((screen.getByLabelText("批量打开网址") as HTMLInputElement).value).toBe(
+      "https://galxe.com"
+    );
+    expect(screen.getByRole("button", { name: "打开指定网址" })).toHaveProperty("disabled", true);
+    expect(screen.queryByRole("button", { name: "设为常用" })).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "更多操作" }));
+
+    expect(screen.getByRole("button", { name: "设为常用" })).toBeTruthy();
+  });
+
+  test("账号页未选择账号时也固定显示紧凑批量栏", async () => {
+    render(<App />);
+
+    const header = document.querySelector(".launcher-header");
+    const searchInput = await screen.findByRole("textbox", { name: "搜索账号" });
+    expect(header?.contains(searchInput)).toBe(true);
+    expect(screen.getByRole("region", { name: "批量操作" })).toBeTruthy();
+    expect(screen.getByText("未选择账号")).toBeTruthy();
+    expect((screen.getByLabelText("批量打开网址") as HTMLInputElement).value).toBe("");
+    expect(screen.getByRole("button", { name: "打开新标签" })).toHaveProperty("disabled", true);
+    expect(screen.queryByRole("button", { name: "设为常用" })).toBeNull();
+  });
+
+  test("网址库空状态也保持 Notion 风格表格", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "网址库" }));
+
+    const table = await screen.findByRole("table", { name: "网址库表格" });
+    expect(within(table).getByRole("columnheader", { name: "名称" })).toBeTruthy();
+    expect(within(table).getByRole("columnheader", { name: "网址" })).toBeTruthy();
+    expect(within(table).getByRole("columnheader", { name: "标签" })).toBeTruthy();
+    expect(within(table).getByRole("columnheader", { name: "描述" })).toBeTruthy();
+    expect(within(table).getByRole("columnheader", { name: "操作" })).toBeTruthy();
+    expect(within(table).queryByRole("columnheader", { name: "分类" })).toBeNull();
+    expect(within(table).queryByRole("columnheader", { name: "常用" })).toBeNull();
+    expect(within(table).getByText("还没有常用网址")).toBeTruthy();
+    expect(within(table).getByText("把每天会重复打开的活动页、任务页或平台官网保存到这里。")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "新建网址" })).toBeNull();
+    expect(screen.getByRole("button", { name: "新建" })).toBeTruthy();
   });
 
   test("网址库可以新增结构化常用网址并删除", async () => {
@@ -2009,7 +3216,7 @@ describe("App launcher layout", () => {
     render(<App />);
 
     await user.click(await screen.findByRole("button", { name: "网址库" }));
-    await user.click(screen.getByRole("button", { name: "新建网址" }));
+    await user.click(screen.getByRole("button", { name: "新建" }));
     const editor = await screen.findByRole("dialog", { name: "新建网址" });
     await user.type(within(editor).getByLabelText("网址名称"), "Galxe 每日");
     await user.type(within(editor).getByLabelText("网址 URL"), "galxe.com");
@@ -2046,7 +3253,7 @@ describe("App launcher layout", () => {
     localStorage.setItem("multichrome.profileDocument", JSON.stringify(document));
     render(<App />);
 
-    await user.click(await screen.findByRole("checkbox", { name: "选择 主号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
     await user.click(screen.getByRole("button", { name: "网址库" }));
     await user.click(await screen.findByRole("button", { name: "用选中账号打开 galxe.com" }));
 
@@ -2345,6 +3552,97 @@ describe("App launcher layout", () => {
     openProfileSpy.mockRestore();
   });
 
+  test("项目打开完成后会登记最近操作", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem(
+      "multichrome.profileDocument",
+      JSON.stringify(
+        documentWith(
+          [
+            profile({ id: "account-001", name: "主号" }),
+            profile({ id: "account-002", name: "抽奖号" })
+          ],
+          [
+            project({
+              id: "project-001",
+              name: "Galxe 每日",
+              url: "https://galxe.com/quest",
+              profileIds: ["account-001", "account-002"],
+              intervalSeconds: 3
+            })
+          ]
+        )
+      )
+    );
+    const openProfileSpy = vi.spyOn(profileApi, "openProfile").mockResolvedValue("/tmp/profile");
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "项目" }));
+
+    vi.useFakeTimers();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "打开项目 Galxe 每日" }));
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "账号" }));
+    fireEvent.click(screen.getByRole("button", { name: "更多操作" }));
+
+    const operationList = screen.getByRole("list", { name: "最近操作记录" });
+    expect(within(operationList).getByText("打开项目")).toBeTruthy();
+    expect(within(operationList).getByText("成功")).toBeTruthy();
+    expect(within(operationList).getByText("2 / 2")).toBeTruthy();
+    expect(within(operationList).getByText("Galxe 每日")).toBeTruthy();
+    openProfileSpy.mockRestore();
+  });
+
+  test("项目打开会标记启动中并触发短确认刷新", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem(
+      "multichrome.profileDocument",
+      JSON.stringify(
+        documentWith(
+          [profile({ id: "account-001", name: "主号" })],
+          [
+            project({
+              id: "project-001",
+              name: "Galxe 每日",
+              url: "https://galxe.com/quest",
+              profileIds: ["account-001"]
+            })
+          ]
+        )
+      )
+    );
+    const openProfileSpy = vi.spyOn(profileApi, "openProfile").mockResolvedValue("/tmp/profile");
+    const snapshotSpy = vi
+      .spyOn(profileApi, "snapshotBrowserSessions")
+      .mockResolvedValueOnce([browserSessionSnapshot("account-001", false)])
+      .mockResolvedValueOnce([browserSessionSnapshot("account-001", true)]);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "项目" }));
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "打开项目 Galxe 每日" }));
+    await flushPromises();
+    fireEvent.click(screen.getByRole("button", { name: "账号" }));
+    const card = screen.getByRole("button", { name: "选择 主号" });
+
+    expect(within(card).getByText("启动中")).toBeTruthy();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    await flushPromises();
+
+    expect(within(card).getByText("运行中")).toBeTruthy();
+    expect(snapshotSpy).toHaveBeenCalledTimes(2);
+    expect(openProfileSpy).toHaveBeenCalledOnce();
+    openProfileSpy.mockRestore();
+    snapshotSpy.mockRestore();
+  });
+
   test("项目打开全部网址会按账号队列打开每个网址", async () => {
     const user = userEvent.setup();
     localStorage.setItem(
@@ -2482,6 +3780,98 @@ describe("App launcher layout", () => {
     );
     expect(screen.getByText("已打开项目 Galxe 每日：1 个账号，X 帖子")).toBeTruthy();
 
+    openProfileSpy.mockRestore();
+  });
+
+  test("项目打开部分失败时会提示失败账号和原因", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem(
+      "multichrome.profileDocument",
+      JSON.stringify(
+        documentWith(
+          [
+            profile({ id: "account-001", name: "主号" }),
+            profile({ id: "account-002", name: "抽奖号" })
+          ],
+          [
+            project({
+              id: "project-001",
+              name: "Galxe 每日",
+              url: "https://galxe.com/quest",
+              profileIds: ["account-001", "account-002"]
+            })
+          ]
+        )
+      )
+    );
+    const openProfileSpy = vi
+      .spyOn(profileApi, "openProfile")
+      .mockResolvedValueOnce("/tmp/profile")
+      .mockRejectedValueOnce(new Error("Chrome 启动失败"));
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "项目" }));
+
+    vi.useFakeTimers();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "打开项目 Galxe 每日" }));
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+
+    expect(
+      screen.getByText(
+        "已打开项目 Galxe 每日：1 个账号，1 个失败（抽奖号：Chrome 启动失败）"
+      )
+    ).toBeTruthy();
+    openProfileSpy.mockRestore();
+  });
+
+  test("项目账号任一网址失败时该账号整体不算打开成功", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem(
+      "multichrome.profileDocument",
+      JSON.stringify(
+        documentWith(
+          [profile({ id: "account-001", name: "主号" })],
+          [
+            project({
+              id: "project-001",
+              name: "Galxe 每日",
+              url: "https://galxe.com/quest",
+              urls: [
+                projectUrl({
+                  id: "url-001",
+                  name: "Galxe",
+                  url: "https://galxe.com/quest"
+                }),
+                projectUrl({
+                  id: "url-002",
+                  name: "X 帖子",
+                  url: "https://x.com/project/status/1"
+                })
+              ],
+              profileIds: ["account-001"]
+            })
+          ]
+        )
+      )
+    );
+    const openProfileSpy = vi
+      .spyOn(profileApi, "openProfile")
+      .mockResolvedValueOnce("/tmp/profile")
+      .mockRejectedValueOnce(new Error("第二个网址失败"));
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "项目" }));
+    await user.click(screen.getByRole("button", { name: "打开项目 Galxe 每日" }));
+
+    expect(openProfileSpy).toHaveBeenCalledTimes(2);
+    expect(
+      screen.getByText(
+        "已打开项目 Galxe 每日：0 个账号，2 个网址，1 个失败（主号：第二个网址失败）"
+      )
+    ).toBeTruthy();
+    expect(savedDocument().profiles[0].lastOpenedAt).toBeNull();
     openProfileSpy.mockRestore();
   });
 
@@ -2882,6 +4272,55 @@ describe("App launcher layout", () => {
     openProfileSpy.mockRestore();
   });
 
+  test("停止项目打开后会把最近操作标记为已取消", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem(
+      "multichrome.profileDocument",
+      JSON.stringify(
+        documentWith(
+          [
+            profile({ id: "account-001", name: "主号" }),
+            profile({ id: "account-002", name: "抽奖号" })
+          ],
+          [
+            project({
+              id: "project-001",
+              name: "Galxe 每日",
+              url: "https://galxe.com/quest",
+              profileIds: ["account-001", "account-002"],
+              intervalSeconds: 4
+            })
+          ]
+        )
+      )
+    );
+    const openProfileSpy = vi.spyOn(profileApi, "openProfile").mockResolvedValue("/tmp/profile");
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "项目" }));
+
+    vi.useFakeTimers();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "打开项目 Galxe 每日" }));
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "停止项目 Galxe 每日" }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "账号" }));
+    fireEvent.click(screen.getByRole("button", { name: "更多操作" }));
+
+    const operationList = screen.getByRole("list", { name: "最近操作记录" });
+    expect(within(operationList).getByText("打开项目")).toBeTruthy();
+    expect(within(operationList).getByText("已取消")).toBeTruthy();
+    expect(within(operationList).getByText("1 / 2")).toBeTruthy();
+    expect(within(operationList).getByText("Galxe 每日")).toBeTruthy();
+    openProfileSpy.mockRestore();
+  });
+
   test("编辑弹窗可以设置账号颜色", async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -3159,7 +4598,7 @@ describe("App launcher layout", () => {
     expect(await within(dialog).findByText("确认从备份恢复")).toBeTruthy();
     await user.click(within(dialog).getByRole("button", { name: "确认恢复" }));
 
-    expect(await screen.findByRole("button", { name: "启动 恢复号" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "选择 恢复号" })).toBeTruthy();
     expect(restoreBackupSpy).toHaveBeenCalledWith(
       "~/MultiChromeProfiles",
       "/tmp/multichrome-backup.json"
@@ -3188,7 +4627,7 @@ describe("App launcher layout", () => {
       });
     render(<App />);
 
-    await user.click(await screen.findByRole("checkbox", { name: "选择 主号" }));
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
     await user.click(screen.getByRole("button", { name: "设置" }));
     const dialog = await screen.findByRole("dialog", { name: "设置" });
     await user.click(within(dialog).getByRole("button", { name: "选中账号" }));
@@ -3245,7 +4684,7 @@ describe("App launcher layout", () => {
     const confirmDialog = await screen.findByRole("dialog", { name: "确认恢复完整备份" });
     await user.click(within(confirmDialog).getByRole("button", { name: "确认恢复" }));
 
-    expect(await screen.findByRole("button", { name: "启动 备份号" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "选择 备份号" })).toBeTruthy();
     expect(restoreSpy).toHaveBeenCalledWith("~/MultiChromeProfiles", "/tmp/full-profiles-1", true);
     previewSpy.mockRestore();
     restoreSpy.mockRestore();
@@ -3349,6 +4788,22 @@ function projectUrl(overrides: Partial<TestProjectUrl>): TestProjectUrl {
   };
 }
 
+function browserSessionSnapshot(
+  profileId: string,
+  running: boolean
+): BrowserSessionSnapshot {
+  return {
+    profileId,
+    status: running ? "running" : "stopped",
+    running,
+    pid: running ? 1201 : null,
+    windowCount: running ? null : 0,
+    windows: [],
+    windowError: null,
+    checkedAt: 1000
+  };
+}
+
 async function flushPromises() {
   await act(async () => {
     await Promise.resolve();
@@ -3356,6 +4811,10 @@ async function flushPromises() {
     await Promise.resolve();
     await Promise.resolve();
   });
+}
+
+async function openBulkMore(user: { click: (element: Element) => Promise<unknown> }) {
+  await user.click(screen.getByRole("button", { name: "更多操作" }));
 }
 
 function importCandidate(overrides: {

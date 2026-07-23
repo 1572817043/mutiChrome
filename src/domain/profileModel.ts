@@ -139,6 +139,16 @@ export function duplicateProfile(
   };
 }
 
+export function cloneProfileForDraft(profile: ChromeProfile): ChromeProfile {
+  return {
+    ...profile,
+    tags: [...profile.tags],
+    accountPlatforms: profile.accountPlatforms.map((accountPlatform) => ({
+      ...accountPlatform
+    }))
+  };
+}
+
 export function defaultAccentColor(profileId: string): ProfileAccentColor {
   const match = profileId.match(/(\d+)$/);
   const number = Number(match?.[1] ?? 1);
