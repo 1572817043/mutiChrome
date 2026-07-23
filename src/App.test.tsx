@@ -1172,6 +1172,110 @@ describe("App launcher layout", () => {
     focusSpy.mockRestore();
   });
 
+  test("布局同步会跳过读取失败的目标并继续同步其它目标", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem(
+      "multichrome.profileDocument",
+      JSON.stringify(
+        documentWith([
+          profile({ id: "account-001", name: "主号", tags: ["Gmail", "TG"], notes: "Google 已登录" }),
+          profile({ id: "account-002", name: "抽奖号", status: "needs_check", tags: ["X", "DC"] }),
+          profile({ id: "account-003", name: "任务号", tags: ["Galxe"] })
+        ])
+      )
+    );
+    vi.spyOn(profileApi, "listRunningProfiles").mockResolvedValue([
+      "account-001",
+      "account-002",
+      "account-003"
+    ]);
+    const listWindowsSpy = vi
+      .spyOn(profileApi, "listProfileWindows")
+      .mockResolvedValueOnce([
+        {
+          index: 1,
+          title: "主窗口",
+          x: 80,
+          y: 120,
+          width: 960,
+          height: 720
+        }
+      ])
+      .mockRejectedValueOnce(new Error("辅助功能权限不足"))
+      .mockResolvedValueOnce([
+        {
+          index: 1,
+          title: "目标窗口",
+          x: 0,
+          y: 0,
+          width: 640,
+          height: 480
+        }
+      ])
+      .mockResolvedValueOnce([
+        {
+          index: 1,
+          title: "目标窗口",
+          x: 80,
+          y: 120,
+          width: 960,
+          height: 720
+        }
+      ]);
+    const setBoundsSpy = vi
+      .spyOn(profileApi, "setProfileWindowBounds")
+      .mockResolvedValue();
+    const focusSpy = vi.spyOn(profileApi, "focusProfileWindow").mockResolvedValue();
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "选择 抽奖号" }));
+    await user.click(screen.getByRole("button", { name: "选择 任务号" }));
+    await openBulkMore(user);
+    await user.click(screen.getByRole("button", { name: "同步布局" }));
+
+    expect(listWindowsSpy).toHaveBeenCalledTimes(4);
+    expect(listWindowsSpy).toHaveBeenNthCalledWith(
+      1,
+      "~/MultiChromeProfiles",
+      "account-001"
+    );
+    expect(listWindowsSpy).toHaveBeenNthCalledWith(
+      2,
+      "~/MultiChromeProfiles",
+      "account-002"
+    );
+    expect(listWindowsSpy).toHaveBeenNthCalledWith(
+      3,
+      "~/MultiChromeProfiles",
+      "account-003"
+    );
+    expect(listWindowsSpy).toHaveBeenNthCalledWith(
+      4,
+      "~/MultiChromeProfiles",
+      "account-003"
+    );
+    expect(setBoundsSpy).toHaveBeenCalledTimes(1);
+    expect(setBoundsSpy).toHaveBeenCalledWith(
+      "~/MultiChromeProfiles",
+      "account-003",
+      { x: 80, y: 120, width: 960, height: 720 }
+    );
+    expect(setBoundsSpy).not.toHaveBeenCalledWith(
+      "~/MultiChromeProfiles",
+      "account-002",
+      expect.anything()
+    );
+    expect(await screen.findByText("已同步布局到 1 个账号，1 个失败")).toBeTruthy();
+    const operationList = await screen.findByRole("list", { name: "最近操作记录" });
+    expect(within(operationList).getByText("失败")).toBeTruthy();
+    expect(within(operationList).getByText("结果：已同步 1 个，失败 1 个")).toBeTruthy();
+    vi.mocked(profileApi.listRunningProfiles).mockRestore();
+    listWindowsSpy.mockRestore();
+    setBoundsSpy.mockRestore();
+    focusSpy.mockRestore();
+  });
+
   test("布局同步会在窗口没有实际移动时提示未生效", async () => {
     const user = userEvent.setup();
     vi.spyOn(profileApi, "listRunningProfiles").mockResolvedValue([
