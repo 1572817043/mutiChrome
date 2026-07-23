@@ -175,6 +175,8 @@ test("批量栏会说明未选择账号和空网址会打开新标签", () => {
 
   expect(screen.getByText("将为 2 个账号打开空白新标签。")).toBeTruthy();
   expect(screen.getByRole("button", { name: "打开新标签" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "更多操作" }));
+  expect(screen.getByRole("option", { name: "无选中运行账号" })).toBeTruthy();
 });
 
 test("批量删除确认弹窗保留两种危险操作流程", () => {

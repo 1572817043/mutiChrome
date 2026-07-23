@@ -186,6 +186,40 @@ describe("项目组件", () => {
     expect(screen.getByText("确认删除项目")).toBeTruthy();
   });
 
+  test("项目编辑弹窗提示空网址和未绑定账号但不禁用保存", () => {
+    const onSave = vi.fn();
+
+    render(
+      <EditProjectDialog
+        mode="create"
+        project={project({
+          url: "",
+          urls: [
+            {
+              id: "url-001",
+              name: "主入口",
+              url: "",
+              notes: ""
+            }
+          ],
+          profileIds: []
+        })}
+        profiles={[profile()]}
+        onChange={vi.fn()}
+        onSave={onSave}
+        onClose={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText("至少保留一个非空网址，保存后项目卡片才能打开。")).toBeTruthy();
+    expect(screen.getByText("还没有绑定账号，保存后项目暂时不能打开。")).toBeTruthy();
+    const saveButton = screen.getByRole("button", { name: "保存项目" }) as HTMLButtonElement;
+    expect(saveButton.disabled).toBe(false);
+
+    fireEvent.click(saveButton);
+    expect(onSave).toHaveBeenCalledTimes(1);
+  });
+
   test("项目删除确认面板保留删除文案和确认回调", () => {
     const onConfirm = vi.fn();
 

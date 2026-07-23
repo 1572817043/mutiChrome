@@ -55,6 +55,8 @@ export function EditProjectDialog({
   const [urlImportOpen, setUrlImportOpen] = useState(false);
   const [urlImportDraft, setUrlImportDraft] = useState("");
   const projectUrls = projectEditableUrls(project);
+  const hasNonEmptyProjectUrl = projectUrls.some((projectUrl) => projectUrl.url.trim());
+  const hasBoundProfiles = project.profileIds.length > 0;
 
   useEffect(() => {
     setIntervalDraft(String(project.intervalSeconds));
@@ -221,6 +223,11 @@ export function EditProjectDialog({
                 </button>
               </div>
             </div>
+            {!hasNonEmptyProjectUrl ? (
+              <p className="project-inline-hint">
+                至少保留一个非空网址，保存后项目卡片才能打开。
+              </p>
+            ) : null}
             {urlImportOpen ? (
               <div className="project-url-import">
                 <label>
@@ -373,6 +380,11 @@ export function EditProjectDialog({
 
           <div className="field">
             <span className="field-label">绑定账号</span>
+            {!hasBoundProfiles ? (
+              <p className="project-inline-hint">
+                还没有绑定账号，保存后项目暂时不能打开。
+              </p>
+            ) : null}
             <div className="project-profile-picker">
               {profiles.map((profile) => {
                 const selected = project.profileIds.includes(profile.id);

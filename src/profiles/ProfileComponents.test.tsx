@@ -156,9 +156,10 @@ describe("账号展示组件", () => {
       />
     );
 
-    expect(screen.getByText("支持每行一个账号：名称, 标签, 备注")).toBeTruthy();
-    expect(screen.getByText("也支持 名称 | 标签 | 备注，或从表格复制的 Tab 分隔内容。")).toBeTruthy();
-    expect(screen.getByText("还没有解析到账号，请至少填写账号名称。")).toBeTruthy();
+    expect(screen.getByText("格式说明")).toBeTruthy();
+    expect(screen.getByText("每行一个账号，第一列必须是账号名称。")).toBeTruthy();
+    expect(screen.getByText("支持：名称, 标签, 备注；名称 | 标签 | 备注；表格 Tab 分隔内容。")).toBeTruthy();
+    expect(screen.getByText("没有解析到可创建账号。请检查每行第一列是否有账号名称，并使用上面的格式粘贴。")).toBeTruthy();
     expect((screen.getByRole("button", { name: "创建 0 个账号" }) as HTMLButtonElement).disabled).toBe(true);
   });
 });

@@ -271,7 +271,7 @@ export function BulkActionBar({
                 onChange={(event) => onLayoutSourceProfileChange(event.target.value)}
               >
                 {runningSelectedProfiles.length === 0 ? (
-                  <option value="">无运行账号</option>
+                  <option value="">无选中运行账号</option>
                 ) : (
                   runningSelectedProfiles.map((profile) => (
                     <option key={profile.id} value={profile.id}>

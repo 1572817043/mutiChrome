@@ -59,8 +59,11 @@ export function BatchCreateProfilesDialog({
               placeholder="测试号一, galxe x, Google 已登录"
               onChange={(event) => onChange(event.target.value)}
             />
-            <small className="muted-line">支持每行一个账号：名称, 标签, 备注</small>
-            <small className="muted-line">也支持 名称 | 标签 | 备注，或从表格复制的 Tab 分隔内容。</small>
+            <div className="batch-profile-format-note">
+              <strong>格式说明</strong>
+              <small>每行一个账号，第一列必须是账号名称。</small>
+              <small>支持：名称, 标签, 备注；名称 | 标签 | 备注；表格 Tab 分隔内容。</small>
+            </div>
           </div>
 
           {drafts.length > 0 ? (
@@ -75,7 +78,9 @@ export function BatchCreateProfilesDialog({
               {drafts.length > 5 ? <small className="muted-line">另有 {drafts.length - 5} 个账号</small> : null}
             </div>
           ) : hasInput ? (
-            <p className="batch-profile-empty">还没有解析到账号，请至少填写账号名称。</p>
+            <p className="batch-profile-empty">
+              没有解析到可创建账号。请检查每行第一列是否有账号名称，并使用上面的格式粘贴。
+            </p>
           ) : null}
         </div>
 
