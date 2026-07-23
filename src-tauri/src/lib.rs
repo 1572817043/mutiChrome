@@ -5,7 +5,7 @@ use profile_store::{
     default_browser_path, delete_profile_dir, directory_size, ensure_profile_backups_dir,
     ensure_profile_dir, import_profile_dir, init_root, load_profile_document,
     preview_full_profile_backup, preview_full_profile_restore, repair_root_health,
-    restore_full_profile_backup, restore_profile_backup, save_profile_document,
+    restore_full_profile_backup, restore_profile_backup, save_profile_document, BrowserLaunchEvent,
     FullProfileBackupPreview, FullProfileBackupResult, FullProfileRestorePreview,
     ProfileBackupResult, ProfileDocument, ProfileImportCandidate, ProfileMarker, RootHealthReport,
     RootRepairResult, RootStatus,
@@ -14,6 +14,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,6 +39,26 @@ struct ChromeWindowInfo {
     width: i32,
     height: i32,
     minimized: bool,
+}
+
+#[derive(Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum BrowserSessionStatus {
+    Running,
+    Stopped,
+}
+
+#[derive(Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserSessionSnapshot {
+    profile_id: String,
+    status: BrowserSessionStatus,
+    running: bool,
+    pid: Option<u32>,
+    window_count: Option<usize>,
+    windows: Vec<ChromeWindowInfo>,
+    window_error: Option<String>,
+    checked_at: u64,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -427,10 +448,13 @@ pub fn run() {
             init_profile_root,
             load_profiles,
             save_profiles,
+            load_browser_launch_events,
+            save_browser_launch_events,
             profile_directory_size,
             detect_chrome,
             open_profile,
             list_running_profiles,
+            snapshot_browser_sessions,
             focus_profile_window,
             list_profile_windows,
             set_profile_window_bounds,
@@ -536,6 +560,19 @@ fn save_profiles(root_path: String, document: ProfileDocument) -> Result<(), Str
 }
 
 #[tauri::command]
+fn load_browser_launch_events(root_path: String) -> Result<Vec<BrowserLaunchEvent>, String> {
+    profile_store::load_browser_launch_events(&PathBuf::from(root_path))
+}
+
+#[tauri::command]
+fn save_browser_launch_events(
+    root_path: String,
+    events: Vec<BrowserLaunchEvent>,
+) -> Result<(), String> {
+    profile_store::save_browser_launch_events(&PathBuf::from(root_path), &events)
+}
+
+#[tauri::command]
 fn profile_directory_size(path: String) -> Result<u64, String> {
     directory_size(&PathBuf::from(path))
 }
@@ -612,6 +649,32 @@ fn list_running_profiles(root_path: String) -> Result<Vec<String>, String> {
     Ok(running_profile_ids_from_processes(
         &PathBuf::from(root_path),
         stdout.lines(),
+    ))
+}
+
+#[tauri::command]
+fn snapshot_browser_sessions(
+    root_path: String,
+    profile_ids: Vec<String>,
+    include_windows: Option<bool>,
+) -> Result<Vec<BrowserSessionSnapshot>, String> {
+    let output = Command::new("ps")
+        .args(["-axo", "pid=,command="])
+        .output()
+        .map_err(|error| error.to_string())?;
+
+    if !output.status.success() {
+        return Err("读取 Chrome 会话状态失败".to_string());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(browser_session_snapshots_from_processes(
+        &PathBuf::from(root_path),
+        &profile_ids,
+        stdout.lines(),
+        include_windows.unwrap_or(false),
+        list_chrome_windows,
+        current_time_millis(),
     ))
 }
 
@@ -830,6 +893,82 @@ where
         .collect()
 }
 
+fn browser_session_snapshots_from_processes<'a, I, F>(
+    root_path: &Path,
+    profile_ids: &[String],
+    process_lines: I,
+    include_windows: bool,
+    mut list_windows: F,
+    checked_at: u64,
+) -> Vec<BrowserSessionSnapshot>
+where
+    I: IntoIterator<Item = &'a str>,
+    F: FnMut(u32) -> Result<Vec<ChromeWindowInfo>, String>,
+{
+    let running_processes: BTreeMap<String, u32> =
+        running_profile_processes_from_processes(root_path, process_lines)
+            .into_iter()
+            .map(|process| (process.profile_id, process.pid))
+            .collect();
+
+    profile_ids
+        .iter()
+        .map(|profile_id| {
+            let Some(pid) = running_processes.get(profile_id).copied() else {
+                return BrowserSessionSnapshot {
+                    profile_id: profile_id.to_string(),
+                    status: BrowserSessionStatus::Stopped,
+                    running: false,
+                    pid: None,
+                    window_count: Some(0),
+                    windows: vec![],
+                    window_error: None,
+                    checked_at,
+                };
+            };
+
+            if !include_windows {
+                return BrowserSessionSnapshot {
+                    profile_id: profile_id.to_string(),
+                    status: BrowserSessionStatus::Running,
+                    running: true,
+                    pid: Some(pid),
+                    window_count: None,
+                    windows: vec![],
+                    window_error: None,
+                    checked_at,
+                };
+            }
+
+            match list_windows(pid) {
+                Ok(windows) => {
+                    let window_count = windows.len();
+                    BrowserSessionSnapshot {
+                        profile_id: profile_id.to_string(),
+                        status: BrowserSessionStatus::Running,
+                        running: true,
+                        pid: Some(pid),
+                        window_count: Some(window_count),
+                        windows,
+                        window_error: None,
+                        checked_at,
+                    }
+                }
+                Err(error) => BrowserSessionSnapshot {
+                    profile_id: profile_id.to_string(),
+                    status: BrowserSessionStatus::Running,
+                    running: true,
+                    pid: Some(pid),
+                    window_count: None,
+                    windows: vec![],
+                    window_error: Some(error),
+                    checked_at,
+                },
+            }
+        })
+        .collect()
+}
+
 fn profile_root_candidates(root_path: &Path) -> Vec<String> {
     let profile_root = root_path.join("profiles");
     let mut candidates = vec![clean_path_text(&profile_root.to_string_lossy())];
@@ -983,6 +1122,13 @@ fn profile_id_from_user_data_dir(user_data_dir: &str, profile_root: &str) -> Opt
 
 fn clean_path_text(path: &str) -> String {
     path.trim().trim_end_matches('/').to_string()
+}
+
+fn current_time_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
 }
 
 fn configured_browser_path(browser_path: Option<String>) -> PathBuf {
@@ -1159,5 +1305,142 @@ mod tests {
                 }
             ]
         );
+    }
+
+    #[test]
+    fn browser_session_snapshots_keep_running_state_when_window_scan_fails() {
+        let root = Path::new("/Users/a0000/MultiChromeProfiles");
+        let lines = [
+            "  1201 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/Users/a0000/MultiChromeProfiles/profiles/account-001 --no-first-run",
+        ];
+
+        assert_eq!(
+            browser_session_snapshots_from_processes(
+                root,
+                &["account-001".to_string(), "account-002".to_string()],
+                lines,
+                true,
+                |_| Err("辅助功能权限不足".to_string()),
+                1000
+            ),
+            vec![
+                BrowserSessionSnapshot {
+                    profile_id: "account-001".to_string(),
+                    status: BrowserSessionStatus::Running,
+                    running: true,
+                    pid: Some(1201),
+                    window_count: None,
+                    windows: vec![],
+                    window_error: Some("辅助功能权限不足".to_string()),
+                    checked_at: 1000
+                },
+                BrowserSessionSnapshot {
+                    profile_id: "account-002".to_string(),
+                    status: BrowserSessionStatus::Stopped,
+                    running: false,
+                    pid: None,
+                    window_count: Some(0),
+                    windows: vec![],
+                    window_error: None,
+                    checked_at: 1000
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn browser_session_snapshots_skip_window_scan_in_lightweight_mode() {
+        let root = Path::new("/Users/a0000/MultiChromeProfiles");
+        let lines = [
+            "  1201 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/Users/a0000/MultiChromeProfiles/profiles/account-001 --no-first-run",
+        ];
+        let mut window_scan_count = 0;
+
+        let snapshots = browser_session_snapshots_from_processes(
+            root,
+            &["account-001".to_string(), "account-002".to_string()],
+            lines,
+            false,
+            |_| {
+                window_scan_count += 1;
+                Ok(vec![ChromeWindowInfo {
+                    index: 1,
+                    title: "New Tab".to_string(),
+                    x: 0,
+                    y: 0,
+                    width: 800,
+                    height: 600,
+                    minimized: false,
+                }])
+            },
+            1000,
+        );
+
+        assert_eq!(window_scan_count, 0);
+        assert_eq!(
+            snapshots,
+            vec![
+                BrowserSessionSnapshot {
+                    profile_id: "account-001".to_string(),
+                    status: BrowserSessionStatus::Running,
+                    running: true,
+                    pid: Some(1201),
+                    window_count: None,
+                    windows: vec![],
+                    window_error: None,
+                    checked_at: 1000
+                },
+                BrowserSessionSnapshot {
+                    profile_id: "account-002".to_string(),
+                    status: BrowserSessionStatus::Stopped,
+                    running: false,
+                    pid: None,
+                    window_count: Some(0),
+                    windows: vec![],
+                    window_error: None,
+                    checked_at: 1000
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn browser_session_snapshots_report_window_count_when_scanned() {
+        let root = Path::new("/Users/a0000/MultiChromeProfiles");
+        let lines = [
+            "  1201 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/Users/a0000/MultiChromeProfiles/profiles/account-001 --no-first-run",
+        ];
+
+        let snapshots = browser_session_snapshots_from_processes(
+            root,
+            &["account-001".to_string()],
+            lines,
+            true,
+            |_| {
+                Ok(vec![
+                    ChromeWindowInfo {
+                        index: 1,
+                        title: "New Tab".to_string(),
+                        x: 0,
+                        y: 0,
+                        width: 800,
+                        height: 600,
+                        minimized: false,
+                    },
+                    ChromeWindowInfo {
+                        index: 2,
+                        title: "Galxe".to_string(),
+                        x: 10,
+                        y: 20,
+                        width: 900,
+                        height: 700,
+                        minimized: false,
+                    },
+                ])
+            },
+            1000,
+        );
+
+        assert_eq!(snapshots[0].window_count, Some(2));
     }
 }
