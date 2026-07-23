@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
+  cloneProfileForDraft,
   createProfile,
   defaultAccentColor,
   duplicateProfile,
@@ -136,6 +137,28 @@ describe("profileModel", () => {
       updatedAt: now,
       lastOpenedAt: null
     });
+  });
+
+  test("cloneProfileForDraft copies nested editable profile data", () => {
+    const original = profile({
+      tags: ["twitter"],
+      accountPlatforms: [
+        {
+          id: "platform-001",
+          platform: "X",
+          loginUrl: "https://x.com",
+          username: "main",
+          notes: "ready"
+        }
+      ]
+    });
+
+    const draft = cloneProfileForDraft(original);
+
+    draft.tags.push("galxe");
+    draft.accountPlatforms[0].username = "changed";
+    expect(original.tags).toEqual(["twitter"]);
+    expect(original.accountPlatforms[0].username).toBe("main");
   });
 
   test("removeProfile removes the target and selects a nearby account", () => {
