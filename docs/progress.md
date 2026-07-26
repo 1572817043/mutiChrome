@@ -12,7 +12,9 @@ V4.1 已完成同步布局接入窗口注册表：PR #3 `https://github.com/1572
 
 V4.3 已完成窗口操作 summary 标准化：PR #4 `https://github.com/1572817043/mutiChrome/pull/4`，commit `ca17053feedf0abf3cd8cb1bdcdfb8811a1c2543`。本轮标准化检查窗口、平铺窗口、同步布局的 operation summary；新增 `WindowOperationSummary`、inspect/tile/sync-layout summary builder、formatter 和 type guard，标准 summary 带 `summaryType: "window-operation"`；`OperationList` 优先展示标准窗口 summary，旧 summary fallback 保留；`App.tsx` 仅替换三类窗口操作 summary 写入，未改 toast 文案、operation status、窗口执行流程或 Rust。Claude 改代码前反证审查有效；提交前 diff 红队审查有效，采纳“检查窗口失败”detail、容量超限 `skippedCount` 补算 `noWindowCount`、`isWindowOperationSummary` action/可选字段类型校验、reason/label 分支防御处理和 tile `unchangedCount` 测试。阶段验证执行 `rtk npm test -- --run src/browserOperations.test.ts`、`rtk npm test -- --run src/browser/operations/OperationList.test.tsx`、`rtk npm test -- --run src/App.test.tsx -t "检查窗口|平铺窗口|同步布局|布局同步"`、`rtk npm test`、`rtk npm run build`、`rtk cargo test --manifest-path src-tauri/Cargo.toml`、`rtk git diff --check`：全部通过。本轮未做 macOS 辅助功能实机验证，因为未改底层 AX/Rust 窗口 API、坐标换算、bounds 写入/读回或新增窗口入口；按窗口类 PR 验证规则，本轮实机验证可选。
 
-后续路线已明确：V4 继续打窗口编排基础，不直接做完整群控。V4.2 做 `grid`、`left-right`、`rows`、`columns` 这类轻量布局预设纯模型；V4.4 做轻量窗口面板。V5 才进入同步控制器基础，先做 `sync-bounds`、dry-run 预览和结果详情；鼠标、键盘、滚动、标签页等交互同步只在 V5.4 做技术预研，不进 MVP 主流程。
+V4.2 路线决策：当前 main commit 为 `55b5561a02e5e6a5b3e7011f39c45c466da26dd8`；V4.1 已完成同步布局接入窗口注册表，V4.3 已完成窗口 operation summary 标准化。重新评估后，V4.2 布局预设暂缓，不实现。理由是当前 `grid` 已够 MVP 使用，2 窗口场景天然就是左右分屏，同步布局已经覆盖“手动摆出形状后复用”的真实需求；如果 V4.2 加 UI，会增加批量栏复杂度；如果只做纯模型，短期用户价值不足。后续只有真实使用证明 `grid` 不够时，再重新评估 V4.2；若未来要做，优先只做轻量“本次 preset”，不持久化、不做复杂 UI、不做多屏、比例或拖拽布局。
+
+后续路线已明确：V4 继续打窗口编排基础，不直接做完整群控。V4.4 做轻量窗口面板。V5 才进入同步控制器基础，先做 `sync-bounds`、dry-run 预览和结果详情；鼠标、键盘、滚动、标签页等交互同步只在 V5.4 做技术预研，不进 MVP 主流程。
 
 ## 已确认决策
 
