@@ -16,6 +16,8 @@ V4.2 路线决策：当前 main commit 为 `55b5561a02e5e6a5b3e7011f39c45c466da2
 
 CDP 控制 spike 已完成：PR #8 `https://github.com/1572817043/mutiChrome/pull/8`，commit `b3cecdcf7e89389f33548814b75ffdc8fcb7167d`。本轮只新增实验目录 `experiments/cdp-control/`，未接入主应用，未修改 `src/`、`src-tauri/`，未新增第三方依赖，只使用 Node 内置 `fetch`、`WebSocket`、`node:test` 等能力。实验结果通过：3 个独立 Chrome profile 可同时绑定不同 `remote debugging port`；CDP 可 `list tabs`、读取 URL/title、navigate、click selector、type text；selector 缺失的 profile 会失败，但不会阻塞其它 profile。实验未访问 X/Galxe/Zealy 或其它真实平台，未处理密码、钱包、签名、私钥、助记词。架构结论：后续群控/自动化主路线可以优先 CDP；macOS Accessibility 继续作为窗口排列/前置能力，不作为网页动作同步主干；未来主应用若要支持 CDP，需要在启动 profile 时分配 `remote debugging port`；已普通方式启动且没有 `remote debugging port` 的 profile，通常不能无损接入 CDP，需要提示用户重新打开 profile；Windows 路线应优先复用 CDP 网页控制逻辑，只在 Chrome 启动路径和窗口管理上做平台适配。本 spike 明确不是产品化群控、不是自动化任务库，不做 X/Galxe/Zealy/真实网站自动化，不做实时鼠标键盘同步，不处理敏感凭据或钱包动作。
 
+Browser Runtime PR 1 已完成实现并进入 PR：分支 `codex/browser-runtime-launch-snapshot`，PR #10 `https://github.com/1572817043/mutiChrome/pull/10`，commit `f8059edd12606d36301a3f1e1440d5b444e78312`。本轮范围是把新启动 profile 接入 Browser Runtime 最小闭环：未运行 profile 启动时分配本地 debug port，并把 `snapshot_browser_sessions` 扩展为返回 `debugPort`、`cdpStatus` 和 `runtimeError`；已运行但无 debug port 的 profile 只通过 snapshot 报告 `missing-port`，不自动重启、不自动杀进程。本轮不做 `list tabs`、navigate、click、type、群控 UI 或自动化任务库，不处理钱包、密码、签名、私钥或助记词。阶段验证通过：`rtk cargo test --manifest-path src-tauri/Cargo.toml` 为 Rust 50 passed，`rtk npm test` 为前端 230 passed，`rtk npm run build` 通过，`rtk npm run tauri:build` 通过，`rtk git diff --check` 通过。`stash@{0}` 仍保留且未恢复。
+
 后续路线已明确：V4 继续打窗口编排基础，不直接做完整群控。V4.4 做轻量窗口面板。V5 才进入同步控制器基础，先做 `sync-bounds`、dry-run 预览和结果详情；鼠标、键盘、滚动、标签页等交互同步只在 V5.4 做技术预研，不进 MVP 主流程。
 
 ## 稳定观察 backlog
