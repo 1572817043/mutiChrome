@@ -14,6 +14,8 @@ V4.3 已完成窗口操作 summary 标准化：PR #4 `https://github.com/1572817
 
 V4.2 路线决策：当前 main commit 为 `55b5561a02e5e6a5b3e7011f39c45c466da26dd8`；V4.1 已完成同步布局接入窗口注册表，V4.3 已完成窗口 operation summary 标准化。重新评估后，V4.2 布局预设暂缓，不实现。理由是当前 `grid` 已够 MVP 使用，2 窗口场景天然就是左右分屏，同步布局已经覆盖“手动摆出形状后复用”的真实需求；如果 V4.2 加 UI，会增加批量栏复杂度；如果只做纯模型，短期用户价值不足。后续只有真实使用证明 `grid` 不够时，再重新评估 V4.2；若未来要做，优先只做轻量“本次 preset”，不持久化、不做复杂 UI、不做多屏、比例或拖拽布局。
 
+CDP 控制 spike 已完成：PR #8 `https://github.com/1572817043/mutiChrome/pull/8`，commit `b3cecdcf7e89389f33548814b75ffdc8fcb7167d`。本轮只新增实验目录 `experiments/cdp-control/`，未接入主应用，未修改 `src/`、`src-tauri/`，未新增第三方依赖，只使用 Node 内置 `fetch`、`WebSocket`、`node:test` 等能力。实验结果通过：3 个独立 Chrome profile 可同时绑定不同 `remote debugging port`；CDP 可 `list tabs`、读取 URL/title、navigate、click selector、type text；selector 缺失的 profile 会失败，但不会阻塞其它 profile。实验未访问 X/Galxe/Zealy 或其它真实平台，未处理密码、钱包、签名、私钥、助记词。架构结论：后续群控/自动化主路线可以优先 CDP；macOS Accessibility 继续作为窗口排列/前置能力，不作为网页动作同步主干；未来主应用若要支持 CDP，需要在启动 profile 时分配 `remote debugging port`；已普通方式启动且没有 `remote debugging port` 的 profile，通常不能无损接入 CDP，需要提示用户重新打开 profile；Windows 路线应优先复用 CDP 网页控制逻辑，只在 Chrome 启动路径和窗口管理上做平台适配。本 spike 明确不是产品化群控、不是自动化任务库，不做 X/Galxe/Zealy/真实网站自动化，不做实时鼠标键盘同步，不处理敏感凭据或钱包动作。
+
 后续路线已明确：V4 继续打窗口编排基础，不直接做完整群控。V4.4 做轻量窗口面板。V5 才进入同步控制器基础，先做 `sync-bounds`、dry-run 预览和结果详情；鼠标、键盘、滚动、标签页等交互同步只在 V5.4 做技术预研，不进 MVP 主流程。
 
 ## 稳定观察 backlog
