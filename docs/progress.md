@@ -29,6 +29,10 @@ V4.2 路线决策：当前 main commit 为 `55b5561a02e5e6a5b3e7011f39c45c466da2
 
 后续规则：没有复现步骤，不开修复 PR；一个问题一个小分支；不继续大重构；不做 V4.2、V4.4 或 V5，除非有真实使用证据；不做代理、指纹、自动任务、AI 助手或群控；只有窗口底层改动才强制 macOS 实机验证。
 
+## 当前 release 真实使用验收
+
+当前 main commit 为 `98349cd7524742d26634f7249f508166907f2077`，release App 已重新打包，路径为 `src-tauri/target/release/bundle/macos/MultiChrome.app`，App 修改时间为 `2026-07-26 16:59:21 +0800`。自动验证结果：`rtk npm test` 230 tests passed，`rtk npm run build` 通过，`rtk cargo test --manifest-path src-tauri/Cargo.toml` 42 passed，`rtk npm run tauri:build` 通过，`codesign --verify --deep --strict --verbose=2` 通过。用户已完成真实使用测试，未发现问题；当前 release 可用于真实使用观察。当前仍保留 `stash@{0}`，未恢复。后续进入小问题修复通道，只有真实复现问题才开 PR。
+
 ## 已确认决策
 
 - 第一版只做多账号 Chrome profile 管理。
