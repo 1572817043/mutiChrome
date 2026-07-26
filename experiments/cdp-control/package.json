@@ -1,0 +1,8 @@
+{
+  "name": "multichrome-cdp-control-spike",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test scripts/*.node-test.mjs"
+  }
+}
