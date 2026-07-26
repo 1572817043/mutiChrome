@@ -5,11 +5,16 @@ import {
   summarizeBrowserLaunchQueue
 } from "./browserSessionLaunch";
 import {
+  buildInspectWindowOperationSummary,
+  buildSyncLayoutWindowOperationSummary,
+  buildTileWindowOperationSummary,
   browserOperationStatusFromLaunchQueue,
   cancelBrowserOperation,
   createBrowserOperation,
   findActiveBrowserOperationProfileConflicts,
+  formatWindowOperationSummary,
   finishBrowserOperation,
+  isWindowOperationSummary,
   startBrowserOperation,
   trimBrowserOperations,
   withBrowserOperationTimeout
@@ -307,5 +312,255 @@ describe("browserOperations", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  test("构建检查窗口成功 summary", () => {
+    const summary = buildInspectWindowOperationSummary({
+      profileCount: 2,
+      inspectedCount: 2
+    });
+
+    expect(summary).toEqual({
+      summaryType: "window-operation",
+      action: "inspect",
+      profileCount: 2,
+      succeededCount: 2,
+      skippedCount: 0,
+      failedCount: 0,
+      focusFailedCount: 0
+    });
+    expect(isWindowOperationSummary(summary)).toBe(true);
+    expect(formatWindowOperationSummary(summary)).toBe("已检查 2 / 2");
+  });
+
+  test("构建检查窗口失败 summary", () => {
+    const summary = buildInspectWindowOperationSummary({
+      profileCount: 2,
+      inspectedCount: 0,
+      failedCount: 2,
+      reason: "inspect-failed"
+    });
+
+    expect(summary).toMatchObject({
+      summaryType: "window-operation",
+      action: "inspect",
+      profileCount: 2,
+      succeededCount: 0,
+      skippedCount: 0,
+      failedCount: 2,
+      reason: "inspect-failed"
+    });
+    expect(formatWindowOperationSummary(summary)).toBe("窗口检查失败");
+  });
+
+  test("构建平铺窗口容量超限 summary", () => {
+    const summary = buildTileWindowOperationSummary({
+      profileCount: 10,
+      tileableCount: 10,
+      capacity: 9,
+      capacityExceeded: true
+    });
+
+    expect(summary).toMatchObject({
+      summaryType: "window-operation",
+      action: "tile",
+      profileCount: 10,
+      succeededCount: 0,
+      skippedCount: 10,
+      failedCount: 0,
+      focusFailedCount: 0,
+      capacity: 9,
+      capacityExceeded: true
+    });
+    expect(formatWindowOperationSummary(summary)).toBe(
+      "可平铺 10 个，屏幕容量 9 个，已超限"
+    );
+  });
+
+  test("构建平铺窗口容量超限时会把无窗口账号计入 skippedCount", () => {
+    const summary = buildTileWindowOperationSummary({
+      profileCount: 10,
+      tileableCount: 9,
+      noWindowCount: 1,
+      capacity: 8,
+      capacityExceeded: true
+    });
+
+    expect(summary).toMatchObject({
+      summaryType: "window-operation",
+      action: "tile",
+      profileCount: 10,
+      succeededCount: 0,
+      skippedCount: 10,
+      failedCount: 0,
+      noWindowCount: 1,
+      tileableCount: 9,
+      capacity: 8,
+      capacityExceeded: true
+    });
+    expect(formatWindowOperationSummary(summary)).toBe(
+      "可平铺 9 个，屏幕容量 8 个，已超限"
+    );
+  });
+
+  test("构建平铺窗口部分成功、无窗口和多窗口 summary", () => {
+    const summary = buildTileWindowOperationSummary({
+      profileCount: 3,
+      tileableCount: 2,
+      tiledCount: 1,
+      noWindowCount: 1,
+      multiWindowProfileCount: 1
+    });
+
+    expect(summary).toMatchObject({
+      summaryType: "window-operation",
+      action: "tile",
+      profileCount: 3,
+      succeededCount: 1,
+      skippedCount: 1,
+      failedCount: 0,
+      focusFailedCount: 0,
+      noWindowCount: 1,
+      multiWindowProfileCount: 1
+    });
+    expect(formatWindowOperationSummary(summary)).toBe(
+      "已平铺 1 / 3，无窗口 1 个，多窗口 1 个"
+    );
+  });
+
+  test("构建平铺窗口未生效 summary", () => {
+    const summary = buildTileWindowOperationSummary({
+      profileCount: 1,
+      tileableCount: 1,
+      unchangedCount: 1
+    });
+
+    expect(summary).toMatchObject({
+      summaryType: "window-operation",
+      action: "tile",
+      profileCount: 1,
+      succeededCount: 0,
+      skippedCount: 0,
+      failedCount: 0,
+      unchangedCount: 1
+    });
+    expect(formatWindowOperationSummary(summary)).toBe(
+      "已平铺 0 / 1，未生效 1 个"
+    );
+  });
+
+  test("构建同步布局 source 失败 summary", () => {
+    const summary = buildSyncLayoutWindowOperationSummary({
+      profileCount: 2,
+      sourceProfileId: "account-001",
+      reason: "minimized-source-window"
+    });
+
+    expect(summary).toMatchObject({
+      summaryType: "window-operation",
+      action: "sync-layout",
+      profileCount: 2,
+      sourceProfileId: "account-001",
+      succeededCount: 0,
+      skippedCount: 0,
+      failedCount: 0,
+      focusFailedCount: 0,
+      reason: "minimized-source-window"
+    });
+    expect(formatWindowOperationSummary(summary)).toBe("主账号窗口已最小化");
+  });
+
+  test("构建同步布局兜底失败 summary", () => {
+    const summary = buildSyncLayoutWindowOperationSummary({
+      profileCount: 2,
+      sourceProfileId: "account-001",
+      reason: "sync-layout-error"
+    });
+
+    expect(summary).toMatchObject({
+      summaryType: "window-operation",
+      action: "sync-layout",
+      profileCount: 2,
+      sourceProfileId: "account-001",
+      succeededCount: 0,
+      skippedCount: 0,
+      failedCount: 0,
+      focusFailedCount: 0,
+      reason: "sync-layout-error"
+    });
+    expect(formatWindowOperationSummary(summary)).toBe("同步布局失败");
+  });
+
+  test("构建同步布局部分成功、最小化、未生效和前置失败 summary", () => {
+    const summary = buildSyncLayoutWindowOperationSummary({
+      profileCount: 4,
+      sourceProfileId: "account-001",
+      syncedCount: 1,
+      minimizedCount: 1,
+      unchangedCount: 1,
+      focusFailedCount: 1
+    });
+
+    expect(summary).toMatchObject({
+      summaryType: "window-operation",
+      action: "sync-layout",
+      profileCount: 4,
+      succeededCount: 1,
+      skippedCount: 1,
+      failedCount: 0,
+      focusFailedCount: 1,
+      minimizedCount: 1,
+      unchangedCount: 1
+    });
+    expect(formatWindowOperationSummary(summary)).toBe(
+      "已同步 1 / 4，最小化 1 个，未生效 1 个，未能前置 1 个"
+    );
+  });
+
+  test("窗口 summary builder 会聚合 skippedCount", () => {
+    const summary = buildSyncLayoutWindowOperationSummary({
+      profileCount: 5,
+      sourceProfileId: "account-001",
+      syncedCount: 1,
+      noWindowCount: 1,
+      minimizedCount: 2,
+      failedCount: 1
+    });
+
+    expect(summary.skippedCount).toBe(3);
+    expect(formatWindowOperationSummary(summary)).toBe(
+      "已同步 1 / 5，失败 1 个，无窗口 1 个，最小化 2 个"
+    );
+  });
+
+  test("窗口 summary 类型守卫会拒绝未知 action", () => {
+    expect(
+      isWindowOperationSummary({
+        summaryType: "window-operation",
+        action: "tile-windows",
+        profileCount: 1,
+        succeededCount: 1,
+        skippedCount: 0,
+        failedCount: 0,
+        focusFailedCount: 0
+      })
+    ).toBe(false);
+  });
+
+  test("窗口 summary 类型守卫会拒绝错误类型的可选字段", () => {
+    expect(
+      isWindowOperationSummary({
+        summaryType: "window-operation",
+        action: "tile",
+        profileCount: 1,
+        succeededCount: 1,
+        skippedCount: 0,
+        failedCount: 0,
+        focusFailedCount: 0,
+        sourceProfileId: 123,
+        capacity: "8",
+        capacityExceeded: "true"
+      })
+    ).toBe(false);
   });
 });
