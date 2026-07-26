@@ -10,7 +10,7 @@ use profile_store::{
     ProfileBackupResult, ProfileDocument, ProfileImportCandidate, ProfileMarker, RootHealthReport,
     RootRepairResult, RootStatus,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -24,6 +24,8 @@ const CDP_PORT_START: u16 = 19222;
 const CDP_PORT_END: u16 = 19321;
 const CDP_PROBE_TIMEOUT_MS: u64 = 250;
 const CDP_SNAPSHOT_PROBE_BUDGET_MS: u64 = 750;
+const CDP_LIST_TIMEOUT_MS: u64 = 500;
+const CDP_LIST_MAX_BODY_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -81,6 +83,31 @@ struct BrowserSessionSnapshot {
     windows: Vec<ChromeWindowInfo>,
     window_error: Option<String>,
     checked_at: u64,
+}
+
+#[derive(Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TabSnapshot {
+    target_id: String,
+    r#type: String,
+    url: String,
+    title: String,
+    web_socket_debugger_url: Option<String>,
+    checked_at: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct CdpTargetRaw {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default, rename = "type")]
+    r#type: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default, rename = "webSocketDebuggerUrl")]
+    web_socket_debugger_url: Option<String>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -477,6 +504,7 @@ pub fn run() {
             open_profile,
             list_running_profiles,
             snapshot_browser_sessions,
+            list_runtime_tabs,
             focus_profile_window,
             list_profile_windows,
             set_profile_window_bounds,
@@ -705,6 +733,27 @@ fn snapshot_browser_sessions(
         probe_cdp_version,
         current_time_millis(),
     ))
+}
+
+#[tauri::command]
+fn list_runtime_tabs(root_path: String, profile_id: String) -> Result<Vec<TabSnapshot>, String> {
+    let output = Command::new("ps")
+        .args(["-axo", "pid=,command="])
+        .output()
+        .map_err(|_| "Browser Runtime 不可用".to_string())?;
+
+    if !output.status.success() {
+        return Err("Browser Runtime 不可用".to_string());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    runtime_tabs_from_processes(
+        &PathBuf::from(root_path),
+        &profile_id,
+        stdout.lines(),
+        fetch_cdp_tabs,
+        current_time_millis(),
+    )
 }
 
 #[tauri::command]
@@ -1107,6 +1156,57 @@ where
         .collect()
 }
 
+fn runtime_tabs_from_processes<'a, I, F>(
+    root_path: &Path,
+    profile_id: &str,
+    process_lines: I,
+    mut fetch_tabs: F,
+    checked_at: u64,
+) -> Result<Vec<TabSnapshot>, String>
+where
+    I: IntoIterator<Item = &'a str>,
+    F: FnMut(u16) -> Result<Vec<CdpTargetRaw>, String>,
+{
+    let Some(process) = running_profile_processes_from_processes(root_path, process_lines)
+        .into_iter()
+        .find(|process| process.profile_id == profile_id)
+    else {
+        return Err("该账号未运行".to_string());
+    };
+
+    let Some(port) = process.debug_port else {
+        return Err("该账号需要关闭后重新打开以启用 Browser Runtime".to_string());
+    };
+
+    let targets = fetch_tabs(port).map_err(|_| "Browser Runtime 不可用".to_string())?;
+    Ok(targets
+        .into_iter()
+        .filter_map(|target| tab_snapshot_from_cdp_target(target, checked_at))
+        .collect())
+}
+
+fn tab_snapshot_from_cdp_target(target: CdpTargetRaw, checked_at: u64) -> Option<TabSnapshot> {
+    if target.r#type.as_deref() != Some("page") {
+        return None;
+    }
+
+    let target_id = target.id?.trim().to_string();
+    if target_id.is_empty() {
+        return None;
+    }
+
+    Some(TabSnapshot {
+        target_id,
+        r#type: "page".to_string(),
+        url: target.url.unwrap_or_default(),
+        title: target.title.unwrap_or_default(),
+        web_socket_debugger_url: target
+            .web_socket_debugger_url
+            .filter(|value| !value.trim().is_empty()),
+        checked_at,
+    })
+}
+
 fn cdp_status_for_process<P>(
     debug_port: Option<u16>,
     probe_cdp: &mut P,
@@ -1287,6 +1387,29 @@ fn extract_remote_debugging_port(line: &str) -> Option<u16> {
     None
 }
 
+fn fetch_cdp_tabs(port: u16) -> Result<Vec<CdpTargetRaw>, String> {
+    let timeout = Duration::from_millis(CDP_LIST_TIMEOUT_MS);
+    let address = SocketAddr::from(([127, 0, 0, 1], port));
+    let started_at = Instant::now();
+    let mut stream = TcpStream::connect_timeout(&address, timeout)
+        .map_err(|error| short_cdp_probe_error(&error.to_string()))?;
+    let remaining_timeout = remaining_cdp_timeout(started_at, CDP_LIST_TIMEOUT_MS)?;
+    stream
+        .set_read_timeout(Some(remaining_timeout))
+        .map_err(|_| "CDP 连接失败".to_string())?;
+    stream
+        .set_write_timeout(Some(remaining_timeout))
+        .map_err(|_| "CDP 连接失败".to_string())?;
+    stream
+        .write_all(
+            b"GET /json/list HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
+        )
+        .map_err(|error| short_cdp_probe_error(&error.to_string()))?;
+
+    let body = read_cdp_list_response_body(&mut stream, started_at)?;
+    serde_json::from_slice::<Vec<CdpTargetRaw>>(&body).map_err(|_| "CDP 连接失败".to_string())
+}
+
 fn probe_cdp_version(port: u16) -> Result<(), String> {
     let timeout = Duration::from_millis(CDP_PROBE_TIMEOUT_MS);
     let address = SocketAddr::from(([127, 0, 0, 1], port));
@@ -1316,10 +1439,123 @@ fn probe_cdp_version(port: u16) -> Result<(), String> {
 }
 
 fn remaining_cdp_probe_timeout(started_at: Instant) -> Result<Duration, String> {
-    Duration::from_millis(CDP_PROBE_TIMEOUT_MS)
+    remaining_cdp_timeout(started_at, CDP_PROBE_TIMEOUT_MS)
+}
+
+fn remaining_cdp_timeout(started_at: Instant, timeout_ms: u64) -> Result<Duration, String> {
+    Duration::from_millis(timeout_ms)
         .checked_sub(started_at.elapsed())
         .filter(|duration| !duration.is_zero())
         .ok_or_else(|| "CDP 探测超时".to_string())
+}
+
+fn read_cdp_list_response_body(
+    stream: &mut TcpStream,
+    started_at: Instant,
+) -> Result<Vec<u8>, String> {
+    let mut response = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    let header_end = loop {
+        stream
+            .set_read_timeout(Some(remaining_cdp_timeout(started_at, CDP_LIST_TIMEOUT_MS)?))
+            .map_err(|_| "CDP 连接失败".to_string())?;
+        let bytes_read = stream
+            .read(&mut buffer)
+            .map_err(|error| short_cdp_probe_error(&error.to_string()))?;
+        if bytes_read == 0 {
+            return Err("CDP 连接失败".to_string());
+        }
+        response.extend_from_slice(&buffer[..bytes_read]);
+        if response.len() > CDP_LIST_MAX_BODY_BYTES {
+            return Err("CDP 连接失败".to_string());
+        }
+        if let Some(index) = find_header_end(&response) {
+            break index;
+        }
+    };
+
+    let headers = String::from_utf8_lossy(&response[..header_end]);
+    if !is_http_ok(&headers) || uses_chunked_transfer(&headers) {
+        return Err("CDP 连接失败".to_string());
+    }
+
+    let content_length = cdp_content_length(&headers)?;
+    if content_length.is_some_and(|length| length > CDP_LIST_MAX_BODY_BYTES) {
+        return Err("CDP 连接失败".to_string());
+    }
+
+    let mut body = response[header_end + 4..].to_vec();
+    if let Some(content_length) = content_length {
+        while body.len() < content_length {
+            stream
+                .set_read_timeout(Some(remaining_cdp_timeout(started_at, CDP_LIST_TIMEOUT_MS)?))
+                .map_err(|_| "CDP 连接失败".to_string())?;
+            let bytes_read = stream
+                .read(&mut buffer)
+                .map_err(|error| short_cdp_probe_error(&error.to_string()))?;
+            if bytes_read == 0 {
+                return Err("CDP 连接失败".to_string());
+            }
+            body.extend_from_slice(&buffer[..bytes_read]);
+            if body.len() > CDP_LIST_MAX_BODY_BYTES {
+                return Err("CDP 连接失败".to_string());
+            }
+        }
+        body.truncate(content_length);
+        return Ok(body);
+    }
+
+    loop {
+        if body.len() > CDP_LIST_MAX_BODY_BYTES {
+            return Err("CDP 连接失败".to_string());
+        }
+        stream
+            .set_read_timeout(Some(remaining_cdp_timeout(started_at, CDP_LIST_TIMEOUT_MS)?))
+            .map_err(|_| "CDP 连接失败".to_string())?;
+        let bytes_read = match stream.read(&mut buffer) {
+            Ok(bytes_read) => bytes_read,
+            Err(error) => return Err(short_cdp_probe_error(&error.to_string())),
+        };
+        if bytes_read == 0 {
+            return Ok(body);
+        }
+        body.extend_from_slice(&buffer[..bytes_read]);
+    }
+}
+
+fn find_header_end(response: &[u8]) -> Option<usize> {
+    response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+}
+
+fn is_http_ok(headers: &str) -> bool {
+    headers
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        == Some("200")
+}
+
+fn uses_chunked_transfer(headers: &str) -> bool {
+    headers
+        .lines()
+        .any(|line| line.to_ascii_lowercase().starts_with("transfer-encoding:")
+            && line.to_ascii_lowercase().contains("chunked"))
+}
+
+fn cdp_content_length(headers: &str) -> Result<Option<usize>, String> {
+    let Some(line) = headers
+        .lines()
+        .find(|line| line.to_ascii_lowercase().starts_with("content-length:"))
+    else {
+        return Ok(None);
+    };
+
+    line.split_once(':')
+        .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+        .map(Some)
+        .ok_or_else(|| "CDP 连接失败".to_string())
 }
 
 fn read_http_status_line(stream: &mut TcpStream) -> Result<String, String> {
@@ -1406,7 +1642,10 @@ fn reveal_path(path: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use std::net::TcpListener;
     use std::path::Path;
+    use std::thread;
 
     #[test]
     fn chrome_launch_args_pass_profile_dir_as_switch_value() {
@@ -1922,5 +2161,287 @@ mod tests {
             serde_json::to_string(&BrowserSessionCdpStatus::MissingPort).unwrap(),
             "\"missing-port\""
         );
+    }
+
+    #[test]
+    fn runtime_tabs_from_processes_returns_page_targets() {
+        let root = Path::new("/Users/a0000/MultiChromeProfiles");
+        let lines = [
+            "  1201 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/Users/a0000/MultiChromeProfiles/profiles/account-001 --remote-debugging-port=19222 --remote-debugging-address=127.0.0.1 --no-first-run",
+        ];
+
+        let tabs = runtime_tabs_from_processes(
+            root,
+            "account-001",
+            lines,
+            |port| {
+                assert_eq!(port, 19222);
+                Ok(vec![
+                    CdpTargetRaw {
+                        id: Some("page-1".to_string()),
+                        r#type: Some("page".to_string()),
+                        url: Some("chrome://newtab/".to_string()),
+                        title: Some("New Tab".to_string()),
+                        web_socket_debugger_url: Some(
+                            "ws://127.0.0.1:19222/devtools/page/page-1".to_string(),
+                        ),
+                    },
+                    CdpTargetRaw {
+                        id: Some("worker-1".to_string()),
+                        r#type: Some("service_worker".to_string()),
+                        url: Some("chrome-extension://worker".to_string()),
+                        title: Some("Worker".to_string()),
+                        web_socket_debugger_url: None,
+                    },
+                ])
+            },
+            1000,
+        )
+        .unwrap();
+
+        assert_eq!(
+            tabs,
+            vec![TabSnapshot {
+                target_id: "page-1".to_string(),
+                r#type: "page".to_string(),
+                url: "chrome://newtab/".to_string(),
+                title: "New Tab".to_string(),
+                web_socket_debugger_url: Some(
+                    "ws://127.0.0.1:19222/devtools/page/page-1".to_string()
+                ),
+                checked_at: 1000,
+            }]
+        );
+    }
+
+    #[test]
+    fn runtime_tabs_from_processes_reports_stopped_profile() {
+        let error = runtime_tabs_from_processes(
+            Path::new("/Users/a0000/MultiChromeProfiles"),
+            "account-001",
+            std::iter::empty::<&str>(),
+            |_| Ok(vec![]),
+            1000,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "该账号未运行");
+    }
+
+    #[test]
+    fn runtime_tabs_from_processes_reports_missing_debug_port() {
+        let root = Path::new("/Users/a0000/MultiChromeProfiles");
+        let lines = [
+            "  1201 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/Users/a0000/MultiChromeProfiles/profiles/account-001 --no-first-run",
+        ];
+
+        let error =
+            runtime_tabs_from_processes(root, "account-001", lines, |_| Ok(vec![]), 1000)
+                .unwrap_err();
+
+        assert_eq!(
+            error,
+            "该账号需要关闭后重新打开以启用 Browser Runtime"
+        );
+    }
+
+    #[test]
+    fn runtime_tabs_from_processes_reports_unavailable_runtime() {
+        let root = Path::new("/Users/a0000/MultiChromeProfiles");
+        let lines = [
+            "  1201 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/Users/a0000/MultiChromeProfiles/profiles/account-001 --remote-debugging-port=19222 --remote-debugging-address=127.0.0.1 --no-first-run",
+        ];
+
+        let error = runtime_tabs_from_processes(
+            root,
+            "account-001",
+            lines,
+            |_| Err("CDP 探测超时".to_string()),
+            1000,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "Browser Runtime 不可用");
+    }
+
+    #[test]
+    fn runtime_tab_snapshot_serializes_as_camel_case() {
+        let value = serde_json::to_value(TabSnapshot {
+            target_id: "page-1".to_string(),
+            r#type: "page".to_string(),
+            url: "chrome://newtab/".to_string(),
+            title: "New Tab".to_string(),
+            web_socket_debugger_url: None,
+            checked_at: 1000,
+        })
+        .unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "targetId": "page-1",
+                "type": "page",
+                "url": "chrome://newtab/",
+                "title": "New Tab",
+                "webSocketDebuggerUrl": null,
+                "checkedAt": 1000
+            })
+        );
+    }
+
+    #[test]
+    fn tab_snapshot_from_cdp_target_skips_blank_target_id() {
+        let tab = tab_snapshot_from_cdp_target(
+            CdpTargetRaw {
+                id: Some("   ".to_string()),
+                r#type: Some("page".to_string()),
+                url: Some("chrome://newtab/".to_string()),
+                title: Some("New Tab".to_string()),
+                web_socket_debugger_url: Some("ws://127.0.0.1/devtools/page/page-1".to_string()),
+            },
+            1000,
+        );
+
+        assert_eq!(tab, None);
+    }
+
+    #[test]
+    fn tab_snapshot_from_cdp_target_omits_blank_websocket_url() {
+        let tab = tab_snapshot_from_cdp_target(
+            CdpTargetRaw {
+                id: Some("page-1".to_string()),
+                r#type: Some("page".to_string()),
+                url: None,
+                title: None,
+                web_socket_debugger_url: Some("   ".to_string()),
+            },
+            1000,
+        )
+        .unwrap();
+
+        assert_eq!(tab.url, "");
+        assert_eq!(tab.title, "");
+        assert_eq!(tab.web_socket_debugger_url, None);
+    }
+
+    #[test]
+    fn fetch_cdp_tabs_reads_json_list_response() {
+        let body = r#"[{"id":"page-1","type":"page","url":"chrome://newtab/","title":"New Tab","webSocketDebuggerUrl":"ws://127.0.0.1/devtools/page/page-1"}]"#;
+        let (port, handle) = serve_cdp_response(format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        ));
+
+        let targets = fetch_cdp_tabs(port).unwrap();
+        handle.join().unwrap();
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].id.as_deref(), Some("page-1"));
+        assert_eq!(targets[0].r#type.as_deref(), Some("page"));
+        assert_eq!(
+            targets[0].web_socket_debugger_url.as_deref(),
+            Some("ws://127.0.0.1/devtools/page/page-1")
+        );
+    }
+
+    #[test]
+    fn fetch_cdp_tabs_reads_response_without_content_length() {
+        let (port, handle) =
+            serve_cdp_response("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n[]".to_string());
+
+        let targets = fetch_cdp_tabs(port).unwrap();
+        handle.join().unwrap();
+
+        assert_eq!(targets.len(), 0);
+    }
+
+    #[test]
+    fn fetch_cdp_tabs_reports_connection_refused() {
+        let listener = TcpListener::bind((CDP_BIND_ADDRESS, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        assert_eq!(fetch_cdp_tabs(port).unwrap_err(), "CDP 连接失败");
+    }
+
+    #[test]
+    fn fetch_cdp_tabs_rejects_non_ok_status() {
+        let (port, handle) = serve_cdp_response(
+            "HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]"
+                .to_string(),
+        );
+
+        let error = fetch_cdp_tabs(port).unwrap_err();
+        handle.join().unwrap();
+
+        assert_eq!(error, "CDP 连接失败");
+    }
+
+    #[test]
+    fn fetch_cdp_tabs_rejects_chunked_response() {
+        let (port, handle) = serve_cdp_response(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n2\r\n[]\r\n0\r\n\r\n"
+                .to_string(),
+        );
+
+        let error = fetch_cdp_tabs(port).unwrap_err();
+        handle.join().unwrap();
+
+        assert_eq!(error, "CDP 连接失败");
+    }
+
+    #[test]
+    fn fetch_cdp_tabs_rejects_invalid_json() {
+        let body = "<html>not json</html>";
+        let (port, handle) = serve_cdp_response(format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        ));
+
+        let error = fetch_cdp_tabs(port).unwrap_err();
+        handle.join().unwrap();
+
+        assert_eq!(error, "CDP 连接失败");
+    }
+
+    #[test]
+    fn fetch_cdp_tabs_rejects_oversized_content_length() {
+        let (port, handle) = serve_cdp_response(format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            CDP_LIST_MAX_BODY_BYTES + 1
+        ));
+
+        let error = fetch_cdp_tabs(port).unwrap_err();
+        handle.join().unwrap();
+
+        assert_eq!(error, "CDP 连接失败");
+    }
+
+    #[test]
+    fn fetch_cdp_tabs_rejects_invalid_content_length() {
+        let (port, handle) = serve_cdp_response(
+            "HTTP/1.1 200 OK\r\nContent-Length: nope\r\nConnection: close\r\n\r\n[]"
+                .to_string(),
+        );
+
+        let error = fetch_cdp_tabs(port).unwrap_err();
+        handle.join().unwrap();
+
+        assert_eq!(error, "CDP 连接失败");
+    }
+
+    fn serve_cdp_response(response: String) -> (u16, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind((CDP_BIND_ADDRESS, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 256];
+            let _ = stream.read(&mut request);
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        (port, handle)
     }
 }
