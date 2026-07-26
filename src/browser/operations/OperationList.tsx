@@ -4,6 +4,10 @@ import type {
   BrowserOperationStatus,
   BrowserOperationType
 } from "../../browserOperations";
+import {
+  formatWindowOperationSummary,
+  isWindowOperationSummary
+} from "../../browserOperations";
 import { displayLaunchEventUrlLabel } from "../../shared/urlHelpers";
 
 interface OperationListProps {
@@ -208,6 +212,10 @@ function formatLaunchFailureDetails(
 function operationWindowSummaryLabel(summary: unknown): string {
   if (!summary || typeof summary !== "object" || isBrowserLaunchQueueSummary(summary)) {
     return "";
+  }
+
+  if (isWindowOperationSummary(summary)) {
+    return formatWindowOperationSummary(summary);
   }
 
   const candidate = summary as Record<string, unknown>;

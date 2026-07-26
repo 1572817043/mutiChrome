@@ -683,6 +683,7 @@ describe("App launcher layout", () => {
     expect(within(operationList).getByText("窗口操作")).toBeTruthy();
     expect(within(operationList).getByText("检查窗口")).toBeTruthy();
     expect(within(operationList).getByText("1 个账号")).toBeTruthy();
+    expect(within(operationList).getByText("结果：已检查 1 / 1")).toBeTruthy();
     vi.mocked(profileApi.listRunningProfiles).mockRestore();
     listWindowsSpy.mockRestore();
   });
@@ -1269,7 +1270,7 @@ describe("App launcher layout", () => {
     expect(await screen.findByText("已同步布局到 1 个账号，1 个失败")).toBeTruthy();
     const operationList = await screen.findByRole("list", { name: "最近操作记录" });
     expect(within(operationList).getByText("失败")).toBeTruthy();
-    expect(within(operationList).getByText("结果：已同步 1 个，失败 1 个")).toBeTruthy();
+    expect(within(operationList).getByText("结果：已同步 1 / 3，失败 1 个")).toBeTruthy();
     vi.mocked(profileApi.listRunningProfiles).mockRestore();
     listWindowsSpy.mockRestore();
     setBoundsSpy.mockRestore();
@@ -1678,6 +1679,10 @@ describe("App launcher layout", () => {
       await screen.findByText(
         "当前屏幕最多适合平铺 9 个窗口；已选运行窗口 10 个，请减少选择或分批平铺"
       )
+    ).toBeTruthy();
+    const operationList = await screen.findByRole("list", { name: "最近操作记录" });
+    expect(
+      within(operationList).getByText("结果：可平铺 10 个，屏幕容量 9 个，已超限")
     ).toBeTruthy();
     vi.mocked(profileApi.listRunningProfiles).mockRestore();
     listWindowsSpy.mockRestore();

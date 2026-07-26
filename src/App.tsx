@@ -50,7 +50,12 @@ import {
   type BrowserLaunchEvent,
   type BrowserLaunchResult
 } from "./browserSessionLaunch";
-import type { BrowserOperation } from "./browserOperations";
+import {
+  buildInspectWindowOperationSummary,
+  buildSyncLayoutWindowOperationSummary,
+  buildTileWindowOperationSummary,
+  type BrowserOperation
+} from "./browserOperations";
 import { useBrowserOperations } from "./browser/operations/useBrowserOperations";
 import { isSessionRunning, profileSessionStatus } from "./browserSessions";
 import {
@@ -2101,16 +2106,23 @@ function App() {
         summaries.push(formatWindowInspectionSummary(profile.name, windows));
       }
       setMessage(`窗口检查：${summaries.join("；")}`);
-      finishWindowOperation(operation, "succeeded", {
+      finishWindowOperation(operation, "succeeded", buildInspectWindowOperationSummary({
         profileCount: freshRunningSelectedProfiles.length,
         inspectedCount: summaries.length
-      });
+      }));
       await refreshRunningProfiles();
     } catch (error) {
       setMessage(windowAutomationErrorMessage(error));
-      finishWindowOperation(operation, "failed", {
-        profileCount: freshRunningSelectedProfiles.length
-      });
+      finishWindowOperation(
+        operation,
+        "failed",
+        buildInspectWindowOperationSummary({
+          profileCount: freshRunningSelectedProfiles.length,
+          inspectedCount: 0,
+          failedCount: freshRunningSelectedProfiles.length,
+          reason: "inspect-failed"
+        })
+      );
       await refreshRunningProfiles();
     } finally {
       setWindowInspecting(false);
@@ -2239,12 +2251,16 @@ function App() {
             ? windowAutomationErrorMessage(firstFailedError)
             : "选中的运行账号没有可平铺窗口"
         );
-        finishWindowOperation(operation, "failed", {
-          profileCount: freshRunningSelectedProfiles.length,
-          tileableCount: 0,
-          noWindowCount,
-          failedCount
-        });
+        finishWindowOperation(
+          operation,
+          "failed",
+          buildTileWindowOperationSummary({
+            profileCount: freshRunningSelectedProfiles.length,
+            tileableCount: 0,
+            noWindowCount,
+            failedCount
+          })
+        );
         await refreshRunningProfiles();
         return;
       }
@@ -2253,11 +2269,17 @@ function App() {
         setMessage(
           `当前屏幕最多适合平铺 ${layoutPlan.capacity} 个窗口；已选运行窗口 ${layoutPlan.tileableCount} 个，请减少选择或分批平铺`
         );
-        finishWindowOperation(operation, "failed", {
-          profileCount: freshRunningSelectedProfiles.length,
-          tileableCount: layoutPlan.tileableCount,
-          maxTileableCount: layoutPlan.capacity
-        });
+        finishWindowOperation(
+          operation,
+          "failed",
+          buildTileWindowOperationSummary({
+            profileCount: freshRunningSelectedProfiles.length,
+            tileableCount: layoutPlan.tileableCount,
+            noWindowCount,
+            capacity: layoutPlan.capacity,
+            capacityExceeded: true
+          })
+        );
         await refreshRunningProfiles();
         return;
       }
@@ -2340,7 +2362,7 @@ function App() {
           focusFailedCount === 0
           ? "succeeded"
           : "failed",
-        {
+        buildTileWindowOperationSummary({
           profileCount: freshRunningSelectedProfiles.length,
           tileableCount: layoutPlan.tileableCount,
           tiledCount,
@@ -2349,7 +2371,7 @@ function App() {
           multiWindowProfileCount,
           failedCount,
           focusFailedCount
-        }
+        })
       );
       await refreshRunningProfiles();
     } finally {
@@ -2407,30 +2429,43 @@ function App() {
       let syncPlan = buildWindowLayoutSyncPlan(windowRegistry, sourceProfile.id);
       if (syncPlan.sourceStatus === "missing-window") {
         setMessage("主账号没有可同步窗口");
-        finishWindowOperation(operation, "failed", {
-          profileCount: freshRunningSelectedProfiles.length,
-          sourceProfileId: sourceProfile.id,
-          reason: "missing-source-window"
-        });
+        finishWindowOperation(
+          operation,
+          "failed",
+          buildSyncLayoutWindowOperationSummary({
+            profileCount: freshRunningSelectedProfiles.length,
+            sourceProfileId: sourceProfile.id,
+            reason: "missing-source-window"
+          })
+        );
         await refreshRunningProfiles();
         return;
       }
       if (syncPlan.sourceStatus === "minimized-window") {
         setMessage("主账号窗口已最小化，请先恢复窗口再同步布局");
-        finishWindowOperation(operation, "failed", {
-          profileCount: freshRunningSelectedProfiles.length,
-          sourceProfileId: sourceProfile.id,
-          reason: "minimized-source-window"
-        });
+        finishWindowOperation(
+          operation,
+          "failed",
+          buildSyncLayoutWindowOperationSummary({
+            profileCount: freshRunningSelectedProfiles.length,
+            sourceProfileId: sourceProfile.id,
+            reason: "minimized-source-window"
+          })
+        );
         await refreshRunningProfiles();
         return;
       }
       if (syncPlan.sourceStatus === "window-error") {
         setMessage(windowAutomationErrorMessage(syncPlan.sourceWindowError));
-        finishWindowOperation(operation, "failed", {
-          profileCount: freshRunningSelectedProfiles.length,
-          sourceProfileId: sourceProfile.id
-        });
+        finishWindowOperation(
+          operation,
+          "failed",
+          buildSyncLayoutWindowOperationSummary({
+            profileCount: freshRunningSelectedProfiles.length,
+            sourceProfileId: sourceProfile.id,
+            reason: "source-window-error"
+          })
+        );
         await refreshRunningProfiles();
         return;
       }
@@ -2554,7 +2589,7 @@ function App() {
           focusFailedCount === 0
           ? "succeeded"
           : "failed",
-        {
+        buildSyncLayoutWindowOperationSummary({
           profileCount: freshRunningSelectedProfiles.length,
           sourceProfileId: sourceProfile.id,
           syncedCount,
@@ -2563,15 +2598,20 @@ function App() {
           unchangedCount,
           failedCount,
           focusFailedCount
-        }
+        })
       );
       await refreshRunningProfiles();
     } catch (error) {
       setMessage(windowAutomationErrorMessage(error));
-      finishWindowOperation(operation, "failed", {
-        profileCount: freshRunningSelectedProfiles.length,
-        sourceProfileId: sourceProfile.id
-      });
+      finishWindowOperation(
+        operation,
+        "failed",
+        buildSyncLayoutWindowOperationSummary({
+          profileCount: freshRunningSelectedProfiles.length,
+          sourceProfileId: sourceProfile.id,
+          reason: "sync-layout-error"
+        })
+      );
       await refreshRunningProfiles();
     } finally {
       setWindowSyncing(false);

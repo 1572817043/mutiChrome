@@ -53,6 +53,65 @@ export interface BrowserOperationProfileConflict {
   profileIds: string[];
 }
 
+export type WindowOperationSummaryAction = "inspect" | "tile" | "sync-layout";
+export type WindowOperationSummaryReason =
+  | "inspect-failed"
+  | "missing-source-window"
+  | "minimized-source-window"
+  | "source-window-error"
+  | "sync-layout-error";
+
+export interface WindowOperationSummary {
+  summaryType: "window-operation";
+  action: WindowOperationSummaryAction;
+  profileCount: number;
+  succeededCount: number;
+  skippedCount: number;
+  failedCount: number;
+  focusFailedCount: number;
+  sourceProfileId?: string;
+  noWindowCount?: number;
+  minimizedCount?: number;
+  unchangedCount?: number;
+  multiWindowProfileCount?: number;
+  tileableCount?: number;
+  capacity?: number;
+  capacityExceeded?: boolean;
+  reason?: WindowOperationSummaryReason;
+}
+
+export interface BuildInspectWindowOperationSummaryInput {
+  profileCount: number;
+  inspectedCount?: number;
+  failedCount?: number;
+  reason?: WindowOperationSummaryReason;
+}
+
+export interface BuildTileWindowOperationSummaryInput {
+  profileCount: number;
+  tileableCount?: number;
+  tiledCount?: number;
+  unchangedCount?: number;
+  noWindowCount?: number;
+  multiWindowProfileCount?: number;
+  failedCount?: number;
+  focusFailedCount?: number;
+  capacity?: number;
+  capacityExceeded?: boolean;
+}
+
+export interface BuildSyncLayoutWindowOperationSummaryInput {
+  profileCount: number;
+  sourceProfileId: string;
+  syncedCount?: number;
+  noWindowCount?: number;
+  minimizedCount?: number;
+  unchangedCount?: number;
+  failedCount?: number;
+  focusFailedCount?: number;
+  reason?: WindowOperationSummaryReason;
+}
+
 export function createBrowserOperation(
   input: CreateBrowserOperationInput,
   createdAt = Date.now()
@@ -175,6 +234,129 @@ export function trimBrowserOperations(
   });
 }
 
+export function buildInspectWindowOperationSummary(
+  input: BuildInspectWindowOperationSummaryInput
+): WindowOperationSummary {
+  const succeededCount = numberOrZero(input.inspectedCount);
+
+  return {
+    summaryType: "window-operation",
+    action: "inspect",
+    profileCount: input.profileCount,
+    succeededCount,
+    skippedCount: 0,
+    failedCount: numberOrZero(input.failedCount),
+    focusFailedCount: 0,
+    reason: input.reason
+  };
+}
+
+export function buildTileWindowOperationSummary(
+  input: BuildTileWindowOperationSummaryInput
+): WindowOperationSummary {
+  const noWindowCount = numberOrZero(input.noWindowCount);
+  const skippedCount = input.capacityExceeded
+    ? numberOrZero(input.tileableCount) + noWindowCount
+    : noWindowCount;
+
+  return {
+    summaryType: "window-operation",
+    action: "tile",
+    profileCount: input.profileCount,
+    succeededCount: numberOrZero(input.tiledCount),
+    skippedCount,
+    failedCount: numberOrZero(input.failedCount),
+    focusFailedCount: numberOrZero(input.focusFailedCount),
+    noWindowCount,
+    unchangedCount: numberOrZero(input.unchangedCount),
+    multiWindowProfileCount: numberOrZero(input.multiWindowProfileCount),
+    tileableCount: numberOrZero(input.tileableCount),
+    capacity: input.capacity,
+    capacityExceeded: input.capacityExceeded
+  };
+}
+
+export function buildSyncLayoutWindowOperationSummary(
+  input: BuildSyncLayoutWindowOperationSummaryInput
+): WindowOperationSummary {
+  const noWindowCount = numberOrZero(input.noWindowCount);
+  const minimizedCount = numberOrZero(input.minimizedCount);
+
+  return {
+    summaryType: "window-operation",
+    action: "sync-layout",
+    profileCount: input.profileCount,
+    sourceProfileId: input.sourceProfileId,
+    succeededCount: numberOrZero(input.syncedCount),
+    skippedCount: noWindowCount + minimizedCount,
+    failedCount: numberOrZero(input.failedCount),
+    focusFailedCount: numberOrZero(input.focusFailedCount),
+    noWindowCount,
+    minimizedCount,
+    unchangedCount: numberOrZero(input.unchangedCount),
+    reason: input.reason
+  };
+}
+
+export function isWindowOperationSummary(
+  summary: unknown
+): summary is WindowOperationSummary {
+  if (!summary || typeof summary !== "object") {
+    return false;
+  }
+
+  const candidate = summary as Record<string, unknown>;
+  return (
+    candidate.summaryType === "window-operation" &&
+    isWindowOperationSummaryAction(candidate.action) &&
+    typeof candidate.profileCount === "number" &&
+    typeof candidate.succeededCount === "number" &&
+    typeof candidate.skippedCount === "number" &&
+    typeof candidate.failedCount === "number" &&
+    typeof candidate.focusFailedCount === "number" &&
+    optionalString(candidate.sourceProfileId) &&
+    optionalNumber(candidate.noWindowCount) &&
+    optionalNumber(candidate.minimizedCount) &&
+    optionalNumber(candidate.unchangedCount) &&
+    optionalNumber(candidate.multiWindowProfileCount) &&
+    optionalNumber(candidate.tileableCount) &&
+    optionalNumber(candidate.capacity) &&
+    optionalBoolean(candidate.capacityExceeded) &&
+    optionalString(candidate.reason)
+  );
+}
+
+export function formatWindowOperationSummary(
+  summary: WindowOperationSummary
+): string {
+  if (summary.capacityExceeded) {
+    const reasonSuffix = windowOperationReasonLabel(summary.reason);
+    return [
+      positiveCountLabel(summary.tileableCount, "可平铺"),
+      typeof summary.capacity === "number" ? `屏幕容量 ${summary.capacity} 个` : "",
+      "已超限",
+      reasonSuffix
+    ].filter(Boolean).join("，");
+  }
+
+  const reasonLabel = windowOperationReasonLabel(summary.reason);
+  if (reasonLabel) {
+    return reasonLabel;
+  }
+
+  const parts = [
+    windowOperationSuccessLabel(summary),
+    positiveCountLabel(summary.failedCount, "失败"),
+    positiveCountLabel(summary.noWindowCount, "无窗口"),
+    positiveCountLabel(summary.minimizedCount, "最小化"),
+    positiveCountLabel(summary.unchangedCount, "未生效"),
+    positiveCountLabel(summary.multiWindowProfileCount, "多窗口"),
+    positiveCountLabel(summary.focusFailedCount, "未能前置")
+  ].filter((part): part is string => Boolean(part));
+
+  return parts.join("，");
+}
+
 export function withBrowserOperationTimeout<T>(
   command: Promise<T>,
   timeoutMs: number,
@@ -196,4 +378,68 @@ export function withBrowserOperationTimeout<T>(
         }
       });
   });
+}
+
+function numberOrZero(value: number | undefined): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function windowOperationSuccessLabel(summary: WindowOperationSummary): string {
+  switch (summary.action) {
+    case "inspect":
+      return `已检查 ${summary.succeededCount} / ${summary.profileCount}`;
+    case "tile":
+      return `已平铺 ${summary.succeededCount} / ${summary.profileCount}`;
+    case "sync-layout":
+      return `已同步 ${summary.succeededCount} / ${summary.profileCount}`;
+    default: {
+      const exhaustive: never = summary.action;
+      return exhaustive;
+    }
+  }
+}
+
+function isWindowOperationSummaryAction(
+  action: unknown
+): action is WindowOperationSummaryAction {
+  return action === "inspect" || action === "tile" || action === "sync-layout";
+}
+
+function optionalString(value: unknown): boolean {
+  return value === undefined || typeof value === "string";
+}
+
+function optionalNumber(value: unknown): boolean {
+  return value === undefined || typeof value === "number";
+}
+
+function optionalBoolean(value: unknown): boolean {
+  return value === undefined || typeof value === "boolean";
+}
+
+function windowOperationReasonLabel(
+  reason: WindowOperationSummaryReason | undefined
+): string {
+  switch (reason) {
+    case "missing-source-window":
+      return "主账号无窗口";
+    case "minimized-source-window":
+      return "主账号窗口已最小化";
+    case "source-window-error":
+      return "主账号窗口读取失败";
+    case "sync-layout-error":
+      return "同步布局失败";
+    case "inspect-failed":
+      return "窗口检查失败";
+    case undefined:
+      return "";
+    default: {
+      const exhaustive: never = reason;
+      return exhaustive;
+    }
+  }
+}
+
+function positiveCountLabel(value: number | undefined, label: string): string {
+  return numberOrZero(value) > 0 ? `${label} ${numberOrZero(value)} 个` : "";
 }

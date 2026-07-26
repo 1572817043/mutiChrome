@@ -1,6 +1,6 @@
 import { render, screen, within } from "@testing-library/react";
 import { describe, expect, test } from "vitest";
-import type { BrowserOperation } from "../../browserOperations";
+import type { BrowserOperation, WindowOperationSummary } from "../../browserOperations";
 import { OperationList } from "./OperationList";
 
 function operation(
@@ -131,6 +131,73 @@ describe("OperationList", () => {
     expect(within(recentList).getByText("取消原因：用户停止")).toBeTruthy();
     expect(
       within(recentList).getByText("结果：已同步 1 个，失败 1 个，无窗口 1 个，最小化 1 个")
+    ).toBeTruthy();
+  });
+
+  test("窗口操作优先展示标准 summary", () => {
+    const summary: WindowOperationSummary = {
+      summaryType: "window-operation",
+      action: "sync-layout",
+      profileCount: 4,
+      sourceProfileId: "account-001",
+      succeededCount: 1,
+      skippedCount: 1,
+      failedCount: 1,
+      focusFailedCount: 1,
+      minimizedCount: 1,
+      unchangedCount: 1
+    };
+
+    render(
+      <OperationList
+        operations={[
+          {
+            ...operation("op-window-standard", "failed", {
+              kind: "window",
+              action: "同步布局"
+            }),
+            type: "window-action",
+            summary
+          }
+        ]}
+      />
+    );
+
+    const recentList = screen.getByRole("list", { name: "最近操作记录" });
+    expect(
+      within(recentList).getByText(
+        "结果：已同步 1 / 4，失败 1 个，最小化 1 个，未生效 1 个，未能前置 1 个"
+      )
+    ).toBeTruthy();
+    expect(
+      within(recentList).queryByText("结果：已同步 1 个，失败 1 个，最小化 1 个，未生效 1 个，未能前置 1 个")
+    ).toBeNull();
+  });
+
+  test("窗口操作保留旧 summary fallback", () => {
+    render(
+      <OperationList
+        operations={[
+          {
+            ...operation("op-window-legacy", "failed", {
+              kind: "window",
+              action: "同步布局"
+            }),
+            type: "window-action",
+            summary: {
+              profileCount: 3,
+              syncedCount: 1,
+              noWindowCount: 1,
+              failedCount: 1
+            }
+          }
+        ]}
+      />
+    );
+
+    const recentList = screen.getByRole("list", { name: "最近操作记录" });
+    expect(
+      within(recentList).getByText("结果：已同步 1 个，失败 1 个，无窗口 1 个")
     ).toBeTruthy();
   });
 });
