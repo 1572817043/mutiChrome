@@ -71,6 +71,15 @@ export interface BrowserSessionSnapshot {
   checkedAt: number;
 }
 
+export interface BrowserRuntimeTabSnapshot {
+  targetId: string;
+  type: "page";
+  url: string;
+  title: string;
+  webSocketDebuggerUrl: string | null;
+  checkedAt: number;
+}
+
 const ROOT_KEY = "multichrome.rootPath";
 const DOCUMENT_KEY = "multichrome.profileDocument";
 const BACKUP_PREFIX = "multichrome.profileBackup.";
@@ -414,6 +423,20 @@ export const profileApi = {
       windowError: null,
       checkedAt
     }));
+  },
+
+  async listRuntimeTabs(
+    rootPath: string,
+    profileId: string
+  ): Promise<BrowserRuntimeTabSnapshot[]> {
+    if (isTauriRuntime()) {
+      return invoke<BrowserRuntimeTabSnapshot[]>("list_runtime_tabs", {
+        rootPath,
+        profileId
+      });
+    }
+
+    return [];
   },
 
   async focusProfileWindow(rootPath: string, profileId: string): Promise<void> {
