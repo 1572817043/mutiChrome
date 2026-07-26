@@ -12,9 +12,18 @@ use profile_store::{
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+const CDP_BIND_ADDRESS: &str = "127.0.0.1";
+const CDP_PORT_START: u16 = 19222;
+const CDP_PORT_END: u16 = 19321;
+const CDP_PROBE_TIMEOUT_MS: u64 = 250;
+const CDP_SNAPSHOT_PROBE_BUDGET_MS: u64 = 750;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,6 +36,7 @@ struct ChromeStatus {
 struct RunningProfileProcess {
     profile_id: String,
     pid: u32,
+    debug_port: Option<u16>,
 }
 
 #[derive(Debug, Eq, PartialEq, Serialize)]
@@ -48,6 +58,15 @@ enum BrowserSessionStatus {
     Stopped,
 }
 
+#[derive(Debug, Eq, PartialEq, Serialize, Clone)]
+#[serde(rename_all = "kebab-case")]
+enum BrowserSessionCdpStatus {
+    Unknown,
+    Available,
+    MissingPort,
+    Failed,
+}
+
 #[derive(Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BrowserSessionSnapshot {
@@ -55,6 +74,9 @@ struct BrowserSessionSnapshot {
     status: BrowserSessionStatus,
     running: bool,
     pid: Option<u32>,
+    debug_port: Option<u16>,
+    cdp_status: BrowserSessionCdpStatus,
+    runtime_error: Option<String>,
     window_count: Option<usize>,
     windows: Vec<ChromeWindowInfo>,
     window_error: Option<String>,
@@ -603,7 +625,13 @@ fn open_profile(
     }
 
     let is_running = is_profile_running(&root_path, &profile_id).unwrap_or(false);
-    let launch_command = profile_launch_command(&browser, &profile_dir, launch_url, is_running);
+    let debug_port = if is_running {
+        None
+    } else {
+        Some(allocate_debug_port()?)
+    };
+    let launch_command =
+        profile_launch_command(&browser, &profile_dir, launch_url, is_running, debug_port);
     let status = Command::new(&launch_command.program)
         .args(&launch_command.args)
         .status()
@@ -674,6 +702,7 @@ fn snapshot_browser_sessions(
         stdout.lines(),
         include_windows.unwrap_or(false),
         list_chrome_windows,
+        probe_cdp_version,
         current_time_millis(),
     ))
 }
@@ -774,11 +803,17 @@ fn scan_profile_import_candidates(
     )
 }
 
-fn chrome_launch_args(profile_dir: &Path, launch_url: Option<String>) -> Vec<String> {
-    let mut args = vec![
-        format!("--user-data-dir={}", profile_dir.to_string_lossy()),
-        "--no-first-run".to_string(),
-    ];
+fn chrome_launch_args(
+    profile_dir: &Path,
+    launch_url: Option<String>,
+    debug_port: Option<u16>,
+) -> Vec<String> {
+    let mut args = vec![format!("--user-data-dir={}", profile_dir.to_string_lossy())];
+    if let Some(port) = debug_port {
+        args.push(format!("--remote-debugging-port={port}"));
+        args.push(format!("--remote-debugging-address={CDP_BIND_ADDRESS}"));
+    }
+    args.push("--no-first-run".to_string());
 
     if let Some(url) = launch_url.map(|value| value.trim().to_string()) {
         if !url.is_empty() {
@@ -794,11 +829,12 @@ fn profile_launch_command(
     profile_dir: &Path,
     launch_url: Option<String>,
     is_profile_running: bool,
+    debug_port: Option<u16>,
 ) -> LaunchCommand {
     if is_profile_running {
         LaunchCommand {
             program: browser_executable_path(browser),
-            args: chrome_launch_args(profile_dir, launch_url),
+            args: chrome_launch_args(profile_dir, launch_url, None),
         }
     } else {
         let mut args = vec![
@@ -807,13 +843,36 @@ fn profile_launch_command(
             browser.to_string_lossy().to_string(),
             "--args".to_string(),
         ];
-        args.extend(chrome_launch_args(profile_dir, launch_url));
+        args.extend(chrome_launch_args(profile_dir, launch_url, debug_port));
 
         LaunchCommand {
             program: PathBuf::from("open"),
             args,
         }
     }
+}
+
+fn allocate_debug_port() -> Result<u16, String> {
+    let _guard = debug_port_allocation_lock()
+        .lock()
+        .map_err(|_| "Browser Runtime debug port 分配锁不可用".to_string())?;
+    find_available_debug_port_in_range(CDP_PORT_START, CDP_PORT_END)
+        .ok_or_else(|| "没有可用的 Browser Runtime debug port".to_string())
+}
+
+fn debug_port_allocation_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn find_available_debug_port_in_range(start: u16, end: u16) -> Option<u16> {
+    for port in start..=end {
+        if TcpListener::bind((CDP_BIND_ADDRESS, port)).is_ok() {
+            return Some(port);
+        }
+    }
+
+    None
 }
 
 fn browser_executable_path(browser: &Path) -> PathBuf {
@@ -884,55 +943,128 @@ where
         else {
             continue;
         };
-        profile_processes.entry(profile_id).or_insert(pid);
+        profile_processes
+            .entry(profile_id)
+            .or_insert_with(|| RunningProfileProcess {
+                profile_id: String::new(),
+                pid,
+                debug_port: extract_remote_debugging_port(command),
+            });
     }
 
     profile_processes
         .into_iter()
-        .map(|(profile_id, pid)| RunningProfileProcess { profile_id, pid })
+        .map(|(profile_id, process)| RunningProfileProcess {
+            profile_id,
+            pid: process.pid,
+            debug_port: process.debug_port,
+        })
         .collect()
 }
 
-fn browser_session_snapshots_from_processes<'a, I, F>(
+#[derive(Debug, Eq, PartialEq)]
+struct CdpProbeResult {
+    status: BrowserSessionCdpStatus,
+    runtime_error: Option<String>,
+    elapsed_ms: u64,
+}
+
+fn browser_session_snapshots_from_processes<'a, I, F, P>(
     root_path: &Path,
     profile_ids: &[String],
     process_lines: I,
     include_windows: bool,
-    mut list_windows: F,
+    list_windows: F,
+    mut probe_cdp: P,
     checked_at: u64,
 ) -> Vec<BrowserSessionSnapshot>
 where
     I: IntoIterator<Item = &'a str>,
     F: FnMut(u32) -> Result<Vec<ChromeWindowInfo>, String>,
+    P: FnMut(u16) -> Result<(), String>,
 {
-    let running_processes: BTreeMap<String, u32> =
+    browser_session_snapshots_from_processes_with_budget(
+        root_path,
+        profile_ids,
+        process_lines,
+        include_windows,
+        list_windows,
+        |port| {
+            let started_at = Instant::now();
+            match probe_cdp(port) {
+                Ok(()) => CdpProbeResult {
+                    status: BrowserSessionCdpStatus::Available,
+                    runtime_error: None,
+                    elapsed_ms: elapsed_millis(started_at),
+                },
+                Err(error) => CdpProbeResult {
+                    status: BrowserSessionCdpStatus::Failed,
+                    runtime_error: Some(short_cdp_probe_error(&error)),
+                    elapsed_ms: elapsed_millis(started_at),
+                },
+            }
+        },
+        checked_at,
+        CDP_SNAPSHOT_PROBE_BUDGET_MS,
+    )
+}
+
+fn browser_session_snapshots_from_processes_with_budget<'a, I, F, P>(
+    root_path: &Path,
+    profile_ids: &[String],
+    process_lines: I,
+    include_windows: bool,
+    mut list_windows: F,
+    mut probe_cdp: P,
+    checked_at: u64,
+    cdp_probe_budget_ms: u64,
+) -> Vec<BrowserSessionSnapshot>
+where
+    I: IntoIterator<Item = &'a str>,
+    F: FnMut(u32) -> Result<Vec<ChromeWindowInfo>, String>,
+    P: FnMut(u16) -> CdpProbeResult,
+{
+    let running_processes: BTreeMap<String, RunningProfileProcess> =
         running_profile_processes_from_processes(root_path, process_lines)
             .into_iter()
-            .map(|process| (process.profile_id, process.pid))
+            .map(|process| (process.profile_id.clone(), process))
             .collect();
+    let mut cdp_probe_elapsed_ms = 0;
 
     profile_ids
         .iter()
         .map(|profile_id| {
-            let Some(pid) = running_processes.get(profile_id).copied() else {
+            let Some(process) = running_processes.get(profile_id) else {
                 return BrowserSessionSnapshot {
                     profile_id: profile_id.to_string(),
                     status: BrowserSessionStatus::Stopped,
                     running: false,
                     pid: None,
+                    debug_port: None,
+                    cdp_status: BrowserSessionCdpStatus::Unknown,
+                    runtime_error: None,
                     window_count: Some(0),
                     windows: vec![],
                     window_error: None,
                     checked_at,
                 };
             };
+            let (cdp_status, runtime_error) = cdp_status_for_process(
+                process.debug_port,
+                &mut probe_cdp,
+                &mut cdp_probe_elapsed_ms,
+                cdp_probe_budget_ms,
+            );
 
             if !include_windows {
                 return BrowserSessionSnapshot {
                     profile_id: profile_id.to_string(),
                     status: BrowserSessionStatus::Running,
                     running: true,
-                    pid: Some(pid),
+                    pid: Some(process.pid),
+                    debug_port: process.debug_port,
+                    cdp_status,
+                    runtime_error,
                     window_count: None,
                     windows: vec![],
                     window_error: None,
@@ -940,14 +1072,17 @@ where
                 };
             }
 
-            match list_windows(pid) {
+            match list_windows(process.pid) {
                 Ok(windows) => {
                     let window_count = windows.len();
                     BrowserSessionSnapshot {
                         profile_id: profile_id.to_string(),
                         status: BrowserSessionStatus::Running,
                         running: true,
-                        pid: Some(pid),
+                        pid: Some(process.pid),
+                        debug_port: process.debug_port,
+                        cdp_status,
+                        runtime_error,
                         window_count: Some(window_count),
                         windows,
                         window_error: None,
@@ -958,7 +1093,10 @@ where
                     profile_id: profile_id.to_string(),
                     status: BrowserSessionStatus::Running,
                     running: true,
-                    pid: Some(pid),
+                    pid: Some(process.pid),
+                    debug_port: process.debug_port,
+                    cdp_status,
+                    runtime_error,
                     window_count: None,
                     windows: vec![],
                     window_error: Some(error),
@@ -967,6 +1105,32 @@ where
             }
         })
         .collect()
+}
+
+fn cdp_status_for_process<P>(
+    debug_port: Option<u16>,
+    probe_cdp: &mut P,
+    cdp_probe_elapsed_ms: &mut u64,
+    cdp_probe_budget_ms: u64,
+) -> (BrowserSessionCdpStatus, Option<String>)
+where
+    P: FnMut(u16) -> CdpProbeResult,
+{
+    let Some(port) = debug_port else {
+        return (BrowserSessionCdpStatus::MissingPort, None);
+    };
+
+    if cdp_probe_elapsed_ms.saturating_add(CDP_PROBE_TIMEOUT_MS) > cdp_probe_budget_ms {
+        return (BrowserSessionCdpStatus::Unknown, None);
+    }
+
+    let result = probe_cdp(port);
+    *cdp_probe_elapsed_ms = cdp_probe_elapsed_ms.saturating_add(result.elapsed_ms);
+    (result.status, result.runtime_error)
+}
+
+fn elapsed_millis(started_at: Instant) -> u64 {
+    started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 fn profile_root_candidates(root_path: &Path) -> Vec<String> {
@@ -1107,6 +1271,91 @@ fn extract_user_data_dir(line: &str) -> Option<String> {
     None
 }
 
+fn extract_remote_debugging_port(line: &str) -> Option<u16> {
+    for marker in ["--remote-debugging-port=", "--remote-debugging-port "] {
+        let Some(start) = line.find(marker) else {
+            continue;
+        };
+        let rest = &line[start + marker.len()..];
+        let end = rest.find(" --").unwrap_or(rest.len());
+        let cleaned = rest[..end].trim().trim_matches('"').trim_matches('\'');
+        if let Ok(port) = cleaned.parse::<u16>() {
+            return Some(port);
+        }
+    }
+
+    None
+}
+
+fn probe_cdp_version(port: u16) -> Result<(), String> {
+    let timeout = Duration::from_millis(CDP_PROBE_TIMEOUT_MS);
+    let address = SocketAddr::from(([127, 0, 0, 1], port));
+    let started_at = Instant::now();
+    let mut stream = TcpStream::connect_timeout(&address, timeout)
+        .map_err(|error| short_cdp_probe_error(&error.to_string()))?;
+    let remaining_timeout = remaining_cdp_probe_timeout(started_at)?;
+    stream
+        .set_read_timeout(Some(remaining_timeout))
+        .map_err(|_| "CDP 连接失败".to_string())?;
+    stream
+        .set_write_timeout(Some(remaining_timeout))
+        .map_err(|_| "CDP 连接失败".to_string())?;
+    stream
+        .write_all(b"GET /json/version HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .map_err(|error| short_cdp_probe_error(&error.to_string()))?;
+
+    stream
+        .set_read_timeout(Some(remaining_cdp_probe_timeout(started_at)?))
+        .map_err(|_| "CDP 连接失败".to_string())?;
+    let status_line = read_http_status_line(&mut stream)?;
+    if status_line.starts_with("HTTP/1.1 200") || status_line.starts_with("HTTP/1.0 200") {
+        Ok(())
+    } else {
+        Err("CDP 连接失败".to_string())
+    }
+}
+
+fn remaining_cdp_probe_timeout(started_at: Instant) -> Result<Duration, String> {
+    Duration::from_millis(CDP_PROBE_TIMEOUT_MS)
+        .checked_sub(started_at.elapsed())
+        .filter(|duration| !duration.is_zero())
+        .ok_or_else(|| "CDP 探测超时".to_string())
+}
+
+fn read_http_status_line(stream: &mut TcpStream) -> Result<String, String> {
+    let mut response = Vec::new();
+    let mut buffer = [0_u8; 64];
+
+    loop {
+        let bytes_read = stream
+            .read(&mut buffer)
+            .map_err(|error| short_cdp_probe_error(&error.to_string()))?;
+        if bytes_read == 0 {
+            break;
+        }
+        response.extend_from_slice(&buffer[..bytes_read]);
+        if response.windows(2).any(|window| window == b"\r\n") || response.len() >= 512 {
+            break;
+        }
+    }
+
+    let response_text = String::from_utf8_lossy(&response);
+    Ok(response_text
+        .split("\r\n")
+        .next()
+        .unwrap_or_default()
+        .to_string())
+}
+
+fn short_cdp_probe_error(error: &str) -> String {
+    let lower = error.to_lowercase();
+    if lower.contains("timed out") || lower.contains("timeout") || lower.contains("超时") {
+        "CDP 探测超时".to_string()
+    } else {
+        "CDP 连接失败".to_string()
+    }
+}
+
 fn profile_id_from_user_data_dir(user_data_dir: &str, profile_root: &str) -> Option<String> {
     let profile_root = clean_path_text(profile_root);
     let user_data_dir = clean_path_text(user_data_dir);
@@ -1164,7 +1413,7 @@ mod tests {
         let profile_dir = Path::new("/Users/a0000/MultiChromeProfiles/profiles/account-001");
 
         assert_eq!(
-            chrome_launch_args(profile_dir, None),
+            chrome_launch_args(profile_dir, None, None),
             vec![
                 "--user-data-dir=/Users/a0000/MultiChromeProfiles/profiles/account-001".to_string(),
                 "--no-first-run".to_string()
@@ -1177,11 +1426,31 @@ mod tests {
         let profile_dir = Path::new("/Users/a0000/MultiChromeProfiles/profiles/account-001");
 
         assert_eq!(
-            chrome_launch_args(profile_dir, Some("https://galxe.com".to_string())),
+            chrome_launch_args(profile_dir, Some("https://galxe.com".to_string()), None),
             vec![
                 "--user-data-dir=/Users/a0000/MultiChromeProfiles/profiles/account-001".to_string(),
                 "--no-first-run".to_string(),
                 "https://galxe.com".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn chrome_launch_args_put_debug_port_near_profile_dir() {
+        let profile_dir = Path::new("/Users/a0000/MultiChromeProfiles/profiles/account-001");
+
+        assert_eq!(
+            chrome_launch_args(
+                profile_dir,
+                Some("chrome://newtab/".to_string()),
+                Some(19222)
+            ),
+            vec![
+                "--user-data-dir=/Users/a0000/MultiChromeProfiles/profiles/account-001".to_string(),
+                "--remote-debugging-port=19222".to_string(),
+                "--remote-debugging-address=127.0.0.1".to_string(),
+                "--no-first-run".to_string(),
+                "chrome://newtab/".to_string()
             ]
         );
     }
@@ -1196,7 +1465,8 @@ mod tests {
                 browser,
                 profile_dir,
                 Some("chrome://newtab/".to_string()),
-                false
+                false,
+                Some(19222)
             ),
             LaunchCommand {
                 program: PathBuf::from("open"),
@@ -1207,11 +1477,33 @@ mod tests {
                     "--args".to_string(),
                     "--user-data-dir=/Users/a0000/MultiChromeProfiles/profiles/account-001"
                         .to_string(),
+                    "--remote-debugging-port=19222".to_string(),
+                    "--remote-debugging-address=127.0.0.1".to_string(),
                     "--no-first-run".to_string(),
                     "chrome://newtab/".to_string()
                 ]
             }
         );
+
+        let args = profile_launch_command(
+            browser,
+            profile_dir,
+            Some("chrome://newtab/".to_string()),
+            false,
+            Some(19222),
+        )
+        .args;
+        let args_index = args.iter().position(|arg| arg == "--args").unwrap();
+        let port_index = args
+            .iter()
+            .position(|arg| arg == "--remote-debugging-port=19222")
+            .unwrap();
+        let address_index = args
+            .iter()
+            .position(|arg| arg == "--remote-debugging-address=127.0.0.1")
+            .unwrap();
+        assert!(port_index > args_index);
+        assert!(address_index > args_index);
     }
 
     #[test]
@@ -1224,7 +1516,8 @@ mod tests {
                 browser,
                 profile_dir,
                 Some("chrome://newtab/".to_string()),
-                true
+                true,
+                None
             ),
             LaunchCommand {
                 program: PathBuf::from(
@@ -1266,6 +1559,49 @@ mod tests {
     }
 
     #[test]
+    fn debug_port_allocation_skips_occupied_ports() {
+        let Some((occupied_listener, occupied_port, available_port)) = consecutive_test_ports()
+        else {
+            panic!("没有找到可用于测试的连续端口");
+        };
+
+        assert_eq!(
+            find_available_debug_port_in_range(occupied_port, available_port),
+            Some(available_port)
+        );
+        drop(occupied_listener);
+    }
+
+    #[test]
+    fn debug_port_allocation_returns_none_when_range_is_exhausted() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let occupied_port = listener.local_addr().unwrap().port();
+
+        assert_eq!(
+            find_available_debug_port_in_range(occupied_port, occupied_port),
+            None
+        );
+    }
+
+    fn consecutive_test_ports() -> Option<(std::net::TcpListener, u16, u16)> {
+        for occupied_port in 20000..20100 {
+            let Ok(occupied_listener) = std::net::TcpListener::bind(("127.0.0.1", occupied_port))
+            else {
+                continue;
+            };
+            let available_port = occupied_port + 1;
+            if let Ok(available_listener) =
+                std::net::TcpListener::bind(("127.0.0.1", available_port))
+            {
+                drop(available_listener);
+                return Some((occupied_listener, occupied_port, available_port));
+            }
+        }
+
+        None
+    }
+
+    #[test]
     fn running_profile_ids_from_processes_matches_main_chrome_processes() {
         let root = Path::new("/Users/a0000/MultiChromeProfiles");
         let lines = [
@@ -1285,7 +1621,7 @@ mod tests {
     fn running_profile_processes_from_processes_returns_main_pids() {
         let root = Path::new("/Users/a0000/MultiChromeProfiles");
         let lines = [
-            "  1201 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/Users/a0000/MultiChromeProfiles/profiles/account-001 --no-first-run",
+            "  1201 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/Users/a0000/MultiChromeProfiles/profiles/account-001 --remote-debugging-port=19222 --remote-debugging-address=127.0.0.1 --no-first-run",
             "  1202 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Helpers/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper --type=renderer --user-data-dir=/Users/a0000/MultiChromeProfiles/profiles/account-001",
             "  1301 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/Users/a0000/MultiChromeProfiles/profiles/account-002 --no-first-run",
             "  1302 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/Users/a0000/MultiChromeProfiles/profiles/account-002 --no-first-run https://galxe.com",
@@ -1297,13 +1633,37 @@ mod tests {
             vec![
                 RunningProfileProcess {
                     profile_id: "account-001".to_string(),
-                    pid: 1201
+                    pid: 1201,
+                    debug_port: Some(19222)
                 },
                 RunningProfileProcess {
                     profile_id: "account-002".to_string(),
-                    pid: 1301
+                    pid: 1301,
+                    debug_port: None
                 }
             ]
+        );
+    }
+
+    #[test]
+    fn extract_remote_debugging_port_supports_equals_and_space_forms() {
+        assert_eq!(
+            extract_remote_debugging_port(
+                "Google Chrome --remote-debugging-port=19222 --user-data-dir=/tmp/profile"
+            ),
+            Some(19222)
+        );
+        assert_eq!(
+            extract_remote_debugging_port(
+                "Google Chrome --remote-debugging-port 19223 --user-data-dir=/tmp/profile"
+            ),
+            Some(19223)
+        );
+        assert_eq!(
+            extract_remote_debugging_port(
+                "Google Chrome --remote-debugging-port=not-a-port --user-data-dir=/tmp/profile"
+            ),
+            None
         );
     }
 
@@ -1321,6 +1681,7 @@ mod tests {
                 lines,
                 true,
                 |_| Err("辅助功能权限不足".to_string()),
+                |_| Ok(()),
                 1000
             ),
             vec![
@@ -1329,6 +1690,9 @@ mod tests {
                     status: BrowserSessionStatus::Running,
                     running: true,
                     pid: Some(1201),
+                    debug_port: None,
+                    cdp_status: BrowserSessionCdpStatus::MissingPort,
+                    runtime_error: None,
                     window_count: None,
                     windows: vec![],
                     window_error: Some("辅助功能权限不足".to_string()),
@@ -1339,6 +1703,9 @@ mod tests {
                     status: BrowserSessionStatus::Stopped,
                     running: false,
                     pid: None,
+                    debug_port: None,
+                    cdp_status: BrowserSessionCdpStatus::Unknown,
+                    runtime_error: None,
                     window_count: Some(0),
                     windows: vec![],
                     window_error: None,
@@ -1373,6 +1740,7 @@ mod tests {
                     minimized: false,
                 }])
             },
+            |_| Ok(()),
             1000,
         );
 
@@ -1385,6 +1753,9 @@ mod tests {
                     status: BrowserSessionStatus::Running,
                     running: true,
                     pid: Some(1201),
+                    debug_port: None,
+                    cdp_status: BrowserSessionCdpStatus::MissingPort,
+                    runtime_error: None,
                     window_count: None,
                     windows: vec![],
                     window_error: None,
@@ -1395,6 +1766,9 @@ mod tests {
                     status: BrowserSessionStatus::Stopped,
                     running: false,
                     pid: None,
+                    debug_port: None,
+                    cdp_status: BrowserSessionCdpStatus::Unknown,
+                    runtime_error: None,
                     window_count: Some(0),
                     windows: vec![],
                     window_error: None,
@@ -1438,9 +1812,115 @@ mod tests {
                     },
                 ])
             },
+            |_| Ok(()),
             1000,
         );
 
         assert_eq!(snapshots[0].window_count, Some(2));
+    }
+
+    #[test]
+    fn browser_session_snapshots_report_cdp_available_and_failed() {
+        let root = Path::new("/Users/a0000/MultiChromeProfiles");
+        let lines = [
+            "  1201 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/Users/a0000/MultiChromeProfiles/profiles/account-001 --remote-debugging-port=19222 --remote-debugging-address=127.0.0.1 --no-first-run",
+            "  1301 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/Users/a0000/MultiChromeProfiles/profiles/account-002 --remote-debugging-port 19223 --remote-debugging-address=127.0.0.1 --no-first-run",
+        ];
+
+        let snapshots = browser_session_snapshots_from_processes(
+            root,
+            &["account-001".to_string(), "account-002".to_string()],
+            lines,
+            false,
+            |_| Ok(vec![]),
+            |port| {
+                if port == 19222 {
+                    Ok(())
+                } else {
+                    Err("CDP 连接失败".to_string())
+                }
+            },
+            1000,
+        );
+
+        assert_eq!(snapshots[0].debug_port, Some(19222));
+        assert_eq!(snapshots[0].cdp_status, BrowserSessionCdpStatus::Available);
+        assert_eq!(snapshots[0].runtime_error, None);
+        assert_eq!(snapshots[1].debug_port, Some(19223));
+        assert_eq!(snapshots[1].cdp_status, BrowserSessionCdpStatus::Failed);
+        assert_eq!(snapshots[1].runtime_error, Some("CDP 连接失败".to_string()));
+    }
+
+    #[test]
+    fn browser_session_snapshots_skip_cdp_probe_after_budget() {
+        let root = Path::new("/Users/a0000/MultiChromeProfiles");
+        let lines = [
+            "  1201 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/Users/a0000/MultiChromeProfiles/profiles/account-001 --remote-debugging-port=19222 --no-first-run",
+            "  1301 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/Users/a0000/MultiChromeProfiles/profiles/account-002 --remote-debugging-port=19223 --no-first-run",
+        ];
+        let mut probe_count = 0;
+
+        let snapshots = browser_session_snapshots_from_processes_with_budget(
+            root,
+            &["account-001".to_string(), "account-002".to_string()],
+            lines,
+            false,
+            |_| Ok(vec![]),
+            |port| {
+                probe_count += 1;
+                CdpProbeResult {
+                    status: BrowserSessionCdpStatus::Available,
+                    runtime_error: None,
+                    elapsed_ms: if port == 19222 { 751 } else { 1 },
+                }
+            },
+            1000,
+            750,
+        );
+
+        assert_eq!(probe_count, 1);
+        assert_eq!(snapshots[0].cdp_status, BrowserSessionCdpStatus::Available);
+        assert_eq!(snapshots[1].cdp_status, BrowserSessionCdpStatus::Unknown);
+        assert_eq!(snapshots[1].runtime_error, None);
+    }
+
+    #[test]
+    fn browser_session_snapshots_skip_cdp_probe_when_remaining_budget_is_too_short() {
+        let root = Path::new("/Users/a0000/MultiChromeProfiles");
+        let lines = [
+            "  1201 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/Users/a0000/MultiChromeProfiles/profiles/account-001 --remote-debugging-port=19222 --no-first-run",
+            "  1301 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/Users/a0000/MultiChromeProfiles/profiles/account-002 --remote-debugging-port=19223 --no-first-run",
+        ];
+        let mut probe_count = 0;
+
+        let snapshots = browser_session_snapshots_from_processes_with_budget(
+            root,
+            &["account-001".to_string(), "account-002".to_string()],
+            lines,
+            false,
+            |_| Ok(vec![]),
+            |_| {
+                probe_count += 1;
+                CdpProbeResult {
+                    status: BrowserSessionCdpStatus::Available,
+                    runtime_error: None,
+                    elapsed_ms: 600,
+                }
+            },
+            1000,
+            750,
+        );
+
+        assert_eq!(probe_count, 1);
+        assert_eq!(snapshots[0].cdp_status, BrowserSessionCdpStatus::Available);
+        assert_eq!(snapshots[1].cdp_status, BrowserSessionCdpStatus::Unknown);
+    }
+
+    #[test]
+    fn browser_session_cdp_status_serializes_as_kebab_case() {
+        assert_eq!(
+            serde_json::to_string(&BrowserSessionCdpStatus::MissingPort).unwrap(),
+            "\"missing-port\""
+        );
     }
 }

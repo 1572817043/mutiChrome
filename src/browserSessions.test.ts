@@ -18,6 +18,9 @@ describe("browserSessions", () => {
     );
 
     expect(merged["account-001"].status).toBe("starting");
+    expect(merged["account-001"].debugPort).toBeNull();
+    expect(merged["account-001"].cdpStatus).toBe("unknown");
+    expect(merged["account-001"].runtimeError).toBeNull();
     expect(runningProfileIdsFromSessions(merged)).toEqual([]);
   });
 
@@ -46,6 +49,9 @@ function browserSessionSnapshot(
     status: running ? "running" : "stopped",
     running,
     pid: running ? 1201 : null,
+    debugPort: running ? 19222 : null,
+    cdpStatus: running ? "available" : "unknown",
+    runtimeError: null,
     windowCount: running ? null : 0,
     windows: [],
     windowError: null,

@@ -51,12 +51,20 @@ export interface WindowBounds {
 }
 
 export type BrowserSessionStatus = "starting" | "running" | "stopped";
+export type BrowserSessionCdpStatus =
+  | "unknown"
+  | "available"
+  | "missing-port"
+  | "failed";
 
 export interface BrowserSessionSnapshot {
   profileId: string;
   status: BrowserSessionStatus;
   running: boolean;
   pid: number | null;
+  debugPort: number | null;
+  cdpStatus: BrowserSessionCdpStatus;
+  runtimeError: string | null;
   windowCount: number | null;
   windows: ChromeWindowInfo[];
   windowError: string | null;
@@ -398,6 +406,9 @@ export const profileApi = {
       status: runningIdSet.has(profileId) ? "running" : "stopped",
       running: runningIdSet.has(profileId),
       pid: null,
+      debugPort: null,
+      cdpStatus: "unknown",
+      runtimeError: null,
       windowCount: runningIdSet.has(profileId) ? null : 0,
       windows: [],
       windowError: null,
