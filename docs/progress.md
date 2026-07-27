@@ -20,6 +20,8 @@ Browser Runtime PR 1 已完成实现并进入 PR：分支 `codex/browser-runtime
 
 Browser Runtime PR 2 已完成实现并进入 PR：分支 `codex/browser-runtime-list-tabs`，PR #11 `https://github.com/1572817043/mutiChrome/pull/11`，commit `49ce712629b1a7bf9b61f8662883defbcf6791ac`。本轮范围是新增只读 `list_runtime_tabs` Tauri command 和前端 `profileApi.listRuntimeTabs`，通过 CDP `/json/list` 读取当前 profile 的 page tab，并返回 `targetId`、`type`、`url`、`title`、`webSocketDebuggerUrl` 和 `checkedAt`。本轮不做 UI、navigate、click、type、WebSocket session、群控或自动化任务库。阶段验证通过：`rtk cargo test --manifest-path src-tauri/Cargo.toml` 为 Rust 65 passed，`rtk npm test` 为前端 230 passed，`rtk npm run build` 通过，`rtk npm run tauri:build` 通过，`rtk git diff --check` 通过。实机只读验证通过：`account-005` 以 debug port `19222` 启动，`/json/list` 返回 1 个 page tab，包含 `id`、`url`、`title` 和 `webSocketDebuggerUrl`。`stash@{0}` 仍保留且未恢复。
 
+Browser Runtime PR #12 已完成实现并进入 PR：分支 `codex/browser-runtime-dev-diagnostics`，PR #12 `https://github.com/1572817043/mutiChrome/pull/12`，commit `6390b78e5a29e93d7b3b532a2fdedf022ac76b10`。本轮范围是在 Settings 底部新增 DEV-only 折叠“开发诊断”，单选账号时可只读调用 `listRuntimeTabs`，展示 `cdpStatus`、`debugPort`、tab 数量、`title`、`url` 和短 `targetId`；不展示完整 `webSocketDebuggerUrl`，关闭 Settings 后旧请求不会污染结果。本轮不做 release 正式 UI、navigate、click、type、WebSocket session、群控或自动化任务库。阶段验证通过：SettingsDialog targeted tests 11 passed，App targeted tests 3 passed，`rtk npm test` 为 239 passed，`rtk npm run build` 通过，`rtk git diff --check` 通过；spec review、code quality review 和 Claude diff red-team 均无阻断问题。`stash@{0}` 仍保留且未恢复。
+
 后续路线已明确：V4 继续打窗口编排基础，不直接做完整群控。V4.4 做轻量窗口面板。V5 才进入同步控制器基础，先做 `sync-bounds`、dry-run 预览和结果详情；鼠标、键盘、滚动、标签页等交互同步只在 V5.4 做技术预研，不进 MVP 主流程。
 
 ## 稳定观察 backlog
