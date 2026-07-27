@@ -18,6 +18,7 @@ import {
   normalizeSettings,
   profileApi,
   profilePath,
+  type BrowserRuntimeTabSnapshot,
   type BrowserSessionSnapshot,
   type BrowserSessionStatus,
   type ChromeStatus,
@@ -86,7 +87,8 @@ import { ProjectsView } from "./projects/ProjectsView";
 import {
   SettingsDialog,
   type FullBackupScope,
-  type FullBackupWorking
+  type FullBackupWorking,
+  type RuntimeDiagnosticsStatus
 } from "./settings/SettingsDialog";
 import {
   createUrlLibraryDraft,
@@ -144,6 +146,18 @@ interface BulkLaunchRetryState {
   url: string;
 }
 
+interface RuntimeDiagnosticsState {
+  status: RuntimeDiagnosticsStatus;
+  tabs: BrowserRuntimeTabSnapshot[];
+  error: string | null;
+}
+
+type DevImportMeta = ImportMeta & {
+  env?: {
+    DEV?: boolean;
+  };
+};
+
 const RUNNING_STATUS_POLL_MS = 5000;
 const LAUNCH_CONFIRMATION_DELAY_MS = 2000;
 const MAX_BROWSER_OPERATIONS = 20;
@@ -196,6 +210,12 @@ function App() {
   const [importingProfiles, setImportingProfiles] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [runtimeDiagnosticsState, setRuntimeDiagnosticsState] =
+    useState<RuntimeDiagnosticsState>({
+      status: "idle",
+      tabs: [],
+      error: null
+    });
   const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
   const [pendingBatchDelete, setPendingBatchDelete] = useState<ChromeProfile[] | null>(null);
   const [batchDeleteWorking, setBatchDeleteWorking] = useState<DeleteMode | null>(null);
@@ -212,6 +232,9 @@ function App() {
   const [launchEvents, setLaunchEvents] = useState<BrowserLaunchEvent[]>([]);
   const launchEventsRef = useRef<BrowserLaunchEvent[]>([]);
   const launchEventsSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const runtimeDiagnosticsRequestIdRef = useRef(0);
+  const runtimeDiagnosticsProfileIdRef = useRef<string | null>(null);
+  const settingsOpenRef = useRef(false);
   const [windowInspecting, setWindowInspecting] = useState(false);
   const [windowTiling, setWindowTiling] = useState(false);
   const [windowSyncing, setWindowSyncing] = useState(false);
@@ -302,6 +325,13 @@ function App() {
     () => profiles.filter((profile) => selectedIds.includes(profile.id)),
     [profiles, selectedIds]
   );
+  const runtimeDiagnosticsProfile = useMemo(() => {
+    if (selectedIds.length !== 1) {
+      return null;
+    }
+
+    return profiles.find((profile) => profile.id === selectedIds[0]) ?? null;
+  }, [profiles, selectedIds]);
   const profileIds = useMemo(() => profiles.map((profile) => profile.id), [profiles]);
   const totalProfiles = profiles.length;
   const hasSelectedProfiles = selectedProfiles.length > 0;
@@ -341,6 +371,9 @@ function App() {
         .includes(normalizedQuery)
     );
   }, [settings.urlLibrary, urlLibraryQuery]);
+
+  runtimeDiagnosticsProfileIdRef.current = runtimeDiagnosticsProfile?.id ?? null;
+  settingsOpenRef.current = settingsOpen;
 
   useEffect(() => {
     void boot();
@@ -986,6 +1019,7 @@ function App() {
   function openSettingsDialog() {
     setBrowserPathDraft(settings.browserPath);
     setThemeDraft(settings.theme);
+    resetRuntimeDiagnostics();
     setSettingsOpen(true);
   }
 
@@ -994,7 +1028,60 @@ function App() {
     setThemeDraft(settings.theme);
     setRestoreConfirmOpen(false);
     setFullRestoreConfirmOpen(false);
+    resetRuntimeDiagnostics();
     setSettingsOpen(false);
+  }
+
+  function resetRuntimeDiagnostics() {
+    runtimeDiagnosticsRequestIdRef.current += 1;
+    setRuntimeDiagnosticsState({
+      status: "idle",
+      tabs: [],
+      error: null
+    });
+  }
+
+  async function readRuntimeTabsForSelectedProfile() {
+    if (!runtimeDiagnosticsProfile) {
+      return;
+    }
+
+    const profileId = runtimeDiagnosticsProfile.id;
+    const requestId = runtimeDiagnosticsRequestIdRef.current + 1;
+    runtimeDiagnosticsRequestIdRef.current = requestId;
+    setRuntimeDiagnosticsState({
+      status: "loading",
+      tabs: [],
+      error: null
+    });
+    try {
+      const tabs = await profileApi.listRuntimeTabs(rootPath, profileId);
+      if (
+        runtimeDiagnosticsRequestIdRef.current !== requestId ||
+        !settingsOpenRef.current ||
+        runtimeDiagnosticsProfileIdRef.current !== profileId
+      ) {
+        return;
+      }
+      setRuntimeDiagnosticsState({
+        status: "succeeded",
+        tabs,
+        error: null
+      });
+    } catch (error) {
+      if (
+        runtimeDiagnosticsRequestIdRef.current !== requestId ||
+        !settingsOpenRef.current ||
+        runtimeDiagnosticsProfileIdRef.current !== profileId
+      ) {
+        return;
+      }
+      setRuntimeDiagnosticsState({
+        status: "failed",
+        tabs: [],
+        error: errorMessage(error)
+      });
+    }
   }
 
   function closeActiveDialog() {
@@ -3218,6 +3305,18 @@ function App() {
           selectedProfileCount={selectedIds.length}
           browserPathDraft={browserPathDraft}
           themeDraft={themeDraft}
+          runtimeDiagnostics={{
+            enabled: Boolean((import.meta as DevImportMeta).env?.DEV),
+            selectedProfileCount: selectedIds.length,
+            selectedProfileName: runtimeDiagnosticsProfile?.name ?? null,
+            session: runtimeDiagnosticsProfile
+              ? browserSessionsById[runtimeDiagnosticsProfile.id] ?? null
+              : null,
+            status: runtimeDiagnosticsState.status,
+            tabs: runtimeDiagnosticsState.tabs,
+            error: runtimeDiagnosticsState.error,
+            onReadTabs: readRuntimeTabsForSelectedProfile
+          }}
           onRootPathChange={updateRootPathDraft}
           onBrowserPathChange={setBrowserPathDraft}
           onThemeChange={setThemeDraft}

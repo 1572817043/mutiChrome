@@ -10,6 +10,29 @@ import type {
 } from "../types";
 import { SettingsDialog, type SettingsDialogProps } from "./SettingsDialog";
 
+const runtimeDiagnostics = {
+  enabled: true,
+  selectedProfileCount: 1,
+  selectedProfileName: "主号",
+  session: {
+    profileId: "account-001",
+    status: "running" as const,
+    running: true,
+    pid: 1201,
+    debugPort: 19222,
+    cdpStatus: "available" as const,
+    runtimeError: null,
+    windowCount: null,
+    windows: [],
+    windowError: null,
+    checkedAt: 1000
+  },
+  status: "idle" as const,
+  tabs: [],
+  error: null,
+  onReadTabs: vi.fn()
+};
+
 const healthReport: RootHealthReport = {
   rootPath: "/tmp/multichrome",
   summary: {
@@ -208,4 +231,199 @@ describe("设置弹窗", () => {
     expect(props.onPreviewFullRestore).toHaveBeenCalledTimes(1);
     expect(props.onRequestFullRestore).toHaveBeenCalledTimes(1);
   });
+
+  test("非 DEV 时不显示开发诊断区", () => {
+    renderSettingsDialog({
+      runtimeDiagnostics: {
+        ...runtimeDiagnostics,
+        enabled: false
+      }
+    });
+
+    expect(screen.queryByText("开发诊断")).toBeNull();
+  });
+
+  test("开发诊断 details 默认未展开", () => {
+    renderSettingsDialog({
+      runtimeDiagnostics
+    });
+
+    expect(getDevDiagnosticsDetails().open).toBe(false);
+  });
+
+  test("DEV 且单选账号时显示运行诊断状态", () => {
+    renderSettingsDialog({
+      runtimeDiagnostics
+    });
+    expandDevDiagnostics();
+
+    expect(screen.getByText("开发诊断")).toBeTruthy();
+    expect(screen.getByText("主号")).toBeTruthy();
+    expect(screen.getByText("CDP：available")).toBeTruthy();
+    expect(screen.getByText("调试端口：19222")).toBeTruthy();
+    expect(
+      (screen.getByRole("button", { name: "读取标签页" }) as HTMLButtonElement).disabled
+    ).toBe(false);
+  });
+
+  test("没有选中或多选账号时禁用读取并显示短提示", () => {
+    const { rerender } = render(
+      <SettingsDialog
+        {...renderSettingsDialogProps({
+          runtimeDiagnostics: {
+            ...runtimeDiagnostics,
+            selectedProfileCount: 0,
+            selectedProfileName: null,
+            session: null
+          }
+        })}
+      />
+    );
+    expandDevDiagnostics();
+
+    expect(
+      (screen.getByRole("button", { name: "读取标签页" }) as HTMLButtonElement).disabled
+    ).toBe(true);
+    expect(screen.getByText("请选择 1 个账号。")).toBeTruthy();
+
+    rerender(
+      <SettingsDialog
+        {...renderSettingsDialogProps({
+          runtimeDiagnostics: {
+            ...runtimeDiagnostics,
+            selectedProfileCount: 2,
+            selectedProfileName: null,
+            session: null
+          }
+        })}
+      />
+    );
+    expandDevDiagnostics();
+
+    expect(
+      (screen.getByRole("button", { name: "读取标签页" }) as HTMLButtonElement).disabled
+    ).toBe(true);
+    expect(screen.getByText("仅支持单选账号。")).toBeTruthy();
+  });
+
+  test("点击读取标签页会调用 handler", () => {
+    const onReadTabs = vi.fn();
+    renderSettingsDialog({
+      runtimeDiagnostics: {
+        ...runtimeDiagnostics,
+        onReadTabs
+      }
+    });
+    expandDevDiagnostics();
+
+    fireEvent.click(screen.getByRole("button", { name: "读取标签页" }));
+
+    expect(onReadTabs).toHaveBeenCalledTimes(1);
+  });
+
+  test("标签页读取成功时展示数量、标题、URL 和短 targetId", () => {
+    renderSettingsDialog({
+      runtimeDiagnostics: {
+        ...runtimeDiagnostics,
+        status: "succeeded",
+        tabs: [
+          {
+            targetId: "0123456789abcdef",
+            type: "page",
+            url: "https://example.com/dashboard",
+            title: "Example Dashboard",
+            webSocketDebuggerUrl: "ws://127.0.0.1:19222/devtools/page/0123456789abcdef",
+            checkedAt: 1000
+          }
+        ]
+      }
+    });
+    expandDevDiagnostics();
+
+    expect(screen.getByText("1 个标签页")).toBeTruthy();
+    expect(screen.getByText("Example Dashboard")).toBeTruthy();
+    expect(screen.getByText("https://example.com/dashboard")).toBeTruthy();
+    expect(screen.getByText("target 01234567")).toBeTruthy();
+    expect(screen.queryByText(/webSocketDebuggerUrl|devtools\/page|ws:\/\//)).toBeNull();
+  });
+
+  test("标签页读取失败时展示错误文案", () => {
+    renderSettingsDialog({
+      runtimeDiagnostics: {
+        ...runtimeDiagnostics,
+        status: "failed",
+        error: "Runtime 不可用"
+      }
+    });
+    expandDevDiagnostics();
+
+    expect(screen.getByText("Runtime 不可用")).toBeTruthy();
+  });
 });
+
+function getDevDiagnosticsDetails(): HTMLDetailsElement {
+  const summary = screen.getByText("开发诊断");
+  const details = summary.closest("details");
+  if (!details) {
+    throw new Error("开发诊断不在 details 内");
+  }
+  return details as HTMLDetailsElement;
+}
+
+function expandDevDiagnostics() {
+  const details = getDevDiagnosticsDetails();
+  if (!details.open) {
+    fireEvent.click(screen.getByText("开发诊断"));
+  }
+}
+
+function renderSettingsDialogProps(
+  overrides: Partial<SettingsDialogProps> = {}
+): SettingsDialogProps {
+  return {
+    rootPath: "/tmp/multichrome",
+    rootStatus: { rootExists: true, writable: true, profileCount: 2 },
+    chromeStatus: { available: true, appPath: "/Applications/Google Chrome.app" },
+    healthReport,
+    healthChecking: false,
+    healthRepairing: false,
+    orphanRegisteringId: null,
+    repairResult,
+    backupResult,
+    backupPathDraft: "/tmp/backup.json",
+    backupWorking: null,
+    restoreConfirmOpen: true,
+    fullBackupScope: "all",
+    fullBackupPreview,
+    fullBackupResult,
+    fullBackupPathDraft: "/tmp/full-backup-done",
+    fullRestorePreview,
+    fullBackupWorking: null,
+    selectedProfileCount: 1,
+    browserPathDraft: "/Applications/Google Chrome.app",
+    themeDraft: "light",
+    onRootPathChange: vi.fn(),
+    onBrowserPathChange: vi.fn(),
+    onThemeChange: vi.fn(),
+    onApplyRootPath: vi.fn(),
+    onSaveSettings: vi.fn(),
+    onHealthCheck: vi.fn(),
+    onRepairHealth: vi.fn(),
+    onRegisterOrphanProfile: vi.fn(),
+    onCreateBackup: vi.fn(),
+    onRequestRestoreBackup: vi.fn(),
+    onConfirmRestoreBackup: vi.fn(),
+    onCancelRestoreBackup: vi.fn(),
+    onFullBackupScopeChange: vi.fn(),
+    onPreviewFullBackup: vi.fn(),
+    onCreateFullBackup: vi.fn(),
+    onPreviewFullRestore: vi.fn(),
+    onRequestFullRestore: vi.fn(),
+    onRevealRootDirectory: vi.fn(),
+    onRevealBackupsDirectory: vi.fn(),
+    onBackupPathChange: vi.fn(),
+    onFullBackupPathChange: vi.fn(),
+    onClose: vi.fn(),
+    ...overrides
+  };
+}

@@ -4827,6 +4827,96 @@ describe("App launcher layout", () => {
     revealPathSpy.mockRestore();
     revealBackupsSpy.mockRestore();
   });
+
+  test("开发诊断可以读取单选运行账号的 Runtime 标签页", async () => {
+    const user = userEvent.setup();
+    const snapshotSpy = vi
+      .spyOn(profileApi, "snapshotBrowserSessions")
+      .mockResolvedValue([
+        browserSessionSnapshot("account-001", true),
+        browserSessionSnapshot("account-002", false)
+      ]);
+    const listTabsSpy = vi.spyOn(profileApi, "listRuntimeTabs").mockResolvedValue([
+      {
+        targetId: "0123456789abcdef",
+        type: "page",
+        url: "https://example.com/runtime",
+        title: "Runtime Home",
+        webSocketDebuggerUrl: "ws://127.0.0.1:19222/devtools/page/0123456789abcdef",
+        checkedAt: 1000
+      }
+    ]);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    const dialog = await screen.findByRole("dialog", { name: "设置" });
+    await expandDevDiagnostics(user, dialog);
+
+    expect(within(dialog).getByText("开发诊断")).toBeTruthy();
+    expect(within(dialog).getByText("调试端口：19222")).toBeTruthy();
+
+    await user.click(within(dialog).getByRole("button", { name: "读取标签页" }));
+
+    expect(listTabsSpy).toHaveBeenCalledWith("~/MultiChromeProfiles", "account-001");
+    expect(await within(dialog).findByText("Runtime Home")).toBeTruthy();
+    expect(within(dialog).getByText("https://example.com/runtime")).toBeTruthy();
+    snapshotSpy.mockRestore();
+    listTabsSpy.mockRestore();
+  });
+
+  test("开发诊断会忽略关闭后返回的旧 Runtime 标签页请求", async () => {
+    const user = userEvent.setup();
+    let resolveTabs: (tabs: Awaited<ReturnType<typeof profileApi.listRuntimeTabs>>) => void =
+      () => {};
+    const tabsPromise = new Promise<Awaited<ReturnType<typeof profileApi.listRuntimeTabs>>>(
+      (resolve) => {
+        resolveTabs = resolve;
+      }
+    );
+    const snapshotSpy = vi
+      .spyOn(profileApi, "snapshotBrowserSessions")
+      .mockResolvedValue([
+        browserSessionSnapshot("account-001", true),
+        browserSessionSnapshot("account-002", true)
+      ]);
+    const listTabsSpy = vi.spyOn(profileApi, "listRuntimeTabs").mockReturnValue(tabsPromise);
+    render(<App />);
+
+    const firstCard = await screen.findByRole("button", { name: "选择 主号" });
+    const secondCard = await screen.findByRole("button", { name: "选择 抽奖号" });
+    await user.click(firstCard);
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    const firstDialog = await screen.findByRole("dialog", { name: "设置" });
+    await expandDevDiagnostics(user, firstDialog);
+    await user.click(within(firstDialog).getByRole("button", { name: "读取标签页" }));
+    await waitFor(() => expect(listTabsSpy).toHaveBeenCalledTimes(1));
+
+    await user.click(within(firstDialog).getByRole("button", { name: "关闭设置" }));
+    await user.click(firstCard);
+    await user.click(secondCard);
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    const secondDialog = await screen.findByRole("dialog", { name: "设置" });
+    await expandDevDiagnostics(user, secondDialog);
+
+    resolveTabs([
+      {
+        targetId: "aaaaaaaaaaaaaaaa",
+        type: "page",
+        url: "https://example.com/old-account",
+        title: "旧账号标签页",
+        webSocketDebuggerUrl: "ws://127.0.0.1:19222/devtools/page/aaaaaaaaaaaaaaaa",
+        checkedAt: 1000
+      }
+    ]);
+    await flushPromises();
+
+    expect(within(secondDialog).getByText("抽奖号")).toBeTruthy();
+    expect(within(secondDialog).queryByText("旧账号标签页")).toBeNull();
+    expect(within(secondDialog).queryByText("https://example.com/old-account")).toBeNull();
+    snapshotSpy.mockRestore();
+    listTabsSpy.mockRestore();
+  });
 });
 
 function savedDocument(): ProfileDocument & { projects: TestProject[] } {
@@ -4929,6 +5019,20 @@ async function flushPromises() {
     await Promise.resolve();
     await Promise.resolve();
   });
+}
+
+async function expandDevDiagnostics(
+  user: { click: (element: Element) => Promise<unknown> },
+  scope: HTMLElement
+) {
+  const summary = within(scope).getByText("开发诊断");
+  const details = summary.closest("details") as HTMLDetailsElement | null;
+  if (!details) {
+    throw new Error("开发诊断不在 details 内");
+  }
+  if (!details.open) {
+    await user.click(summary);
+  }
 }
 
 async function openBulkMore(user: { click: (element: Element) => Promise<unknown> }) {

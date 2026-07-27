@@ -10,6 +10,8 @@ import {
 } from "lucide-react";
 import {
   formatBytes,
+  type BrowserRuntimeTabSnapshot,
+  type BrowserSessionSnapshot,
   type ChromeStatus,
   type RootStatus
 } from "../api";
@@ -27,6 +29,18 @@ import type {
 
 export type FullBackupScope = "all" | "selected";
 export type FullBackupWorking = "preview" | "create" | "restore-preview" | "restore";
+export type RuntimeDiagnosticsStatus = "idle" | "loading" | "succeeded" | "failed";
+
+export interface RuntimeDiagnosticsProps {
+  enabled: boolean;
+  selectedProfileCount: number;
+  selectedProfileName: string | null;
+  session: BrowserSessionSnapshot | null;
+  status: RuntimeDiagnosticsStatus;
+  tabs: BrowserRuntimeTabSnapshot[];
+  error: string | null;
+  onReadTabs: () => Promise<void> | void;
+}
 
 export interface SettingsDialogProps {
   rootPath: string;
@@ -50,6 +64,7 @@ export interface SettingsDialogProps {
   selectedProfileCount: number;
   browserPathDraft: string;
   themeDraft: AppTheme;
+  runtimeDiagnostics?: RuntimeDiagnosticsProps;
   onRootPathChange: (value: string) => void;
   onBrowserPathChange: (value: string) => void;
   onThemeChange: (value: AppTheme) => void;
@@ -96,6 +111,7 @@ export function SettingsDialog({
   selectedProfileCount,
   browserPathDraft,
   themeDraft,
+  runtimeDiagnostics,
   onRootPathChange,
   onBrowserPathChange,
   onThemeChange,
@@ -139,6 +155,16 @@ export function SettingsDialog({
         ? `检查结果有 ${healthReport.summary.warningCount} 个提醒，建议处理后再做备份。`
         : "检查通过，当前没有发现目录与索引不一致。"
     : "尚未运行健康检查。";
+  const diagnosticsDisabledReason =
+    runtimeDiagnostics?.selectedProfileCount === 0
+      ? "请选择 1 个账号。"
+      : runtimeDiagnostics && runtimeDiagnostics.selectedProfileCount > 1
+        ? "仅支持单选账号。"
+        : null;
+  const diagnosticsCanRead =
+    Boolean(runtimeDiagnostics?.enabled) &&
+    runtimeDiagnostics?.selectedProfileCount === 1 &&
+    runtimeDiagnostics.status !== "loading";
 
   return (
     <div
@@ -476,6 +502,59 @@ export function SettingsDialog({
           ) : null}
         </div>
 
+        {runtimeDiagnostics?.enabled ? (
+          <details className="settings-backup runtime-diagnostics-section">
+            <summary>开发诊断</summary>
+            <div className="settings-health-header">
+              <div>
+                <strong>{runtimeDiagnostics.selectedProfileName ?? "未选中账号"}</strong>
+                <p>只读读取 Browser Runtime 标签页。</p>
+              </div>
+              <button
+                className="secondary-button compact"
+                type="button"
+                disabled={!diagnosticsCanRead}
+                onClick={() => void runtimeDiagnostics.onReadTabs()}
+              >
+                {runtimeDiagnostics.status === "loading" ? "读取中" : "读取标签页"}
+              </button>
+            </div>
+            {diagnosticsDisabledReason ? (
+              <p className="settings-section-note">{diagnosticsDisabledReason}</p>
+            ) : (
+              <div className="backup-summary-row">
+                <span>CDP：{runtimeDiagnostics.session?.cdpStatus ?? "unknown"}</span>
+                <span>
+                  调试端口：{runtimeDiagnostics.session?.debugPort ?? "未发现"}
+                </span>
+              </div>
+            )}
+            {runtimeDiagnostics.status === "failed" && runtimeDiagnostics.error ? (
+              <p className="health-empty">{runtimeDiagnostics.error}</p>
+            ) : null}
+            {runtimeDiagnostics.status === "succeeded" ? (
+              <div className="backup-result">
+                <div className="backup-summary-row">
+                  <span>{runtimeDiagnostics.tabs.length} 个标签页</span>
+                </div>
+                {runtimeDiagnostics.tabs.length > 0 ? (
+                  <ul className="health-issue-list" aria-label="Runtime 标签页">
+                    {runtimeDiagnostics.tabs.map((tab) => (
+                      <li key={tab.targetId}>
+                        <strong>{tab.title || "未命名标签页"}</strong>
+                        <code>{tab.url}</code>
+                        <span>target {shortTargetId(tab.targetId)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="health-empty">没有可展示的标签页。</p>
+                )}
+              </div>
+            ) : null}
+          </details>
+        ) : null}
+
         <div className="modal-footer">
           <button className="primary-button" type="button" onClick={onSaveSettings}>
             保存设置
@@ -484,4 +563,8 @@ export function SettingsDialog({
       </section>
     </div>
   );
+}
+
+function shortTargetId(targetId: string): string {
+  return targetId.slice(0, 8);
 }
