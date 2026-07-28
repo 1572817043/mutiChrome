@@ -3032,6 +3032,30 @@ mod tests {
     }
 
     #[test]
+    fn send_cdp_page_navigate_rejects_secure_websocket_url() {
+        let error = send_cdp_page_navigate_with_timeout(
+            "wss://127.0.0.1:9222/devtools/page/page-1",
+            "https://example.com",
+            Duration::from_millis(25),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "CDP 连接失败");
+    }
+
+    #[test]
+    fn send_cdp_page_navigate_rejects_non_loopback_websocket_url() {
+        let error = send_cdp_page_navigate_with_timeout(
+            "ws://192.168.1.1:9222/devtools/page/page-1",
+            "https://example.com",
+            Duration::from_millis(25),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "CDP 连接失败");
+    }
+
+    #[test]
     fn send_cdp_page_navigate_reports_clean_protocol_error() {
         let listener = TcpListener::bind((CDP_BIND_ADDRESS, 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
