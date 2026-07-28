@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import {
   formatBytes,
+  type BrowserRuntimeNavigationResult,
   type BrowserRuntimeTabSnapshot,
   type BrowserSessionSnapshot,
   type ChromeStatus,
@@ -40,6 +41,12 @@ export interface RuntimeDiagnosticsProps {
   tabs: BrowserRuntimeTabSnapshot[];
   error: string | null;
   onReadTabs: () => Promise<void> | void;
+  navigateUrl: string;
+  navigateStatus: RuntimeDiagnosticsStatus;
+  navigateResult: BrowserRuntimeNavigationResult | null;
+  navigateError: string | null;
+  onNavigateUrlChange: (value: string) => void;
+  onNavigate: () => Promise<void> | void;
 }
 
 export interface SettingsDialogProps {
@@ -164,7 +171,14 @@ export function SettingsDialog({
   const diagnosticsCanRead =
     Boolean(runtimeDiagnostics?.enabled) &&
     runtimeDiagnostics?.selectedProfileCount === 1 &&
-    runtimeDiagnostics.status !== "loading";
+    runtimeDiagnostics.status !== "loading" &&
+    runtimeDiagnostics.navigateStatus !== "loading";
+  const diagnosticsCanNavigate =
+    Boolean(runtimeDiagnostics?.enabled) &&
+    runtimeDiagnostics?.selectedProfileCount === 1 &&
+    runtimeDiagnostics.status !== "loading" &&
+    runtimeDiagnostics.navigateStatus !== "loading" &&
+    Boolean(runtimeDiagnostics.navigateUrl.trim());
 
   return (
     <div
@@ -508,7 +522,7 @@ export function SettingsDialog({
             <div className="settings-health-header">
               <div>
                 <strong>{runtimeDiagnostics.selectedProfileName ?? "未选中账号"}</strong>
-                <p>只读读取 Browser Runtime 标签页。</p>
+                <p>仅用于开发诊断；导航目标固定为第一个 page 标签页。</p>
               </div>
               <button
                 className="secondary-button compact"
@@ -529,6 +543,48 @@ export function SettingsDialog({
                 </span>
               </div>
             )}
+            <div className="field">
+              <label htmlFor="runtime-navigation-url">导航 URL</label>
+              <div className="path-row">
+                <input
+                  id="runtime-navigation-url"
+                  type="url"
+                  placeholder="https://example.com"
+                  value={runtimeDiagnostics.navigateUrl}
+                  disabled={
+                    runtimeDiagnostics.selectedProfileCount !== 1 ||
+                    runtimeDiagnostics.status === "loading" ||
+                    runtimeDiagnostics.navigateStatus === "loading"
+                  }
+                  onChange={(event) =>
+                    runtimeDiagnostics.onNavigateUrlChange(event.target.value)
+                  }
+                />
+                <button
+                  className="secondary-button compact"
+                  type="button"
+                  disabled={!diagnosticsCanNavigate}
+                  onClick={() => void runtimeDiagnostics.onNavigate()}
+                >
+                  {runtimeDiagnostics.navigateStatus === "loading"
+                    ? "导航中"
+                    : "导航标签页"}
+                </button>
+              </div>
+              <p className="settings-section-note">
+                将导航该账号的第一个 page 标签页。
+              </p>
+            </div>
+            {runtimeDiagnostics.navigateStatus === "failed" &&
+            runtimeDiagnostics.navigateError ? (
+              <p className="health-empty">{runtimeDiagnostics.navigateError}</p>
+            ) : null}
+            {runtimeDiagnostics.navigateStatus === "succeeded" &&
+            runtimeDiagnostics.navigateResult ? (
+              <p className="health-state-line success">
+                已导航第一个 page 标签页：{runtimeDiagnostics.navigateResult.url}
+              </p>
+            ) : null}
             {runtimeDiagnostics.status === "failed" && runtimeDiagnostics.error ? (
               <p className="health-empty">{runtimeDiagnostics.error}</p>
             ) : null}

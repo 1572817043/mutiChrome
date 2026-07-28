@@ -19,6 +19,8 @@ libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = [] }
+tungstenite = "0.30"
+url = "2"
 
 [dev-dependencies]
 tempfile = "3"

@@ -26,6 +26,7 @@ const CDP_PROBE_TIMEOUT_MS: u64 = 250;
 const CDP_SNAPSHOT_PROBE_BUDGET_MS: u64 = 750;
 const CDP_LIST_TIMEOUT_MS: u64 = 500;
 const CDP_LIST_MAX_BODY_BYTES: usize = 1024 * 1024;
+const CDP_NAVIGATE_TIMEOUT_MS: u64 = 1000;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -94,6 +95,15 @@ struct TabSnapshot {
     title: String,
     web_socket_debugger_url: Option<String>,
     checked_at: u64,
+}
+
+#[derive(Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeTabNavigationResult {
+    profile_id: String,
+    target_id: String,
+    url: String,
+    navigated_at: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -505,6 +515,7 @@ pub fn run() {
             list_running_profiles,
             snapshot_browser_sessions,
             list_runtime_tabs,
+            navigate_runtime_tab,
             focus_profile_window,
             list_profile_windows,
             set_profile_window_bounds,
@@ -752,6 +763,34 @@ fn list_runtime_tabs(root_path: String, profile_id: String) -> Result<Vec<TabSna
         &profile_id,
         stdout.lines(),
         fetch_cdp_tabs,
+        current_time_millis(),
+    )
+}
+
+#[tauri::command]
+fn navigate_runtime_tab(
+    root_path: String,
+    profile_id: String,
+    url: String,
+) -> Result<RuntimeTabNavigationResult, String> {
+    let url = validate_runtime_navigation_url(&url)?;
+    let output = Command::new("ps")
+        .args(["-axo", "pid=,command="])
+        .output()
+        .map_err(|_| "Browser Runtime 不可用".to_string())?;
+
+    if !output.status.success() {
+        return Err("Browser Runtime 不可用".to_string());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    navigate_runtime_tab_from_processes(
+        &PathBuf::from(root_path),
+        &profile_id,
+        &url,
+        stdout.lines(),
+        fetch_cdp_tabs,
+        send_cdp_page_navigate,
         current_time_millis(),
     )
 }
@@ -1185,6 +1224,315 @@ where
         .collect())
 }
 
+fn validate_runtime_navigation_url(url: &str) -> Result<String, String> {
+    let url = url.trim();
+    let parsed =
+        url::Url::parse(url).map_err(|_| "请输入有效的 http:// 或 https:// URL".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host().is_none() {
+        return Err("请输入有效的 http:// 或 https:// URL".to_string());
+    }
+
+    Ok(url.to_string())
+}
+
+fn navigate_runtime_tab_from_processes<'a, I, F, N>(
+    root_path: &Path,
+    profile_id: &str,
+    url: &str,
+    process_lines: I,
+    mut fetch_tabs: F,
+    mut navigate_page: N,
+    navigated_at: u64,
+) -> Result<RuntimeTabNavigationResult, String>
+where
+    I: IntoIterator<Item = &'a str>,
+    F: FnMut(u16) -> Result<Vec<CdpTargetRaw>, String>,
+    N: FnMut(&str, &str) -> Result<(), String>,
+{
+    let url = validate_runtime_navigation_url(url)?;
+    let Some(process) = running_profile_processes_from_processes(root_path, process_lines)
+        .into_iter()
+        .find(|process| process.profile_id == profile_id)
+    else {
+        return Err("该账号未运行".to_string());
+    };
+    let Some(port) = process.debug_port else {
+        return Err("该账号需要关闭后重新打开以启用 Browser Runtime".to_string());
+    };
+
+    let targets = fetch_tabs(port).map_err(|_| "Browser Runtime 不可用".to_string())?;
+    let mut found_page = false;
+    let target = targets
+        .into_iter()
+        .find(|target| {
+            if target.r#type.as_deref() != Some("page") {
+                return false;
+            }
+            found_page = true;
+            target
+                .web_socket_debugger_url
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+        })
+        .ok_or_else(|| {
+            if found_page {
+                "找到 page 标签页，但都缺少 WebSocket 调试地址".to_string()
+            } else {
+                "未找到可导航的 page 标签页".to_string()
+            }
+        })?;
+    let target_id = target
+        .id
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "第一个 page 标签页缺少 targetId".to_string())?;
+    let web_socket_debugger_url = target
+        .web_socket_debugger_url
+        .ok_or_else(|| "找到 page 标签页，但都缺少 WebSocket 调试地址".to_string())?;
+
+    navigate_page(&web_socket_debugger_url, &url).map_err(|_| "CDP 导航失败".to_string())?;
+
+    Ok(RuntimeTabNavigationResult {
+        profile_id: profile_id.to_string(),
+        target_id,
+        url,
+        navigated_at,
+    })
+}
+
+fn send_cdp_page_navigate(web_socket_url: &str, url: &str) -> Result<(), String> {
+    send_cdp_page_navigate_with_timeout(
+        web_socket_url,
+        url,
+        Duration::from_millis(CDP_NAVIGATE_TIMEOUT_MS),
+    )
+}
+
+fn send_cdp_page_navigate_with_timeout(
+    web_socket_url: &str,
+    url: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    let parsed = url::Url::parse(web_socket_url).map_err(|_| "CDP 连接失败".to_string())?;
+    if parsed.scheme() != "ws" {
+        return Err("CDP 连接失败".to_string());
+    }
+    let port = parsed
+        .port_or_known_default()
+        .ok_or_else(|| "CDP 连接失败".to_string())?;
+    let address = match parsed.host_str() {
+        Some("127.0.0.1") | Some("localhost") => SocketAddr::from(([127, 0, 0, 1], port)),
+        Some("::1") => SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], port)),
+        _ => return Err("CDP 连接失败".to_string()),
+    };
+
+    let started_at = Instant::now();
+    let stream = TcpStream::connect_timeout(&address, timeout)
+        .map_err(|error| clean_cdp_navigation_io_error(&error, started_at, timeout, true))?;
+    stream
+        .set_nonblocking(true)
+        .map_err(|_| "CDP 连接失败".to_string())?;
+    let mut socket = complete_cdp_websocket_handshake(web_socket_url, stream, started_at, timeout)?;
+    if let Err(error) = write_cdp_page_navigate_command(&mut socket, url, started_at, timeout) {
+        best_effort_close_cdp_websocket(&mut socket, started_at, timeout);
+        return Err(error);
+    }
+
+    let result = loop {
+        if let Err(error) = remaining_cdp_navigation_timeout(started_at, timeout) {
+            break Err(error);
+        }
+        let message = match socket.read() {
+            Ok(message) => message,
+            Err(error) if is_cdp_would_block(&error) => {
+                if let Err(error) = wait_for_cdp_io_retry(started_at, timeout) {
+                    break Err(error);
+                }
+                continue;
+            }
+            Err(tungstenite::Error::Io(error)) => {
+                break Err(clean_cdp_navigation_io_error(
+                    &error, started_at, timeout, false,
+                ));
+            }
+            Err(_) => break Err("CDP 导航失败".to_string()),
+        };
+        let tungstenite::Message::Text(text) = message else {
+            continue;
+        };
+        let payload: serde_json::Value = match serde_json::from_str(text.as_str()) {
+            Ok(payload) => payload,
+            Err(_) => break Err("CDP 导航失败".to_string()),
+        };
+        if payload.get("id").and_then(serde_json::Value::as_u64) != Some(1) {
+            continue;
+        }
+        if payload.get("error").is_some() {
+            break Err("CDP 导航失败".to_string());
+        }
+        if let Some(result) = payload.get("result") {
+            if result
+                .get("errorText")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| !value.is_empty())
+            {
+                break Err("CDP 导航失败".to_string());
+            }
+            break Ok(());
+        }
+        break Err("CDP 导航失败".to_string());
+    };
+
+    best_effort_close_cdp_websocket(&mut socket, started_at, timeout);
+    result
+}
+
+fn best_effort_close_cdp_websocket(
+    socket: &mut tungstenite::WebSocket<TcpStream>,
+    started_at: Instant,
+    timeout: Duration,
+) {
+    if remaining_cdp_navigation_timeout(started_at, timeout).is_ok() {
+        let _ = socket.close(None);
+        let _ = socket.flush();
+    }
+}
+
+fn write_cdp_page_navigate_command(
+    socket: &mut tungstenite::WebSocket<TcpStream>,
+    url: &str,
+    started_at: Instant,
+    timeout: Duration,
+) -> Result<(), String> {
+    remaining_cdp_navigation_timeout(started_at, timeout)?;
+    let message = tungstenite::Message::Text(
+        serde_json::json!({
+            "id": 1,
+            "method": "Page.navigate",
+            "params": {
+                "url": url
+            }
+        })
+        .to_string()
+        .into(),
+    );
+    match socket.write(message) {
+        Ok(()) => {}
+        Err(error) if is_cdp_would_block(&error) => {}
+        Err(_) => return Err("CDP 导航失败".to_string()),
+    }
+
+    loop {
+        remaining_cdp_navigation_timeout(started_at, timeout)?;
+        match socket.flush() {
+            Ok(()) => return Ok(()),
+            Err(error) if is_cdp_would_block(&error) => {
+                wait_for_cdp_io_retry(started_at, timeout)?;
+            }
+            Err(_) => return Err("CDP 导航失败".to_string()),
+        }
+    }
+}
+
+fn complete_cdp_websocket_handshake(
+    web_socket_url: &str,
+    stream: TcpStream,
+    started_at: Instant,
+    timeout: Duration,
+) -> Result<tungstenite::WebSocket<TcpStream>, String> {
+    let mut handshake = match tungstenite::client(web_socket_url, stream) {
+        Ok((socket, _)) => {
+            remaining_cdp_navigation_timeout(started_at, timeout)?;
+            return Ok(socket);
+        }
+        Err(tungstenite::HandshakeError::Interrupted(handshake)) => handshake,
+        Err(tungstenite::HandshakeError::Failure(error)) => {
+            return Err(clean_cdp_handshake_error(error, started_at, timeout));
+        }
+    };
+
+    loop {
+        let remaining = remaining_cdp_navigation_timeout(started_at, timeout)?;
+        std::thread::sleep(remaining.min(Duration::from_millis(1)));
+        match handshake.handshake() {
+            Ok((socket, _)) => {
+                remaining_cdp_navigation_timeout(started_at, timeout)?;
+                return Ok(socket);
+            }
+            Err(tungstenite::HandshakeError::Interrupted(next_handshake)) => {
+                handshake = next_handshake;
+            }
+            Err(tungstenite::HandshakeError::Failure(error)) => {
+                return Err(clean_cdp_handshake_error(error, started_at, timeout));
+            }
+        }
+    }
+}
+
+fn wait_for_cdp_io_retry(started_at: Instant, timeout: Duration) -> Result<(), String> {
+    let remaining = remaining_cdp_navigation_timeout(started_at, timeout)?;
+    std::thread::sleep(remaining.min(Duration::from_millis(1)));
+    Ok(())
+}
+
+fn is_cdp_would_block(error: &tungstenite::Error) -> bool {
+    matches!(
+        error,
+        tungstenite::Error::Io(io_error)
+            if io_error.kind() == std::io::ErrorKind::WouldBlock
+    )
+}
+
+fn clean_cdp_handshake_error(
+    error: tungstenite::Error,
+    started_at: Instant,
+    timeout: Duration,
+) -> String {
+    if started_at.elapsed() >= timeout
+        || matches!(
+            error,
+            tungstenite::Error::Io(ref io_error)
+                if matches!(
+                    io_error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                )
+        )
+    {
+        "CDP 导航超时".to_string()
+    } else {
+        "CDP 连接失败".to_string()
+    }
+}
+
+fn remaining_cdp_navigation_timeout(
+    started_at: Instant,
+    timeout: Duration,
+) -> Result<Duration, String> {
+    timeout
+        .checked_sub(started_at.elapsed())
+        .filter(|duration| !duration.is_zero())
+        .ok_or_else(|| "CDP 导航超时".to_string())
+}
+
+fn clean_cdp_navigation_io_error(
+    error: &std::io::Error,
+    started_at: Instant,
+    timeout: Duration,
+    connecting: bool,
+) -> String {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+    ) || started_at.elapsed() >= timeout
+    {
+        return "CDP 导航超时".to_string();
+    }
+    if connecting {
+        "CDP 连接失败".to_string()
+    } else {
+        "CDP 导航失败".to_string()
+    }
+}
+
 fn tab_snapshot_from_cdp_target(target: CdpTargetRaw, checked_at: u64) -> Option<TabSnapshot> {
     if target.r#type.as_deref() != Some("page") {
         return None;
@@ -1457,7 +1805,10 @@ fn read_cdp_list_response_body(
     let mut buffer = [0_u8; 4096];
     let header_end = loop {
         stream
-            .set_read_timeout(Some(remaining_cdp_timeout(started_at, CDP_LIST_TIMEOUT_MS)?))
+            .set_read_timeout(Some(remaining_cdp_timeout(
+                started_at,
+                CDP_LIST_TIMEOUT_MS,
+            )?))
             .map_err(|_| "CDP 连接失败".to_string())?;
         let bytes_read = stream
             .read(&mut buffer)
@@ -1488,7 +1839,10 @@ fn read_cdp_list_response_body(
     if let Some(content_length) = content_length {
         while body.len() < content_length {
             stream
-                .set_read_timeout(Some(remaining_cdp_timeout(started_at, CDP_LIST_TIMEOUT_MS)?))
+                .set_read_timeout(Some(remaining_cdp_timeout(
+                    started_at,
+                    CDP_LIST_TIMEOUT_MS,
+                )?))
                 .map_err(|_| "CDP 连接失败".to_string())?;
             let bytes_read = stream
                 .read(&mut buffer)
@@ -1510,7 +1864,10 @@ fn read_cdp_list_response_body(
             return Err("CDP 连接失败".to_string());
         }
         stream
-            .set_read_timeout(Some(remaining_cdp_timeout(started_at, CDP_LIST_TIMEOUT_MS)?))
+            .set_read_timeout(Some(remaining_cdp_timeout(
+                started_at,
+                CDP_LIST_TIMEOUT_MS,
+            )?))
             .map_err(|_| "CDP 连接失败".to_string())?;
         let bytes_read = match stream.read(&mut buffer) {
             Ok(bytes_read) => bytes_read,
@@ -1524,9 +1881,7 @@ fn read_cdp_list_response_body(
 }
 
 fn find_header_end(response: &[u8]) -> Option<usize> {
-    response
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
+    response.windows(4).position(|window| window == b"\r\n\r\n")
 }
 
 fn is_http_ok(headers: &str) -> bool {
@@ -1538,10 +1893,10 @@ fn is_http_ok(headers: &str) -> bool {
 }
 
 fn uses_chunked_transfer(headers: &str) -> bool {
-    headers
-        .lines()
-        .any(|line| line.to_ascii_lowercase().starts_with("transfer-encoding:")
-            && line.to_ascii_lowercase().contains("chunked"))
+    headers.lines().any(|line| {
+        line.to_ascii_lowercase().starts_with("transfer-encoding:")
+            && line.to_ascii_lowercase().contains("chunked")
+    })
 }
 
 fn cdp_content_length(headers: &str) -> Result<Option<usize>, String> {
@@ -1642,10 +1997,65 @@ fn reveal_path(path: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::path::Path;
     use std::thread;
+
+    struct SlowHandshakeStream {
+        inner: TcpStream,
+        chunk_size: usize,
+        delay: Duration,
+    }
+
+    struct SlowWebSocketResponseStream {
+        inner: TcpStream,
+        handshake_written: bool,
+        chunk_size: usize,
+        delay: Duration,
+    }
+
+    impl Read for SlowHandshakeStream {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.inner.read(buffer)
+        }
+    }
+
+    impl Write for SlowHandshakeStream {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            thread::sleep(self.delay);
+            self.inner
+                .write(&buffer[..buffer.len().min(self.chunk_size)])
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.inner.flush()
+        }
+    }
+
+    impl Read for SlowWebSocketResponseStream {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.inner.read(buffer)
+        }
+    }
+
+    impl Write for SlowWebSocketResponseStream {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            if !self.handshake_written {
+                self.inner.write_all(buffer)?;
+                self.handshake_written = true;
+                return Ok(buffer.len());
+            }
+
+            thread::sleep(self.delay);
+            self.inner
+                .write(&buffer[..buffer.len().min(self.chunk_size)])
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.inner.flush()
+        }
+    }
 
     #[test]
     fn chrome_launch_args_pass_profile_dir_as_switch_value() {
@@ -2235,14 +2645,10 @@ mod tests {
             "  1201 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/Users/a0000/MultiChromeProfiles/profiles/account-001 --no-first-run",
         ];
 
-        let error =
-            runtime_tabs_from_processes(root, "account-001", lines, |_| Ok(vec![]), 1000)
-                .unwrap_err();
+        let error = runtime_tabs_from_processes(root, "account-001", lines, |_| Ok(vec![]), 1000)
+            .unwrap_err();
 
-        assert_eq!(
-            error,
-            "该账号需要关闭后重新打开以启用 Browser Runtime"
-        );
+        assert_eq!(error, "该账号需要关闭后重新打开以启用 Browser Runtime");
     }
 
     #[test]
@@ -2262,6 +2668,539 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error, "Browser Runtime 不可用");
+    }
+
+    #[test]
+    fn validate_runtime_navigation_url_allows_only_http_and_https() {
+        assert_eq!(
+            validate_runtime_navigation_url("https://example.com/path").unwrap(),
+            "https://example.com/path"
+        );
+        assert_eq!(
+            validate_runtime_navigation_url("http://localhost:3000").unwrap(),
+            "http://localhost:3000"
+        );
+
+        for value in [
+            "",
+            "   ",
+            "example.com",
+            "ftp://example.com",
+            "file:///tmp/test.html",
+            "javascript:alert(1)",
+        ] {
+            assert_eq!(
+                validate_runtime_navigation_url(value).unwrap_err(),
+                "请输入有效的 http:// 或 https:// URL"
+            );
+        }
+    }
+
+    #[test]
+    fn navigate_runtime_tab_from_processes_reports_missing_debug_port() {
+        let root = Path::new("/Users/a0000/MultiChromeProfiles");
+        let lines = [
+            "  1201 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/Users/a0000/MultiChromeProfiles/profiles/account-001 --no-first-run",
+        ];
+
+        let error = navigate_runtime_tab_from_processes(
+            root,
+            "account-001",
+            "https://example.com",
+            lines,
+            |_| Ok(vec![]),
+            |_, _| Ok(()),
+            1000,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "该账号需要关闭后重新打开以启用 Browser Runtime");
+    }
+
+    #[test]
+    fn navigate_runtime_tab_from_processes_reports_stopped_profile() {
+        let error = navigate_runtime_tab_from_processes(
+            Path::new("/Users/a0000/MultiChromeProfiles"),
+            "account-001",
+            "https://example.com",
+            std::iter::empty::<&str>(),
+            |_| Ok(vec![]),
+            |_, _| Ok(()),
+            1000,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "该账号未运行");
+    }
+
+    #[test]
+    fn navigate_runtime_tab_from_processes_rejects_invalid_url_before_cdp() {
+        let root = Path::new("/Users/a0000/MultiChromeProfiles");
+        let lines = [
+            "  1201 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/Users/a0000/MultiChromeProfiles/profiles/account-001 --remote-debugging-port=19222 --remote-debugging-address=127.0.0.1 --no-first-run",
+        ];
+        let mut fetch_count = 0;
+
+        let error = navigate_runtime_tab_from_processes(
+            root,
+            "account-001",
+            "chrome://settings",
+            lines,
+            |_| {
+                fetch_count += 1;
+                Ok(vec![])
+            },
+            |_, _| Ok(()),
+            1000,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "请输入有效的 http:// 或 https:// URL");
+        assert_eq!(fetch_count, 0);
+    }
+
+    #[test]
+    fn navigate_runtime_tab_from_processes_reports_missing_page_tab() {
+        let root = Path::new("/Users/a0000/MultiChromeProfiles");
+        let lines = [
+            "  1201 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/Users/a0000/MultiChromeProfiles/profiles/account-001 --remote-debugging-port=19222 --remote-debugging-address=127.0.0.1 --no-first-run",
+        ];
+
+        let error = navigate_runtime_tab_from_processes(
+            root,
+            "account-001",
+            "https://example.com",
+            lines,
+            |_| {
+                Ok(vec![CdpTargetRaw {
+                    id: Some("worker-1".to_string()),
+                    r#type: Some("service_worker".to_string()),
+                    url: Some("chrome-extension://worker".to_string()),
+                    title: Some("Worker".to_string()),
+                    web_socket_debugger_url: None,
+                }])
+            },
+            |_, _| Ok(()),
+            1000,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "未找到可导航的 page 标签页");
+    }
+
+    #[test]
+    fn navigate_runtime_tab_from_processes_skips_page_tabs_without_websocket() {
+        let root = Path::new("/Users/a0000/MultiChromeProfiles");
+        let lines = [
+            "  1201 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/Users/a0000/MultiChromeProfiles/profiles/account-001 --remote-debugging-port=19222 --remote-debugging-address=127.0.0.1 --no-first-run",
+        ];
+        let mut navigated = None;
+
+        let result = navigate_runtime_tab_from_processes(
+            root,
+            "account-001",
+            "https://example.com",
+            lines,
+            |_| {
+                Ok(vec![
+                    CdpTargetRaw {
+                        id: Some("page-1".to_string()),
+                        r#type: Some("page".to_string()),
+                        url: Some("chrome://newtab/".to_string()),
+                        title: Some("New Tab".to_string()),
+                        web_socket_debugger_url: None,
+                    },
+                    CdpTargetRaw {
+                        id: Some("page-2".to_string()),
+                        r#type: Some("page".to_string()),
+                        url: Some("https://example.org".to_string()),
+                        title: Some("Example".to_string()),
+                        web_socket_debugger_url: Some(
+                            "ws://127.0.0.1:19222/devtools/page/page-2".to_string(),
+                        ),
+                    },
+                ])
+            },
+            |web_socket_url, url| {
+                navigated = Some((web_socket_url.to_string(), url.to_string()));
+                Ok(())
+            },
+            1000,
+        )
+        .unwrap();
+
+        assert_eq!(result.target_id, "page-2");
+        assert_eq!(
+            navigated,
+            Some((
+                "ws://127.0.0.1:19222/devtools/page/page-2".to_string(),
+                "https://example.com".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn navigate_runtime_tab_from_processes_reports_when_all_page_tabs_lack_websocket() {
+        let root = Path::new("/Users/a0000/MultiChromeProfiles");
+        let lines = [
+            "  1201 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/Users/a0000/MultiChromeProfiles/profiles/account-001 --remote-debugging-port=19222 --remote-debugging-address=127.0.0.1 --no-first-run",
+        ];
+
+        let error = navigate_runtime_tab_from_processes(
+            root,
+            "account-001",
+            "https://example.com",
+            lines,
+            |_| {
+                Ok(vec![
+                    CdpTargetRaw {
+                        id: Some("page-1".to_string()),
+                        r#type: Some("page".to_string()),
+                        url: Some("chrome://newtab/".to_string()),
+                        title: Some("New Tab".to_string()),
+                        web_socket_debugger_url: None,
+                    },
+                    CdpTargetRaw {
+                        id: Some("page-2".to_string()),
+                        r#type: Some("page".to_string()),
+                        url: Some("https://example.org".to_string()),
+                        title: Some("Example".to_string()),
+                        web_socket_debugger_url: Some("   ".to_string()),
+                    },
+                ])
+            },
+            |_, _| Ok(()),
+            1000,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "找到 page 标签页，但都缺少 WebSocket 调试地址");
+    }
+
+    #[test]
+    fn navigate_runtime_tab_from_processes_navigates_first_page_tab() {
+        let root = Path::new("/Users/a0000/MultiChromeProfiles");
+        let lines = [
+            "  1201 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/Users/a0000/MultiChromeProfiles/profiles/account-001 --remote-debugging-port=19222 --remote-debugging-address=127.0.0.1 --no-first-run",
+        ];
+        let mut navigated = None;
+
+        let result = navigate_runtime_tab_from_processes(
+            root,
+            "account-001",
+            "https://example.com/dashboard",
+            lines,
+            |port| {
+                assert_eq!(port, 19222);
+                Ok(vec![CdpTargetRaw {
+                    id: Some("page-1".to_string()),
+                    r#type: Some("page".to_string()),
+                    url: Some("chrome://newtab/".to_string()),
+                    title: Some("New Tab".to_string()),
+                    web_socket_debugger_url: Some(
+                        "ws://127.0.0.1:19222/devtools/page/page-1".to_string(),
+                    ),
+                }])
+            },
+            |web_socket_url, url| {
+                navigated = Some((web_socket_url.to_string(), url.to_string()));
+                Ok(())
+            },
+            1000,
+        )
+        .unwrap();
+
+        assert_eq!(
+            navigated,
+            Some((
+                "ws://127.0.0.1:19222/devtools/page/page-1".to_string(),
+                "https://example.com/dashboard".to_string()
+            ))
+        );
+        assert_eq!(
+            result,
+            RuntimeTabNavigationResult {
+                profile_id: "account-001".to_string(),
+                target_id: "page-1".to_string(),
+                url: "https://example.com/dashboard".to_string(),
+                navigated_at: 1000,
+            }
+        );
+    }
+
+    #[test]
+    fn navigate_runtime_tab_from_processes_does_not_leak_websocket_url() {
+        let root = Path::new("/Users/a0000/MultiChromeProfiles");
+        let lines = [
+            "  1201 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/Users/a0000/MultiChromeProfiles/profiles/account-001 --remote-debugging-port=19222 --remote-debugging-address=127.0.0.1 --no-first-run",
+        ];
+        let secret_web_socket_url =
+            "ws://127.0.0.1:19222/devtools/page/secret-page-target".to_string();
+
+        let error = navigate_runtime_tab_from_processes(
+            root,
+            "account-001",
+            "https://example.com",
+            lines,
+            |_| {
+                Ok(vec![CdpTargetRaw {
+                    id: Some("page-1".to_string()),
+                    r#type: Some("page".to_string()),
+                    url: Some("chrome://newtab/".to_string()),
+                    title: Some("New Tab".to_string()),
+                    web_socket_debugger_url: Some(secret_web_socket_url.clone()),
+                }])
+            },
+            |web_socket_url, _| Err(format!("连接 {web_socket_url} 失败")),
+            1000,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "CDP 导航失败");
+        assert!(!error.contains("ws://"));
+        assert!(!error.contains("secret-page-target"));
+    }
+
+    #[test]
+    fn runtime_tab_navigation_result_serializes_as_camel_case() {
+        let value = serde_json::to_value(RuntimeTabNavigationResult {
+            profile_id: "account-001".to_string(),
+            target_id: "page-1".to_string(),
+            url: "https://example.com".to_string(),
+            navigated_at: 1000,
+        })
+        .unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "profileId": "account-001",
+                "targetId": "page-1",
+                "url": "https://example.com",
+                "navigatedAt": 1000
+            })
+        );
+    }
+
+    #[test]
+    fn send_cdp_page_navigate_sends_command_and_accepts_success_response() {
+        let listener = TcpListener::bind((CDP_BIND_ADDRESS, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            let request = socket.read().unwrap();
+            let payload: serde_json::Value =
+                serde_json::from_str(request.to_text().unwrap()).unwrap();
+            assert_eq!(
+                payload,
+                serde_json::json!({
+                    "id": 1,
+                    "method": "Page.navigate",
+                    "params": {
+                        "url": "https://example.com/dashboard"
+                    }
+                })
+            );
+            socket
+                .send(tungstenite::Message::Text(
+                    serde_json::json!({
+                        "id": 1,
+                        "result": {
+                            "frameId": "frame-1"
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .unwrap();
+            assert!(matches!(
+                socket.read(),
+                Err(tungstenite::Error::ConnectionClosed)
+                    | Err(tungstenite::Error::Protocol(_))
+                    | Ok(tungstenite::Message::Close(_))
+            ));
+        });
+
+        send_cdp_page_navigate_with_timeout(
+            &format!("ws://127.0.0.1:{port}/devtools/page/page-1"),
+            "https://example.com/dashboard",
+            Duration::from_millis(500),
+        )
+        .unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn send_cdp_page_navigate_reports_clean_protocol_error() {
+        let listener = TcpListener::bind((CDP_BIND_ADDRESS, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            let _ = socket.read().unwrap();
+            socket
+                .send(tungstenite::Message::Text(
+                    serde_json::json!({
+                        "id": 1,
+                        "error": {
+                            "code": -32000,
+                            "message": "Cannot navigate target ws://127.0.0.1/secret"
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .unwrap();
+        });
+        let web_socket_url = format!("ws://127.0.0.1:{port}/devtools/page/secret-target");
+
+        let error = send_cdp_page_navigate_with_timeout(
+            &web_socket_url,
+            "https://example.com",
+            Duration::from_millis(500),
+        )
+        .unwrap_err();
+        handle.join().unwrap();
+
+        assert_eq!(error, "CDP 导航失败");
+        assert!(!error.contains("ws://"));
+        assert!(!error.contains("secret-target"));
+    }
+
+    #[test]
+    fn send_cdp_page_navigate_reports_navigation_error_text() {
+        let listener = TcpListener::bind((CDP_BIND_ADDRESS, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            let _ = socket.read().unwrap();
+            socket
+                .send(tungstenite::Message::Text(
+                    serde_json::json!({
+                        "id": 1,
+                        "result": {
+                            "frameId": "frame-1",
+                            "errorText": "net::ERR_NAME_NOT_RESOLVED"
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .unwrap();
+        });
+
+        let error = send_cdp_page_navigate_with_timeout(
+            &format!("ws://127.0.0.1:{port}/devtools/page/page-1"),
+            "https://does-not-resolve.invalid",
+            Duration::from_millis(500),
+        )
+        .unwrap_err();
+        handle.join().unwrap();
+
+        assert_eq!(error, "CDP 导航失败");
+    }
+
+    #[test]
+    fn send_cdp_page_navigate_times_out_waiting_for_response() {
+        let listener = TcpListener::bind((CDP_BIND_ADDRESS, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            let _ = socket.read().unwrap();
+            thread::sleep(Duration::from_millis(100));
+        });
+
+        let error = send_cdp_page_navigate_with_timeout(
+            &format!("ws://127.0.0.1:{port}/devtools/page/page-1"),
+            "https://example.com",
+            Duration::from_millis(25),
+        )
+        .unwrap_err();
+        handle.join().unwrap();
+
+        assert_eq!(error, "CDP 导航超时");
+    }
+
+    #[test]
+    fn send_cdp_page_navigate_enforces_total_timeout_during_slow_handshake() {
+        let listener = TcpListener::bind((CDP_BIND_ADDRESS, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let slow_stream = SlowHandshakeStream {
+                inner: stream,
+                chunk_size: 16,
+                delay: Duration::from_millis(15),
+            };
+            if let Ok(mut socket) = tungstenite::accept(slow_stream) {
+                let _ = socket.read();
+            }
+        });
+        let timeout = Duration::from_millis(30);
+        let started_at = Instant::now();
+
+        let error = send_cdp_page_navigate_with_timeout(
+            &format!("ws://127.0.0.1:{port}/devtools/page/page-1"),
+            "https://example.com",
+            timeout,
+        )
+        .unwrap_err();
+        let elapsed = started_at.elapsed();
+        handle.join().unwrap();
+
+        assert_eq!(error, "CDP 导航超时");
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "慢握手超过总 timeout 后才返回：{elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn send_cdp_page_navigate_enforces_total_timeout_during_slow_response() {
+        let listener = TcpListener::bind((CDP_BIND_ADDRESS, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let slow_stream = SlowWebSocketResponseStream {
+                inner: stream,
+                handshake_written: false,
+                chunk_size: 4,
+                delay: Duration::from_millis(10),
+            };
+            if let Ok(mut socket) = tungstenite::accept(slow_stream) {
+                let _ = socket.read();
+                let _ = socket.send(tungstenite::Message::Text(
+                    serde_json::json!({
+                        "id": 1,
+                        "result": {
+                            "frameId": "frame-1"
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ));
+            }
+        });
+        let timeout = Duration::from_millis(30);
+        let started_at = Instant::now();
+
+        let error = send_cdp_page_navigate_with_timeout(
+            &format!("ws://127.0.0.1:{port}/devtools/page/page-1"),
+            "https://example.com",
+            timeout,
+        )
+        .unwrap_err();
+        let elapsed = started_at.elapsed();
+        handle.join().unwrap();
+
+        assert_eq!(error, "CDP 导航超时");
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "慢响应超过总 timeout 后才返回：{elapsed:?}"
+        );
     }
 
     #[test]
@@ -2422,8 +3361,7 @@ mod tests {
     #[test]
     fn fetch_cdp_tabs_rejects_invalid_content_length() {
         let (port, handle) = serve_cdp_response(
-            "HTTP/1.1 200 OK\r\nContent-Length: nope\r\nConnection: close\r\n\r\n[]"
-                .to_string(),
+            "HTTP/1.1 200 OK\r\nContent-Length: nope\r\nConnection: close\r\n\r\n[]".to_string(),
         );
 
         let error = fetch_cdp_tabs(port).unwrap_err();
