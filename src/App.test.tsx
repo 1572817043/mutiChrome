@@ -4865,6 +4865,274 @@ describe("App launcher layout", () => {
     listTabsSpy.mockRestore();
   });
 
+  test("开发诊断可以导航单选账号的第一个 page 标签页并刷新列表", async () => {
+    const user = userEvent.setup();
+    const snapshotSpy = vi
+      .spyOn(profileApi, "snapshotBrowserSessions")
+      .mockResolvedValue([
+        browserSessionSnapshot("account-001", true),
+        browserSessionSnapshot("account-002", false)
+      ]);
+    const navigateSpy = vi.spyOn(profileApi, "navigateRuntimeTab").mockResolvedValue({
+      profileId: "account-001",
+      targetId: "page-1",
+      url: "https://example.com/dashboard",
+      navigatedAt: 1000
+    });
+    const listTabsSpy = vi.spyOn(profileApi, "listRuntimeTabs").mockResolvedValue([
+      {
+        targetId: "page-1",
+        type: "page",
+        url: "https://example.com/dashboard",
+        title: "Dashboard",
+        webSocketDebuggerUrl: null,
+        checkedAt: 1001
+      }
+    ]);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    const dialog = await screen.findByRole("dialog", { name: "设置" });
+    await expandDevDiagnostics(user, dialog);
+    await user.type(
+      within(dialog).getByLabelText("导航 URL"),
+      "https://example.com/dashboard"
+    );
+    await user.click(within(dialog).getByRole("button", { name: "导航标签页" }));
+
+    expect(navigateSpy).toHaveBeenCalledWith(
+      "~/MultiChromeProfiles",
+      "account-001",
+      "https://example.com/dashboard"
+    );
+    expect(
+      await within(dialog).findByText(
+        "已导航第一个 page 标签页：https://example.com/dashboard"
+      )
+    ).toBeTruthy();
+    expect(listTabsSpy).toHaveBeenCalledWith("~/MultiChromeProfiles", "account-001");
+    expect(within(dialog).getByText("Dashboard")).toBeTruthy();
+    expect(within(dialog).getAllByText("https://example.com/dashboard").length).toBeGreaterThan(0);
+    snapshotSpy.mockRestore();
+    navigateSpy.mockRestore();
+    listTabsSpy.mockRestore();
+  });
+
+  test("开发诊断导航失败时展示错误且不刷新标签页", async () => {
+    const user = userEvent.setup();
+    const navigateSpy = vi
+      .spyOn(profileApi, "navigateRuntimeTab")
+      .mockRejectedValue(new Error("CDP 导航失败"));
+    const listTabsSpy = vi.spyOn(profileApi, "listRuntimeTabs").mockResolvedValue([]);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    const dialog = await screen.findByRole("dialog", { name: "设置" });
+    await expandDevDiagnostics(user, dialog);
+    await user.type(within(dialog).getByLabelText("导航 URL"), "https://example.com");
+    await user.click(within(dialog).getByRole("button", { name: "导航标签页" }));
+
+    expect(await within(dialog).findByText("CDP 导航失败")).toBeTruthy();
+    expect(listTabsSpy).not.toHaveBeenCalled();
+    navigateSpy.mockRestore();
+    listTabsSpy.mockRestore();
+  });
+
+  test("开发诊断导航成功但刷新标签页失败时展示组合错误", async () => {
+    const user = userEvent.setup();
+    const navigateSpy = vi.spyOn(profileApi, "navigateRuntimeTab").mockResolvedValue({
+      profileId: "account-001",
+      targetId: "page-1",
+      url: "https://example.com",
+      navigatedAt: 1000
+    });
+    const listTabsSpy = vi
+      .spyOn(profileApi, "listRuntimeTabs")
+      .mockRejectedValue(new Error("Browser Runtime 不可用"));
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    const dialog = await screen.findByRole("dialog", { name: "设置" });
+    await expandDevDiagnostics(user, dialog);
+    await user.type(within(dialog).getByLabelText("导航 URL"), "https://example.com");
+    await user.click(within(dialog).getByRole("button", { name: "导航标签页" }));
+
+    expect(
+      await within(dialog).findByText(
+        "导航成功，但刷新标签页失败：Browser Runtime 不可用"
+      )
+    ).toBeTruthy();
+    expect(
+      within(dialog).getByText("已导航第一个 page 标签页：https://example.com")
+    ).toBeTruthy();
+    navigateSpy.mockRestore();
+    listTabsSpy.mockRestore();
+  });
+
+  test("开发诊断会忽略 rootPath 变化后返回的旧导航请求", async () => {
+    const user = userEvent.setup();
+    let resolveNavigation: (
+      result: Awaited<ReturnType<typeof profileApi.navigateRuntimeTab>>
+    ) => void = () => {};
+    const navigationPromise = new Promise<
+      Awaited<ReturnType<typeof profileApi.navigateRuntimeTab>>
+    >((resolve) => {
+      resolveNavigation = resolve;
+    });
+    const navigateSpy = vi
+      .spyOn(profileApi, "navigateRuntimeTab")
+      .mockReturnValue(navigationPromise);
+    const listTabsSpy = vi.spyOn(profileApi, "listRuntimeTabs").mockResolvedValue([]);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    const dialog = await screen.findByRole("dialog", { name: "设置" });
+    await expandDevDiagnostics(user, dialog);
+    await user.type(within(dialog).getByLabelText("导航 URL"), "https://old.example");
+    await user.click(within(dialog).getByRole("button", { name: "导航标签页" }));
+    await waitFor(() =>
+      expect(navigateSpy).toHaveBeenCalledWith(
+        "~/MultiChromeProfiles",
+        "account-001",
+        "https://old.example"
+      )
+    );
+
+    fireEvent.change(within(dialog).getByLabelText("配置根目录"), {
+      target: { value: "/tmp/other-root" }
+    });
+    await waitFor(() =>
+      expect((within(dialog).getByLabelText("配置根目录") as HTMLInputElement).value).toBe(
+        "/tmp/other-root"
+      )
+    );
+
+    resolveNavigation({
+      profileId: "account-001",
+      targetId: "old-page",
+      url: "https://old.example",
+      navigatedAt: 1000
+    });
+    await flushPromises();
+
+    const navigateUrl = (within(dialog).getByLabelText("导航 URL") as HTMLInputElement)
+      .value;
+    const oldSuccess = within(dialog).queryByText(
+      "已导航第一个 page 标签页：https://old.example"
+    );
+    const listTabsCallCount = listTabsSpy.mock.calls.length;
+    navigateSpy.mockRestore();
+    listTabsSpy.mockRestore();
+
+    expect(navigateUrl).toBe("");
+    expect(oldSuccess).toBeNull();
+    expect(listTabsCallCount).toBe(0);
+  });
+
+  test("开发诊断会忽略关闭设置后返回的旧导航请求", async () => {
+    const user = userEvent.setup();
+    let resolveNavigation: (
+      result: Awaited<ReturnType<typeof profileApi.navigateRuntimeTab>>
+    ) => void = () => {};
+    const navigationPromise = new Promise<
+      Awaited<ReturnType<typeof profileApi.navigateRuntimeTab>>
+    >((resolve) => {
+      resolveNavigation = resolve;
+    });
+    const navigateSpy = vi
+      .spyOn(profileApi, "navigateRuntimeTab")
+      .mockReturnValue(navigationPromise);
+    const listTabsSpy = vi.spyOn(profileApi, "listRuntimeTabs").mockResolvedValue([]);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    const firstDialog = await screen.findByRole("dialog", { name: "设置" });
+    await expandDevDiagnostics(user, firstDialog);
+    await user.type(within(firstDialog).getByLabelText("导航 URL"), "https://old.example");
+    await user.click(within(firstDialog).getByRole("button", { name: "导航标签页" }));
+    await waitFor(() => expect(navigateSpy).toHaveBeenCalledTimes(1));
+
+    await user.click(within(firstDialog).getByRole("button", { name: "关闭设置" }));
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    const secondDialog = await screen.findByRole("dialog", { name: "设置" });
+    await expandDevDiagnostics(user, secondDialog);
+
+    resolveNavigation({
+      profileId: "account-001",
+      targetId: "old-page",
+      url: "https://old.example",
+      navigatedAt: 1000
+    });
+    await flushPromises();
+
+    expect(
+      within(secondDialog).queryByText("已导航第一个 page 标签页：https://old.example")
+    ).toBeNull();
+    expect(listTabsSpy).not.toHaveBeenCalled();
+    navigateSpy.mockRestore();
+    listTabsSpy.mockRestore();
+  });
+
+  test("开发诊断会忽略 Settings 打开期间切换账号后返回的旧导航请求", async () => {
+    const user = userEvent.setup();
+    let resolveNavigation: (
+      result: Awaited<ReturnType<typeof profileApi.navigateRuntimeTab>>
+    ) => void = () => {};
+    const navigationPromise = new Promise<
+      Awaited<ReturnType<typeof profileApi.navigateRuntimeTab>>
+    >((resolve) => {
+      resolveNavigation = resolve;
+    });
+    const navigateSpy = vi
+      .spyOn(profileApi, "navigateRuntimeTab")
+      .mockReturnValue(navigationPromise);
+    const listTabsSpy = vi.spyOn(profileApi, "listRuntimeTabs").mockResolvedValue([]);
+    render(<App />);
+
+    const firstCard = await screen.findByRole("button", { name: "选择 主号" });
+    const secondCard = await screen.findByRole("button", { name: "选择 抽奖号" });
+    await user.click(firstCard);
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    const dialog = await screen.findByRole("dialog", { name: "设置" });
+    await expandDevDiagnostics(user, dialog);
+    await user.type(within(dialog).getByLabelText("导航 URL"), "https://old.example");
+    await user.click(within(dialog).getByRole("button", { name: "导航标签页" }));
+    await waitFor(() =>
+      expect(navigateSpy).toHaveBeenCalledWith(
+        "~/MultiChromeProfiles",
+        "account-001",
+        "https://old.example"
+      )
+    );
+
+    await user.click(firstCard);
+    await user.click(secondCard);
+    await waitFor(() => expect(within(dialog).getByText("抽奖号")).toBeTruthy());
+    expect((within(dialog).getByLabelText("导航 URL") as HTMLInputElement).value).toBe("");
+
+    resolveNavigation({
+      profileId: "account-001",
+      targetId: "old-page",
+      url: "https://old.example",
+      navigatedAt: 1000
+    });
+    await flushPromises();
+
+    expect(within(dialog).getByText("抽奖号")).toBeTruthy();
+    expect(
+      within(dialog).queryByText("已导航第一个 page 标签页：https://old.example")
+    ).toBeNull();
+    expect(within(dialog).queryByText("https://old.example")).toBeNull();
+    expect(listTabsSpy).not.toHaveBeenCalled();
+    navigateSpy.mockRestore();
+    listTabsSpy.mockRestore();
+  });
+
   test("开发诊断会忽略关闭后返回的旧 Runtime 标签页请求", async () => {
     const user = userEvent.setup();
     let resolveTabs: (tabs: Awaited<ReturnType<typeof profileApi.listRuntimeTabs>>) => void =

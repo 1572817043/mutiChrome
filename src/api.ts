@@ -80,6 +80,13 @@ export interface BrowserRuntimeTabSnapshot {
   checkedAt: number;
 }
 
+export interface BrowserRuntimeNavigationResult {
+  profileId: string;
+  targetId: string;
+  url: string;
+  navigatedAt: number;
+}
+
 const ROOT_KEY = "multichrome.rootPath";
 const DOCUMENT_KEY = "multichrome.profileDocument";
 const BACKUP_PREFIX = "multichrome.profileBackup.";
@@ -437,6 +444,22 @@ export const profileApi = {
     }
 
     return [];
+  },
+
+  async navigateRuntimeTab(
+    rootPath: string,
+    profileId: string,
+    url: string
+  ): Promise<BrowserRuntimeNavigationResult> {
+    if (isTauriRuntime()) {
+      return invoke<BrowserRuntimeNavigationResult>("navigate_runtime_tab", {
+        rootPath,
+        profileId,
+        url
+      });
+    }
+
+    throw new Error("Browser Runtime 仅在桌面应用中可用");
   },
 
   async focusProfileWindow(rootPath: string, profileId: string): Promise<void> {

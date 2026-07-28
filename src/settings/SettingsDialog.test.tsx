@@ -30,7 +30,13 @@ const runtimeDiagnostics = {
   status: "idle" as const,
   tabs: [],
   error: null,
-  onReadTabs: vi.fn()
+  onReadTabs: vi.fn(),
+  navigateUrl: "",
+  navigateStatus: "idle" as const,
+  navigateResult: null,
+  navigateError: null,
+  onNavigateUrlChange: vi.fn(),
+  onNavigate: vi.fn()
 };
 
 const healthReport: RootHealthReport = {
@@ -264,6 +270,11 @@ describe("设置弹窗", () => {
     expect(
       (screen.getByRole("button", { name: "读取标签页" }) as HTMLButtonElement).disabled
     ).toBe(false);
+    expect(screen.getByLabelText("导航 URL")).toBeTruthy();
+    expect(
+      (screen.getByRole("button", { name: "导航标签页" }) as HTMLButtonElement).disabled
+    ).toBe(true);
+    expect(screen.getByText("将导航该账号的第一个 page 标签页。")).toBeTruthy();
   });
 
   test("没有选中或多选账号时禁用读取并显示短提示", () => {
@@ -284,6 +295,9 @@ describe("设置弹窗", () => {
     expect(
       (screen.getByRole("button", { name: "读取标签页" }) as HTMLButtonElement).disabled
     ).toBe(true);
+    expect(
+      (screen.getByRole("button", { name: "导航标签页" }) as HTMLButtonElement).disabled
+    ).toBe(true);
     expect(screen.getByText("请选择 1 个账号。")).toBeTruthy();
 
     rerender(
@@ -303,7 +317,53 @@ describe("设置弹窗", () => {
     expect(
       (screen.getByRole("button", { name: "读取标签页" }) as HTMLButtonElement).disabled
     ).toBe(true);
+    expect(
+      (screen.getByRole("button", { name: "导航标签页" }) as HTMLButtonElement).disabled
+    ).toBe(true);
     expect(screen.getByText("仅支持单选账号。")).toBeTruthy();
+  });
+
+  test("DEV 单选账号填写 URL 后可以请求导航第一个 page 标签页", () => {
+    const onNavigateUrlChange = vi.fn();
+    const onNavigate = vi.fn();
+    renderSettingsDialog({
+      runtimeDiagnostics: {
+        ...runtimeDiagnostics,
+        navigateUrl: "https://example.com/dashboard",
+        onNavigateUrlChange,
+        onNavigate
+      }
+    });
+    expandDevDiagnostics();
+
+    fireEvent.change(screen.getByLabelText("导航 URL"), {
+      target: { value: "https://example.org" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "导航标签页" }));
+
+    expect(onNavigateUrlChange).toHaveBeenCalledWith("https://example.org");
+    expect(onNavigate).toHaveBeenCalledTimes(1);
+  });
+
+  test("导航成功时展示第一个 page 标签页反馈", () => {
+    renderSettingsDialog({
+      runtimeDiagnostics: {
+        ...runtimeDiagnostics,
+        navigateUrl: "https://example.com/dashboard",
+        navigateStatus: "succeeded",
+        navigateResult: {
+          profileId: "account-001",
+          targetId: "page-1",
+          url: "https://example.com/dashboard",
+          navigatedAt: 1000
+        }
+      }
+    });
+    expandDevDiagnostics();
+
+    expect(
+      screen.getByText("已导航第一个 page 标签页：https://example.com/dashboard")
+    ).toBeTruthy();
   });
 
   test("点击读取标签页会调用 handler", () => {

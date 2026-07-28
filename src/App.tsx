@@ -18,6 +18,7 @@ import {
   normalizeSettings,
   profileApi,
   profilePath,
+  type BrowserRuntimeNavigationResult,
   type BrowserRuntimeTabSnapshot,
   type BrowserSessionSnapshot,
   type BrowserSessionStatus,
@@ -150,6 +151,10 @@ interface RuntimeDiagnosticsState {
   status: RuntimeDiagnosticsStatus;
   tabs: BrowserRuntimeTabSnapshot[];
   error: string | null;
+  navigateUrl: string;
+  navigateStatus: RuntimeDiagnosticsStatus;
+  navigateResult: BrowserRuntimeNavigationResult | null;
+  navigateError: string | null;
 }
 
 type DevImportMeta = ImportMeta & {
@@ -214,7 +219,11 @@ function App() {
     useState<RuntimeDiagnosticsState>({
       status: "idle",
       tabs: [],
-      error: null
+      error: null,
+      navigateUrl: "",
+      navigateStatus: "idle",
+      navigateResult: null,
+      navigateError: null
     });
   const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
   const [pendingBatchDelete, setPendingBatchDelete] = useState<ChromeProfile[] | null>(null);
@@ -234,6 +243,7 @@ function App() {
   const launchEventsSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const runtimeDiagnosticsRequestIdRef = useRef(0);
   const runtimeDiagnosticsProfileIdRef = useRef<string | null>(null);
+  const runtimeDiagnosticsRootPathRef = useRef("");
   const settingsOpenRef = useRef(false);
   const [windowInspecting, setWindowInspecting] = useState(false);
   const [windowTiling, setWindowTiling] = useState(false);
@@ -373,6 +383,7 @@ function App() {
   }, [settings.urlLibrary, urlLibraryQuery]);
 
   runtimeDiagnosticsProfileIdRef.current = runtimeDiagnosticsProfile?.id ?? null;
+  runtimeDiagnosticsRootPathRef.current = rootPath;
   settingsOpenRef.current = settingsOpen;
 
   useEffect(() => {
@@ -382,6 +393,12 @@ function App() {
   useEffect(() => {
     document.documentElement.dataset.theme = settingsOpen ? themeDraft : settings.theme;
   }, [settings.theme, settingsOpen, themeDraft]);
+
+  useEffect(() => {
+    if (settingsOpen) {
+      resetRuntimeDiagnostics();
+    }
+  }, [runtimeDiagnosticsProfile?.id, rootPath]);
 
   useEffect(() => {
     if (!rootPath || activeView !== "accounts") {
@@ -1037,8 +1054,25 @@ function App() {
     setRuntimeDiagnosticsState({
       status: "idle",
       tabs: [],
-      error: null
+      error: null,
+      navigateUrl: "",
+      navigateStatus: "idle",
+      navigateResult: null,
+      navigateError: null
     });
+  }
+
+  function isRuntimeDiagnosticsRequestCurrent(
+    requestId: number,
+    profileId: string,
+    requestRootPath: string
+  ) {
+    return (
+      runtimeDiagnosticsRequestIdRef.current === requestId &&
+      settingsOpenRef.current &&
+      runtimeDiagnosticsProfileIdRef.current === profileId &&
+      runtimeDiagnosticsRootPathRef.current === requestRootPath
+    );
   }
 
   async function readRuntimeTabsForSelectedProfile() {
@@ -1047,40 +1081,119 @@ function App() {
     }
 
     const profileId = runtimeDiagnosticsProfile.id;
+    const requestRootPath = rootPath;
     const requestId = runtimeDiagnosticsRequestIdRef.current + 1;
     runtimeDiagnosticsRequestIdRef.current = requestId;
-    setRuntimeDiagnosticsState({
+    setRuntimeDiagnosticsState((current) => ({
+      ...current,
       status: "loading",
       tabs: [],
       error: null
-    });
+    }));
     try {
-      const tabs = await profileApi.listRuntimeTabs(rootPath, profileId);
-      if (
-        runtimeDiagnosticsRequestIdRef.current !== requestId ||
-        !settingsOpenRef.current ||
-        runtimeDiagnosticsProfileIdRef.current !== profileId
-      ) {
+      const tabs = await profileApi.listRuntimeTabs(requestRootPath, profileId);
+      if (!isRuntimeDiagnosticsRequestCurrent(requestId, profileId, requestRootPath)) {
         return;
       }
-      setRuntimeDiagnosticsState({
+      setRuntimeDiagnosticsState((current) => ({
+        ...current,
         status: "succeeded",
         tabs,
         error: null
-      });
+      }));
     } catch (error) {
-      if (
-        runtimeDiagnosticsRequestIdRef.current !== requestId ||
-        !settingsOpenRef.current ||
-        runtimeDiagnosticsProfileIdRef.current !== profileId
-      ) {
+      if (!isRuntimeDiagnosticsRequestCurrent(requestId, profileId, requestRootPath)) {
         return;
       }
-      setRuntimeDiagnosticsState({
+      setRuntimeDiagnosticsState((current) => ({
+        ...current,
         status: "failed",
         tabs: [],
         error: errorMessage(error)
-      });
+      }));
+    }
+  }
+
+  function updateRuntimeNavigationUrl(value: string) {
+    setRuntimeDiagnosticsState((current) => ({
+      ...current,
+      navigateUrl: value,
+      navigateStatus: "idle",
+      navigateResult: null,
+      navigateError: null
+    }));
+  }
+
+  async function navigateRuntimeTabForSelectedProfile() {
+    if (!runtimeDiagnosticsProfile) {
+      return;
+    }
+    const url = runtimeDiagnosticsState.navigateUrl.trim();
+    if (!url) {
+      return;
+    }
+
+    const profileId = runtimeDiagnosticsProfile.id;
+    const requestRootPath = rootPath;
+    const requestId = runtimeDiagnosticsRequestIdRef.current + 1;
+    runtimeDiagnosticsRequestIdRef.current = requestId;
+    setRuntimeDiagnosticsState((current) => ({
+      ...current,
+      navigateStatus: "loading",
+      navigateResult: null,
+      navigateError: null
+    }));
+
+    try {
+      const result = await profileApi.navigateRuntimeTab(
+        requestRootPath,
+        profileId,
+        url
+      );
+      if (!isRuntimeDiagnosticsRequestCurrent(requestId, profileId, requestRootPath)) {
+        return;
+      }
+
+      setRuntimeDiagnosticsState((current) => ({
+        ...current,
+        status: "loading",
+        error: null,
+        navigateStatus: "succeeded",
+        navigateResult: result,
+        navigateError: null
+      }));
+
+      try {
+        const tabs = await profileApi.listRuntimeTabs(requestRootPath, profileId);
+        if (!isRuntimeDiagnosticsRequestCurrent(requestId, profileId, requestRootPath)) {
+          return;
+        }
+        setRuntimeDiagnosticsState((current) => ({
+          ...current,
+          status: "succeeded",
+          tabs,
+          error: null
+        }));
+      } catch (error) {
+        if (!isRuntimeDiagnosticsRequestCurrent(requestId, profileId, requestRootPath)) {
+          return;
+        }
+        setRuntimeDiagnosticsState((current) => ({
+          ...current,
+          status: "failed",
+          error: `导航成功，但刷新标签页失败：${errorMessage(error)}`
+        }));
+      }
+    } catch (error) {
+      if (!isRuntimeDiagnosticsRequestCurrent(requestId, profileId, requestRootPath)) {
+        return;
+      }
+      setRuntimeDiagnosticsState((current) => ({
+        ...current,
+        navigateStatus: "failed",
+        navigateResult: null,
+        navigateError: errorMessage(error)
+      }));
     }
   }
 
@@ -3315,7 +3428,13 @@ function App() {
             status: runtimeDiagnosticsState.status,
             tabs: runtimeDiagnosticsState.tabs,
             error: runtimeDiagnosticsState.error,
-            onReadTabs: readRuntimeTabsForSelectedProfile
+            onReadTabs: readRuntimeTabsForSelectedProfile,
+            navigateUrl: runtimeDiagnosticsState.navigateUrl,
+            navigateStatus: runtimeDiagnosticsState.navigateStatus,
+            navigateResult: runtimeDiagnosticsState.navigateResult,
+            navigateError: runtimeDiagnosticsState.navigateError,
+            onNavigateUrlChange: updateRuntimeNavigationUrl,
+            onNavigate: navigateRuntimeTabForSelectedProfile
           }}
           onRootPathChange={updateRootPathDraft}
           onBrowserPathChange={setBrowserPathDraft}
