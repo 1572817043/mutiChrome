@@ -1748,10 +1748,11 @@ fn fetch_cdp_tabs(port: u16) -> Result<Vec<CdpTargetRaw>, String> {
     stream
         .set_write_timeout(Some(remaining_timeout))
         .map_err(|_| "CDP 连接失败".to_string())?;
+    let request = format!(
+        "GET /json/list HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+    );
     stream
-        .write_all(
-            b"GET /json/list HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
-        )
+        .write_all(request.as_bytes())
         .map_err(|error| short_cdp_probe_error(&error.to_string()))?;
 
     let body = read_cdp_list_response_body(&mut stream, started_at)?;
@@ -3288,6 +3289,30 @@ mod tests {
     }
 
     #[test]
+    fn fetch_cdp_tabs_sends_host_header_with_port() {
+        let (port, handle, request_rx) = serve_cdp_response_and_capture_request(
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]".to_string(),
+        );
+
+        let targets = fetch_cdp_tabs(port).unwrap();
+        let request = request_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("capture CDP request");
+        handle.join().unwrap();
+
+        assert!(targets.is_empty());
+        let host_lines = request
+            .lines()
+            .filter(|line| line.to_ascii_lowercase().starts_with("host:"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            host_lines,
+            vec![format!("Host: 127.0.0.1:{port}")],
+            "CDP /json/list request should include exactly one dynamic Host header, got: {request:?}"
+        );
+    }
+
+    #[test]
     fn fetch_cdp_tabs_reads_json_list_response() {
         let body = r#"[{"id":"page-1","type":"page","url":"chrome://newtab/","title":"New Tab","webSocketDebuggerUrl":"ws://127.0.0.1/devtools/page/page-1"}]"#;
         let (port, handle) = serve_cdp_response(format!(
@@ -3395,15 +3420,47 @@ mod tests {
     }
 
     fn serve_cdp_response(response: String) -> (u16, thread::JoinHandle<()>) {
+        let (port, handle, _) = serve_cdp_response_and_capture_request(response);
+        (port, handle)
+    }
+
+    fn serve_cdp_response_and_capture_request(
+        response: String,
+    ) -> (
+        u16,
+        thread::JoinHandle<()>,
+        std::sync::mpsc::Receiver<String>,
+    ) {
         let listener = TcpListener::bind((CDP_BIND_ADDRESS, 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
+        let (request_tx, request_rx) = std::sync::mpsc::channel();
         let handle = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0_u8; 256];
-            let _ = stream.read(&mut request);
+            stream
+                .set_read_timeout(Some(Duration::from_millis(100)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 256];
+            while request.len() < 8192 && !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                match stream.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(byte_count) => request.extend_from_slice(&chunk[..byte_count]),
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+            let request = String::from_utf8_lossy(&request).to_string();
+            let _ = request_tx.send(request);
             stream.write_all(response.as_bytes()).unwrap();
         });
 
-        (port, handle)
+        (port, handle, request_rx)
     }
 }
