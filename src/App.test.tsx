@@ -4493,18 +4493,14 @@ describe("App launcher layout", () => {
     const loadProfilesSpy = vi.spyOn(profileApi, "loadProfiles");
     render(<App />);
 
-    await user.click(await screen.findByRole("button", { name: "设置" }));
+    const dialog = await openSettingsDialog(user);
     initProfileRootSpy.mockClear();
     loadProfilesSpy.mockClear();
     const documentBeforeClose = savedDocument();
-    const dialog = await screen.findByRole("dialog", { name: "设置" });
-    fireEvent.change(within(dialog).getByLabelText("配置根目录"), {
-      target: { value: "/tmp/other-root" }
-    });
+    changeRootPathDraft(dialog, "/tmp/other-root");
 
     await user.click(within(dialog).getByRole("button", { name: "关闭设置" }));
-    await user.click(screen.getByRole("button", { name: "设置" }));
-    const reopenedDialog = await screen.findByRole("dialog", { name: "设置" });
+    const reopenedDialog = await openSettingsDialog(user);
 
     expect((within(reopenedDialog).getByLabelText("配置根目录") as HTMLInputElement).value).toBe(
       "~/MultiChromeProfiles"
@@ -4521,11 +4517,8 @@ describe("App launcher layout", () => {
     const saveProfilesSpy = vi.spyOn(profileApi, "saveProfiles");
     render(<App />);
 
-    await user.click(await screen.findByRole("button", { name: "设置" }));
-    const dialog = await screen.findByRole("dialog", { name: "设置" });
-    fireEvent.change(within(dialog).getByLabelText("配置根目录"), {
-      target: { value: "/tmp/other-root" }
-    });
+    const dialog = await openSettingsDialog(user);
+    changeRootPathDraft(dialog, "/tmp/other-root");
     await user.click(within(dialog).getByRole("button", { name: "保存设置" }));
 
     await waitFor(() => {
@@ -4545,17 +4538,12 @@ describe("App launcher layout", () => {
     render(<App />);
 
     await user.click(await screen.findByRole("button", { name: "选择 主号" }));
-    await user.click(await screen.findByRole("button", { name: "设置" }));
+    const dialog = await openSettingsDialog(user);
     initProfileRootSpy.mockClear();
     loadProfilesSpy.mockClear();
     saveProfilesSpy.mockClear();
-    const dialog = await screen.findByRole("dialog", { name: "设置" });
-    const rootPathInput = within(dialog).getByLabelText("配置根目录");
-    fireEvent.change(rootPathInput, { target: { value: "   " } });
-
-    await user.click(
-      within(rootPathInput.parentElement as HTMLElement).getByRole("button", { name: "检测" })
-    );
+    changeRootPathDraft(dialog, "   ");
+    await detectRootPathDraft(user, dialog);
 
     expect(screen.getByRole("status").textContent).toBe("请先填写配置根目录");
     expect(initProfileRootSpy).not.toHaveBeenCalled();
@@ -4574,14 +4562,11 @@ describe("App launcher layout", () => {
     const saveProfilesSpy = vi.spyOn(profileApi, "saveProfiles");
     render(<App />);
 
-    await user.click(await screen.findByRole("button", { name: "设置" }));
+    const dialog = await openSettingsDialog(user);
     initProfileRootSpy.mockClear();
     loadProfilesSpy.mockClear();
     saveProfilesSpy.mockClear();
-    const dialog = await screen.findByRole("dialog", { name: "设置" });
-    fireEvent.change(within(dialog).getByLabelText("配置根目录"), {
-      target: { value: "   " }
-    });
+    changeRootPathDraft(dialog, "   ");
     await user.click(within(dialog).getByRole("button", { name: "保存设置" }));
 
     expect(screen.getByRole("status").textContent).toBe("请先填写配置根目录");
@@ -4603,14 +4588,11 @@ describe("App launcher layout", () => {
     render(<App />);
 
     await user.click(await screen.findByRole("button", { name: "选择 主号" }));
-    await user.click(await screen.findByRole("button", { name: "设置" }));
+    const dialog = await openSettingsDialog(user);
     initProfileRootSpy.mockResolvedValue({ rootExists: true, writable: true, profileCount: 1 });
     loadProfilesSpy.mockResolvedValue(targetDocument);
     saveProfilesSpy.mockRejectedValue(new Error("目标根写入失败"));
-    const dialog = await screen.findByRole("dialog", { name: "设置" });
-    fireEvent.change(within(dialog).getByLabelText("配置根目录"), {
-      target: { value: "/tmp/other-root" }
-    });
+    changeRootPathDraft(dialog, "/tmp/other-root");
     fireEvent.change(within(dialog).getByLabelText("Chrome 路径"), {
       target: { value: "/tmp/User Chrome.app" }
     });
@@ -4647,7 +4629,7 @@ describe("App launcher layout", () => {
     const detectChromeSpy = vi.spyOn(profileApi, "detectChrome");
     render(<App />);
 
-    await user.click(await screen.findByRole("button", { name: "设置" }));
+    const dialog = await openSettingsDialog(user);
     initProfileRootSpy.mockResolvedValue({ rootExists: true, writable: true, profileCount: 1 });
     loadProfilesSpy.mockResolvedValue(targetDocument);
     saveProfilesSpy.mockResolvedValue();
@@ -4657,10 +4639,7 @@ describe("App launcher layout", () => {
       }
       return { available: true, appPath: path ?? null };
     });
-    const dialog = await screen.findByRole("dialog", { name: "设置" });
-    fireEvent.change(within(dialog).getByLabelText("配置根目录"), {
-      target: { value: "/tmp/other-root" }
-    });
+    changeRootPathDraft(dialog, "/tmp/other-root");
     fireEvent.change(within(dialog).getByLabelText("Chrome 路径"), {
       target: { value: "/tmp/User Chrome.app" }
     });
@@ -4697,14 +4676,11 @@ describe("App launcher layout", () => {
     const saveProfilesSpy = vi.spyOn(profileApi, "saveProfiles");
     render(<App />);
 
-    await user.click(await screen.findByRole("button", { name: "设置" }));
+    const dialog = await openSettingsDialog(user);
     initProfileRootSpy.mockResolvedValue({ rootExists: true, writable: true, profileCount: 1 });
     loadProfilesSpy.mockResolvedValue(targetDocument);
     saveProfilesSpy.mockResolvedValue();
-    const dialog = await screen.findByRole("dialog", { name: "设置" });
-    fireEvent.change(within(dialog).getByLabelText("配置根目录"), {
-      target: { value: "/tmp/other-root" }
-    });
+    changeRootPathDraft(dialog, "/tmp/other-root");
     fireEvent.change(within(dialog).getByLabelText("Chrome 路径"), {
       target: { value: "/tmp/User Chrome.app" }
     });
@@ -5350,13 +5326,8 @@ describe("App launcher layout", () => {
       )
     );
 
-    const rootPathInput = within(dialog).getByLabelText("配置根目录");
-    fireEvent.change(rootPathInput, {
-      target: { value: "/tmp/other-root" }
-    });
-    await user.click(
-      within(rootPathInput.parentElement as HTMLElement).getByRole("button", { name: "检测" })
-    );
+    changeRootPathDraft(dialog, "/tmp/other-root");
+    await detectRootPathDraft(user, dialog);
     await waitFor(() => expect(initProfileRootSpy).toHaveBeenLastCalledWith("/tmp/other-root"));
 
     resolveNavigation({
@@ -5650,6 +5621,27 @@ async function expandDevDiagnostics(
   if (!details.open) {
     await user.click(summary);
   }
+}
+
+async function openSettingsDialog(user: { click: (element: Element) => Promise<unknown> }) {
+  await user.click(await screen.findByRole("button", { name: "设置" }));
+  return screen.findByRole("dialog", { name: "设置" });
+}
+
+function changeRootPathDraft(dialog: HTMLElement, value: string) {
+  fireEvent.change(within(dialog).getByLabelText("配置根目录"), { target: { value } });
+}
+
+async function detectRootPathDraft(
+  user: { click: (element: Element) => Promise<unknown> },
+  dialog: HTMLElement
+) {
+  const rootPathInput = within(dialog).getByLabelText("配置根目录");
+  const rootPathRow = rootPathInput.parentElement;
+  if (!rootPathRow) {
+    throw new Error("配置根目录输入框不在行容器内");
+  }
+  await user.click(within(rootPathRow).getByRole("button", { name: "检测" }));
 }
 
 async function openBulkMore(user: { click: (element: Element) => Promise<unknown> }) {
