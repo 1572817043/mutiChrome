@@ -50,19 +50,45 @@ export interface RuntimeDiagnosticsProps {
   onNavigate: () => Promise<void> | void;
 }
 
-export interface SettingsDialogProps {
+export interface SettingsDialogRootSettingsProps {
   rootPathDraft: string;
   rootStatus: RootStatus | null;
   chromeStatus: ChromeStatus | null;
+  browserPathDraft: string;
+  themeDraft: AppTheme;
+  onRootPathChange: (value: string) => void;
+  onBrowserPathChange: (value: string) => void;
+  onThemeChange: (value: AppTheme) => void;
+  onApplyRootPath: () => Promise<void> | void;
+  onSaveSettings: () => Promise<void> | void;
+  onRevealRootDirectory: () => Promise<void> | void;
+  onRevealBackupsDirectory: () => Promise<void> | void;
+}
+
+export interface SettingsDialogHealthProps {
   healthReport: RootHealthReport | null;
   healthChecking: boolean;
   healthRepairing: boolean;
   orphanRegisteringId: string | null;
   repairResult: RootRepairResult | null;
+  onHealthCheck: () => Promise<void> | void;
+  onRepairHealth: () => Promise<void> | void;
+  onRegisterOrphanProfile: (profileId: string) => Promise<void> | void;
+}
+
+export interface SettingsDialogLightBackupProps {
   backupResult: ProfileBackupResult | null;
   backupPathDraft: string;
   backupWorking: "create" | "restore" | null;
   restoreConfirmOpen: boolean;
+  onCreateBackup: () => Promise<void> | void;
+  onRequestRestoreBackup: () => void;
+  onConfirmRestoreBackup: () => Promise<void> | void;
+  onCancelRestoreBackup: () => void;
+  onBackupPathChange: (value: string) => void;
+}
+
+export interface SettingsDialogFullBackupProps {
   fullBackupScope: FullBackupScope;
   fullBackupPreview: FullProfileBackupPreview | null;
   fullBackupResult: FullProfileBackupResult | null;
@@ -70,79 +96,81 @@ export interface SettingsDialogProps {
   fullRestorePreview: FullProfileRestorePreview | null;
   fullBackupWorking: FullBackupWorking | null;
   selectedProfileCount: number;
-  browserPathDraft: string;
-  themeDraft: AppTheme;
-  runtimeDiagnostics?: RuntimeDiagnosticsProps;
-  onRootPathChange: (value: string) => void;
-  onBrowserPathChange: (value: string) => void;
-  onThemeChange: (value: AppTheme) => void;
-  onApplyRootPath: () => Promise<void> | void;
-  onSaveSettings: () => Promise<void> | void;
-  onHealthCheck: () => Promise<void> | void;
-  onRepairHealth: () => Promise<void> | void;
-  onRegisterOrphanProfile: (profileId: string) => Promise<void> | void;
-  onCreateBackup: () => Promise<void> | void;
-  onRequestRestoreBackup: () => void;
-  onConfirmRestoreBackup: () => Promise<void> | void;
-  onCancelRestoreBackup: () => void;
   onFullBackupScopeChange: (scope: FullBackupScope) => void;
   onPreviewFullBackup: () => Promise<void> | void;
   onCreateFullBackup: () => Promise<void> | void;
   onPreviewFullRestore: () => Promise<void> | void;
   onRequestFullRestore: () => void;
-  onRevealRootDirectory: () => Promise<void> | void;
-  onRevealBackupsDirectory: () => Promise<void> | void;
-  onBackupPathChange: (value: string) => void;
   onFullBackupPathChange: (value: string) => void;
+}
+
+export interface SettingsDialogProps {
+  rootSettings: SettingsDialogRootSettingsProps;
+  health: SettingsDialogHealthProps;
+  lightBackup: SettingsDialogLightBackupProps;
+  fullBackup: SettingsDialogFullBackupProps;
+  runtimeDiagnostics?: RuntimeDiagnosticsProps;
   onClose: () => void;
 }
 
 export function SettingsDialog({
-  rootPathDraft,
-  rootStatus,
-  chromeStatus,
-  healthReport,
-  healthChecking,
-  healthRepairing,
-  orphanRegisteringId,
-  repairResult,
-  backupResult,
-  backupPathDraft,
-  backupWorking,
-  restoreConfirmOpen,
-  fullBackupScope,
-  fullBackupPreview,
-  fullBackupResult,
-  fullBackupPathDraft,
-  fullRestorePreview,
-  fullBackupWorking,
-  selectedProfileCount,
-  browserPathDraft,
-  themeDraft,
+  rootSettings,
+  health,
+  lightBackup,
+  fullBackup,
   runtimeDiagnostics,
-  onRootPathChange,
-  onBrowserPathChange,
-  onThemeChange,
-  onApplyRootPath,
-  onSaveSettings,
-  onHealthCheck,
-  onRepairHealth,
-  onRegisterOrphanProfile,
-  onCreateBackup,
-  onRequestRestoreBackup,
-  onConfirmRestoreBackup,
-  onCancelRestoreBackup,
-  onFullBackupScopeChange,
-  onPreviewFullBackup,
-  onCreateFullBackup,
-  onPreviewFullRestore,
-  onRequestFullRestore,
-  onRevealRootDirectory,
-  onRevealBackupsDirectory,
-  onBackupPathChange,
-  onFullBackupPathChange,
   onClose
 }: SettingsDialogProps) {
+  const {
+    rootPathDraft,
+    rootStatus,
+    chromeStatus,
+    browserPathDraft,
+    themeDraft,
+    onRootPathChange,
+    onBrowserPathChange,
+    onThemeChange,
+    onApplyRootPath,
+    onSaveSettings,
+    onRevealRootDirectory,
+    onRevealBackupsDirectory
+  } = rootSettings;
+  const {
+    healthReport,
+    healthChecking,
+    healthRepairing,
+    orphanRegisteringId,
+    repairResult,
+    onHealthCheck,
+    onRepairHealth,
+    onRegisterOrphanProfile
+  } = health;
+  const {
+    backupResult,
+    backupPathDraft,
+    backupWorking,
+    restoreConfirmOpen,
+    onCreateBackup,
+    onRequestRestoreBackup,
+    onConfirmRestoreBackup,
+    onCancelRestoreBackup,
+    onBackupPathChange
+  } = lightBackup;
+  const {
+    fullBackupScope,
+    fullBackupPreview,
+    fullBackupResult,
+    fullBackupPathDraft,
+    fullRestorePreview,
+    fullBackupWorking,
+    selectedProfileCount,
+    onFullBackupScopeChange,
+    onPreviewFullBackup,
+    onCreateFullBackup,
+    onPreviewFullRestore,
+    onRequestFullRestore,
+    onFullBackupPathChange
+  } = fullBackup;
   const titleId = "settings-title";
   const rootStatusDetail = rootStatus
     ? rootStatus.writable

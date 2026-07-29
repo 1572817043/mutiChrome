@@ -92,53 +92,18 @@ const fullRestorePreview: FullProfileRestorePreview = {
   totalBytes: 4096
 };
 
-function renderSettingsDialog(overrides: Partial<SettingsDialogProps> = {}) {
-  const props: SettingsDialogProps = {
-    rootPathDraft: "/tmp/multichrome",
-    rootStatus: { rootExists: true, writable: true, profileCount: 2 },
-    chromeStatus: { available: true, appPath: "/Applications/Google Chrome.app" },
-    healthReport,
-    healthChecking: false,
-    healthRepairing: false,
-    orphanRegisteringId: null,
-    repairResult,
-    backupResult,
-    backupPathDraft: "/tmp/backup.json",
-    backupWorking: null,
-    restoreConfirmOpen: true,
-    fullBackupScope: "all",
-    fullBackupPreview,
-    fullBackupResult,
-    fullBackupPathDraft: "/tmp/full-backup-done",
-    fullRestorePreview,
-    fullBackupWorking: null,
-    selectedProfileCount: 1,
-    browserPathDraft: "/Applications/Google Chrome.app",
-    themeDraft: "light",
-    onRootPathChange: vi.fn(),
-    onBrowserPathChange: vi.fn(),
-    onThemeChange: vi.fn(),
-    onApplyRootPath: vi.fn(),
-    onSaveSettings: vi.fn(),
-    onHealthCheck: vi.fn(),
-    onRepairHealth: vi.fn(),
-    onRegisterOrphanProfile: vi.fn(),
-    onCreateBackup: vi.fn(),
-    onRequestRestoreBackup: vi.fn(),
-    onConfirmRestoreBackup: vi.fn(),
-    onCancelRestoreBackup: vi.fn(),
-    onFullBackupScopeChange: vi.fn(),
-    onPreviewFullBackup: vi.fn(),
-    onCreateFullBackup: vi.fn(),
-    onPreviewFullRestore: vi.fn(),
-    onRequestFullRestore: vi.fn(),
-    onRevealRootDirectory: vi.fn(),
-    onRevealBackupsDirectory: vi.fn(),
-    onBackupPathChange: vi.fn(),
-    onFullBackupPathChange: vi.fn(),
-    onClose: vi.fn(),
-    ...overrides
-  };
+type SettingsDialogPropsOverride = Omit<
+  Partial<SettingsDialogProps>,
+  "rootSettings" | "health" | "lightBackup" | "fullBackup"
+> & {
+  rootSettings?: Partial<SettingsDialogProps["rootSettings"]>;
+  health?: Partial<SettingsDialogProps["health"]>;
+  lightBackup?: Partial<SettingsDialogProps["lightBackup"]>;
+  fullBackup?: Partial<SettingsDialogProps["fullBackup"]>;
+};
+
+function renderSettingsDialog(overrides: SettingsDialogPropsOverride = {}) {
+  const props = renderSettingsDialogProps(overrides);
 
   render(<SettingsDialog {...props} />);
   return props;
@@ -146,7 +111,11 @@ function renderSettingsDialog(overrides: Partial<SettingsDialogProps> = {}) {
 
 describe("设置弹窗", () => {
   test("保留根目录、浏览器路径、主题和遮罩关闭交互", () => {
-    const props = renderSettingsDialog();
+    const props = renderSettingsDialog({
+      rootSettings: {
+        rootPathDraft: "/tmp/multichrome"
+      }
+    });
 
     fireEvent.change(screen.getByLabelText("配置根目录"), {
       target: { value: "/tmp/next-root" }
@@ -160,10 +129,12 @@ describe("设置弹窗", () => {
       target: screen.getByRole("dialog").parentElement
     });
 
-    expect(props.onRootPathChange).toHaveBeenCalledWith("/tmp/next-root");
-    expect(props.onApplyRootPath).toHaveBeenCalledTimes(1);
-    expect(props.onBrowserPathChange).toHaveBeenCalledWith("/Applications/Chrome Canary.app");
-    expect(props.onThemeChange).toHaveBeenCalledWith("dark");
+    expect(props.rootSettings.onRootPathChange).toHaveBeenCalledWith("/tmp/next-root");
+    expect(props.rootSettings.onApplyRootPath).toHaveBeenCalledTimes(1);
+    expect(props.rootSettings.onBrowserPathChange).toHaveBeenCalledWith(
+      "/Applications/Chrome Canary.app"
+    );
+    expect(props.rootSettings.onThemeChange).toHaveBeenCalledWith("dark");
     expect(props.onClose).toHaveBeenCalledTimes(1);
     expect(screen.getByText("配置根目录可写，当前索引里有 2 个账号。")).toBeTruthy();
     expect(screen.getByText("已检测到 Chrome：/Applications/Google Chrome.app")).toBeTruthy();
@@ -180,9 +151,9 @@ describe("设置弹窗", () => {
     expect(screen.getByText("先检查，再按结果修复低风险项或手动登记孤儿目录。")).toBeTruthy();
     expect(screen.getByText("检查结果有 1 个提醒，建议处理后再做备份。")).toBeTruthy();
     expect(screen.getByText("未登记 Profile 目录")).toBeTruthy();
-    expect(props.onHealthCheck).toHaveBeenCalledTimes(1);
-    expect(props.onRepairHealth).toHaveBeenCalledTimes(1);
-    expect(props.onRegisterOrphanProfile).toHaveBeenCalledWith("account-099");
+    expect(props.health.onHealthCheck).toHaveBeenCalledTimes(1);
+    expect(props.health.onRepairHealth).toHaveBeenCalledTimes(1);
+    expect(props.health.onRegisterOrphanProfile).toHaveBeenCalledWith("account-099");
   });
 
   test("保留轻量备份创建、路径输入和恢复确认流程", () => {
@@ -204,10 +175,10 @@ describe("设置弹窗", () => {
       screen.getByText("这会替换当前 profiles.json 索引与设置；已有 Chrome profile 文件夹不会被删除。")
     ).toBeTruthy();
     expect(screen.getByText("/tmp/multichrome/app-data/backups/profiles.json")).toBeTruthy();
-    expect(props.onCreateBackup).toHaveBeenCalledTimes(1);
-    expect(props.onBackupPathChange).toHaveBeenCalledWith("/tmp/restore.json");
-    expect(props.onRequestRestoreBackup).toHaveBeenCalledTimes(1);
-    expect(props.onConfirmRestoreBackup).toHaveBeenCalledTimes(1);
+    expect(props.lightBackup.onCreateBackup).toHaveBeenCalledTimes(1);
+    expect(props.lightBackup.onBackupPathChange).toHaveBeenCalledWith("/tmp/restore.json");
+    expect(props.lightBackup.onRequestRestoreBackup).toHaveBeenCalledTimes(1);
+    expect(props.lightBackup.onConfirmRestoreBackup).toHaveBeenCalledTimes(1);
   });
 
   test("保留完整备份预览、创建、扫描和恢复入口", () => {
@@ -230,12 +201,12 @@ describe("设置弹窗", () => {
     expect(screen.getAllByText("/tmp/full-backup-done")).toHaveLength(2);
     expect(screen.getByText("新增 1 个")).toBeTruthy();
     expect(screen.getByText("覆盖 1 个")).toBeTruthy();
-    expect(props.onFullBackupScopeChange).toHaveBeenCalledWith("selected");
-    expect(props.onPreviewFullBackup).toHaveBeenCalledTimes(1);
-    expect(props.onCreateFullBackup).toHaveBeenCalledTimes(1);
-    expect(props.onFullBackupPathChange).toHaveBeenCalledWith("/tmp/full-restore");
-    expect(props.onPreviewFullRestore).toHaveBeenCalledTimes(1);
-    expect(props.onRequestFullRestore).toHaveBeenCalledTimes(1);
+    expect(props.fullBackup.onFullBackupScopeChange).toHaveBeenCalledWith("selected");
+    expect(props.fullBackup.onPreviewFullBackup).toHaveBeenCalledTimes(1);
+    expect(props.fullBackup.onCreateFullBackup).toHaveBeenCalledTimes(1);
+    expect(props.fullBackup.onFullBackupPathChange).toHaveBeenCalledWith("/tmp/full-restore");
+    expect(props.fullBackup.onPreviewFullRestore).toHaveBeenCalledTimes(1);
+    expect(props.fullBackup.onRequestFullRestore).toHaveBeenCalledTimes(1);
   });
 
   test("非 DEV 时不显示开发诊断区", () => {
@@ -438,52 +409,72 @@ function expandDevDiagnostics() {
 }
 
 function renderSettingsDialogProps(
-  overrides: Partial<SettingsDialogProps> = {}
+  overrides: SettingsDialogPropsOverride = {}
 ): SettingsDialogProps {
+  const {
+    rootSettings,
+    health: healthOverrides,
+    lightBackup,
+    fullBackup,
+    ...topLevelOverrides
+  } = overrides;
+
   return {
-    rootPathDraft: "/tmp/multichrome",
-    rootStatus: { rootExists: true, writable: true, profileCount: 2 },
-    chromeStatus: { available: true, appPath: "/Applications/Google Chrome.app" },
-    healthReport,
-    healthChecking: false,
-    healthRepairing: false,
-    orphanRegisteringId: null,
-    repairResult,
-    backupResult,
-    backupPathDraft: "/tmp/backup.json",
-    backupWorking: null,
-    restoreConfirmOpen: true,
-    fullBackupScope: "all",
-    fullBackupPreview,
-    fullBackupResult,
-    fullBackupPathDraft: "/tmp/full-backup-done",
-    fullRestorePreview,
-    fullBackupWorking: null,
-    selectedProfileCount: 1,
-    browserPathDraft: "/Applications/Google Chrome.app",
-    themeDraft: "light",
-    onRootPathChange: vi.fn(),
-    onBrowserPathChange: vi.fn(),
-    onThemeChange: vi.fn(),
-    onApplyRootPath: vi.fn(),
-    onSaveSettings: vi.fn(),
-    onHealthCheck: vi.fn(),
-    onRepairHealth: vi.fn(),
-    onRegisterOrphanProfile: vi.fn(),
-    onCreateBackup: vi.fn(),
-    onRequestRestoreBackup: vi.fn(),
-    onConfirmRestoreBackup: vi.fn(),
-    onCancelRestoreBackup: vi.fn(),
-    onFullBackupScopeChange: vi.fn(),
-    onPreviewFullBackup: vi.fn(),
-    onCreateFullBackup: vi.fn(),
-    onPreviewFullRestore: vi.fn(),
-    onRequestFullRestore: vi.fn(),
-    onRevealRootDirectory: vi.fn(),
-    onRevealBackupsDirectory: vi.fn(),
-    onBackupPathChange: vi.fn(),
-    onFullBackupPathChange: vi.fn(),
+    rootSettings: {
+      rootPathDraft: "/tmp/multichrome",
+      rootStatus: { rootExists: true, writable: true, profileCount: 2 },
+      browserPathDraft: "/Applications/Google Chrome.app",
+      chromeStatus: { available: true, appPath: "/Applications/Google Chrome.app" },
+      themeDraft: "light",
+      onRootPathChange: vi.fn(),
+      onBrowserPathChange: vi.fn(),
+      onThemeChange: vi.fn(),
+      onApplyRootPath: vi.fn(),
+      onSaveSettings: vi.fn(),
+      onRevealRootDirectory: vi.fn(),
+      onRevealBackupsDirectory: vi.fn(),
+      ...rootSettings
+    },
+    health: {
+      healthReport,
+      healthChecking: false,
+      healthRepairing: false,
+      orphanRegisteringId: null,
+      repairResult,
+      onHealthCheck: vi.fn(),
+      onRepairHealth: vi.fn(),
+      onRegisterOrphanProfile: vi.fn(),
+      ...healthOverrides
+    },
+    lightBackup: {
+      backupResult,
+      backupPathDraft: "/tmp/backup.json",
+      backupWorking: null,
+      restoreConfirmOpen: true,
+      onCreateBackup: vi.fn(),
+      onRequestRestoreBackup: vi.fn(),
+      onConfirmRestoreBackup: vi.fn(),
+      onCancelRestoreBackup: vi.fn(),
+      onBackupPathChange: vi.fn(),
+      ...lightBackup
+    },
+    fullBackup: {
+      fullBackupScope: "all",
+      fullBackupPreview,
+      fullBackupResult,
+      fullBackupPathDraft: "/tmp/full-backup-done",
+      fullRestorePreview,
+      fullBackupWorking: null,
+      selectedProfileCount: 1,
+      onFullBackupScopeChange: vi.fn(),
+      onPreviewFullBackup: vi.fn(),
+      onCreateFullBackup: vi.fn(),
+      onPreviewFullRestore: vi.fn(),
+      onRequestFullRestore: vi.fn(),
+      onFullBackupPathChange: vi.fn(),
+      ...fullBackup
+    },
     onClose: vi.fn(),
-    ...overrides
+    ...topLevelOverrides
   };
 }

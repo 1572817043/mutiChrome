@@ -3526,27 +3526,60 @@ function App() {
 
       {settingsOpen ? (
         <SettingsDialog
-          rootPathDraft={rootPathDraft}
-          rootStatus={rootStatus}
-          chromeStatus={chromeStatus}
-          healthReport={healthReport}
-          healthChecking={healthChecking}
-          healthRepairing={healthRepairing}
-          orphanRegisteringId={orphanRegisteringId}
-          repairResult={repairResult}
-          backupResult={backupResult}
-          backupPathDraft={backupPathDraft}
-          backupWorking={backupWorking}
-          restoreConfirmOpen={restoreConfirmOpen}
-          fullBackupScope={fullBackupScope}
-          fullBackupPreview={fullBackupPreview}
-          fullBackupResult={fullBackupResult}
-          fullBackupPathDraft={fullBackupPathDraft}
-          fullRestorePreview={fullRestorePreview}
-          fullBackupWorking={fullBackupWorking}
-          selectedProfileCount={selectedIds.length}
-          browserPathDraft={browserPathDraft}
-          themeDraft={themeDraft}
+          rootSettings={{
+            rootPathDraft,
+            rootStatus,
+            chromeStatus,
+            browserPathDraft,
+            themeDraft,
+            onRootPathChange: updateRootPathDraft,
+            onBrowserPathChange: setBrowserPathDraft,
+            onThemeChange: setThemeDraft,
+            onApplyRootPath: applyRootPath,
+            onSaveSettings: saveSettingsDraft,
+            onRevealRootDirectory: revealRootDirectory,
+            onRevealBackupsDirectory: revealBackupsDirectory
+          }}
+          health={{
+            healthReport,
+            healthChecking,
+            healthRepairing,
+            orphanRegisteringId,
+            repairResult,
+            onHealthCheck: runRootHealthCheck,
+            onRepairHealth: repairRootHealth,
+            onRegisterOrphanProfile: registerOrphanProfile
+          }}
+          lightBackup={{
+            backupResult,
+            backupPathDraft,
+            backupWorking,
+            restoreConfirmOpen,
+            onCreateBackup: createBackup,
+            onRequestRestoreBackup: requestRestoreBackup,
+            onConfirmRestoreBackup: restoreBackup,
+            onCancelRestoreBackup: () => setRestoreConfirmOpen(false),
+            onBackupPathChange: setBackupPathDraft
+          }}
+          fullBackup={{
+            fullBackupScope,
+            fullBackupPreview,
+            fullBackupResult,
+            fullBackupPathDraft,
+            fullRestorePreview,
+            fullBackupWorking,
+            selectedProfileCount: selectedIds.length,
+            onFullBackupScopeChange: updateFullBackupScope,
+            onPreviewFullBackup: previewFullBackup,
+            onCreateFullBackup: createFullBackup,
+            onPreviewFullRestore: previewFullRestore,
+            onRequestFullRestore: requestFullRestore,
+            onFullBackupPathChange: (value) => {
+              setFullBackupPathDraft(value);
+              setFullRestorePreview(null);
+              setFullRestoreConfirmOpen(false);
+            }
+          }}
           runtimeDiagnostics={{
             enabled: Boolean((import.meta as DevImportMeta).env?.DEV),
             selectedProfileCount: selectedIds.length,
@@ -3566,31 +3599,6 @@ function App() {
             navigateError: runtimeDiagnosticsState.navigateError,
             onNavigateUrlChange: updateRuntimeNavigationUrl,
             onNavigate: navigateRuntimeTabForSelectedProfile
-          }}
-          onRootPathChange={updateRootPathDraft}
-          onBrowserPathChange={setBrowserPathDraft}
-          onThemeChange={setThemeDraft}
-          onApplyRootPath={applyRootPath}
-          onSaveSettings={saveSettingsDraft}
-          onHealthCheck={runRootHealthCheck}
-          onRepairHealth={repairRootHealth}
-          onRegisterOrphanProfile={registerOrphanProfile}
-          onCreateBackup={createBackup}
-          onRequestRestoreBackup={requestRestoreBackup}
-          onConfirmRestoreBackup={restoreBackup}
-          onCancelRestoreBackup={() => setRestoreConfirmOpen(false)}
-          onFullBackupScopeChange={updateFullBackupScope}
-          onPreviewFullBackup={previewFullBackup}
-          onCreateFullBackup={createFullBackup}
-          onPreviewFullRestore={previewFullRestore}
-          onRequestFullRestore={requestFullRestore}
-          onRevealRootDirectory={revealRootDirectory}
-          onRevealBackupsDirectory={revealBackupsDirectory}
-          onBackupPathChange={setBackupPathDraft}
-          onFullBackupPathChange={(value) => {
-            setFullBackupPathDraft(value);
-            setFullRestorePreview(null);
-            setFullRestoreConfirmOpen(false);
           }}
           onClose={closeSettingsDialog}
         />
