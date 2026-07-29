@@ -151,6 +151,7 @@ interface RuntimeDiagnosticsState {
   status: RuntimeDiagnosticsStatus;
   tabs: BrowserRuntimeTabSnapshot[];
   error: string | null;
+  navigationConfirmationMessage: string | null;
   navigateUrl: string;
   navigateStatus: RuntimeDiagnosticsStatus;
   navigateResult: BrowserRuntimeNavigationResult | null;
@@ -167,6 +168,16 @@ const RUNNING_STATUS_POLL_MS = 5000;
 const LAUNCH_CONFIRMATION_DELAY_MS = 2000;
 const MAX_BROWSER_OPERATIONS = 20;
 const BROWSER_COMMAND_TIMEOUT_MS = 120_000;
+const RUNTIME_NAVIGATION_CONFIRMATION_POLL_MS = 100;
+const RUNTIME_NAVIGATION_CONFIRMATION_MAX_ATTEMPTS = 3;
+
+function runtimeNavigationUrlMatches(targetUrl: string, tabUrl: string): boolean {
+  try {
+    return new URL(targetUrl).href === new URL(tabUrl).href;
+  } catch {
+    return targetUrl.replace(/\/+$/, "") === tabUrl.replace(/\/+$/, "");
+  }
+}
 
 interface PendingDelete {
   profile: ChromeProfile;
@@ -220,6 +231,7 @@ function App() {
       status: "idle",
       tabs: [],
       error: null,
+      navigationConfirmationMessage: null,
       navigateUrl: "",
       navigateStatus: "idle",
       navigateResult: null,
@@ -388,6 +400,12 @@ function App() {
 
   useEffect(() => {
     void boot();
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      runtimeDiagnosticsRequestIdRef.current += 1;
+    };
   }, []);
 
   useEffect(() => {
@@ -1055,6 +1073,7 @@ function App() {
       status: "idle",
       tabs: [],
       error: null,
+      navigationConfirmationMessage: null,
       navigateUrl: "",
       navigateStatus: "idle",
       navigateResult: null,
@@ -1088,7 +1107,8 @@ function App() {
       ...current,
       status: "loading",
       tabs: [],
-      error: null
+      error: null,
+      navigationConfirmationMessage: null
     }));
     try {
       const tabs = await profileApi.listRuntimeTabs(requestRootPath, profileId);
@@ -1099,7 +1119,8 @@ function App() {
         ...current,
         status: "succeeded",
         tabs,
-        error: null
+        error: null,
+        navigationConfirmationMessage: null
       }));
     } catch (error) {
       if (!isRuntimeDiagnosticsRequestCurrent(requestId, profileId, requestRootPath)) {
@@ -1109,7 +1130,8 @@ function App() {
         ...current,
         status: "failed",
         tabs: [],
-        error: errorMessage(error)
+        error: errorMessage(error),
+        navigationConfirmationMessage: null
       }));
     }
   }
@@ -1120,7 +1142,8 @@ function App() {
       navigateUrl: value,
       navigateStatus: "idle",
       navigateResult: null,
-      navigateError: null
+      navigateError: null,
+      navigationConfirmationMessage: null
     }));
   }
 
@@ -1158,21 +1181,55 @@ function App() {
         ...current,
         status: "loading",
         error: null,
+        navigationConfirmationMessage: null,
         navigateStatus: "succeeded",
         navigateResult: result,
         navigateError: null
       }));
 
       try {
-        const tabs = await profileApi.listRuntimeTabs(requestRootPath, profileId);
-        if (!isRuntimeDiagnosticsRequestCurrent(requestId, profileId, requestRootPath)) {
-          return;
+        let tabs: BrowserRuntimeTabSnapshot[] = [];
+        for (
+          let attempt = 0;
+          attempt < RUNTIME_NAVIGATION_CONFIRMATION_MAX_ATTEMPTS;
+          attempt += 1
+        ) {
+          tabs = await profileApi.listRuntimeTabs(requestRootPath, profileId);
+          if (!isRuntimeDiagnosticsRequestCurrent(requestId, profileId, requestRootPath)) {
+            return;
+          }
+
+          const navigationConfirmed = tabs.some(
+            (tab) =>
+              tab.targetId === result.targetId && runtimeNavigationUrlMatches(result.url, tab.url)
+          );
+          if (navigationConfirmed) {
+            setRuntimeDiagnosticsState((current) => ({
+              ...current,
+              status: "succeeded",
+              tabs,
+              error: null,
+              navigationConfirmationMessage: null
+            }));
+            return;
+          }
+
+          if (attempt < RUNTIME_NAVIGATION_CONFIRMATION_MAX_ATTEMPTS - 1) {
+            await new Promise<void>((resolve) =>
+              setTimeout(resolve, RUNTIME_NAVIGATION_CONFIRMATION_POLL_MS)
+            );
+            if (!isRuntimeDiagnosticsRequestCurrent(requestId, profileId, requestRootPath)) {
+              return;
+            }
+          }
         }
+
         setRuntimeDiagnosticsState((current) => ({
           ...current,
           status: "succeeded",
           tabs,
-          error: null
+          error: null,
+          navigationConfirmationMessage: "导航成功，但暂未确认标签页已更新。"
         }));
       } catch (error) {
         if (!isRuntimeDiagnosticsRequestCurrent(requestId, profileId, requestRootPath)) {
@@ -1181,7 +1238,8 @@ function App() {
         setRuntimeDiagnosticsState((current) => ({
           ...current,
           status: "failed",
-          error: `导航成功，但刷新标签页失败：${errorMessage(error)}`
+          error: `导航成功，但刷新标签页失败：${errorMessage(error)}`,
+          navigationConfirmationMessage: null
         }));
       }
     } catch (error) {
@@ -3428,6 +3486,8 @@ function App() {
             status: runtimeDiagnosticsState.status,
             tabs: runtimeDiagnosticsState.tabs,
             error: runtimeDiagnosticsState.error,
+            navigationConfirmationMessage:
+              runtimeDiagnosticsState.navigationConfirmationMessage,
             onReadTabs: readRuntimeTabsForSelectedProfile,
             navigateUrl: runtimeDiagnosticsState.navigateUrl,
             navigateStatus: runtimeDiagnosticsState.navigateStatus,

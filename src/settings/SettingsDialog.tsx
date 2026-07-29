@@ -40,6 +40,7 @@ export interface RuntimeDiagnosticsProps {
   status: RuntimeDiagnosticsStatus;
   tabs: BrowserRuntimeTabSnapshot[];
   error: string | null;
+  navigationConfirmationMessage?: string | null;
   onReadTabs: () => Promise<void> | void;
   navigateUrl: string;
   navigateStatus: RuntimeDiagnosticsStatus;
@@ -583,6 +584,11 @@ export function SettingsDialog({
             runtimeDiagnostics.navigateResult ? (
               <p className="health-state-line success">
                 已导航第一个 page 标签页：{runtimeDiagnostics.navigateResult.url}
+              </p>
+            ) : null}
+            {runtimeDiagnostics.navigationConfirmationMessage ? (
+              <p className="health-empty">
+                {runtimeDiagnostics.navigationConfirmationMessage}
               </p>
             ) : null}
             {runtimeDiagnostics.status === "failed" && runtimeDiagnostics.error ? (
