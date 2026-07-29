@@ -84,10 +84,9 @@ import { FullRestoreConfirmDialog } from "./data-safety/FullRestoreConfirmDialog
 import { EditProjectDialog } from "./projects/EditProjectDialog";
 import { ProjectsView } from "./projects/ProjectsView";
 import {
-  SettingsDialog,
-  type FullBackupScope,
-  type FullBackupWorking
+  SettingsDialog
 } from "./settings/SettingsDialog";
+import { useDataSafetySettings } from "./settings/useDataSafetySettings";
 import { useRuntimeDiagnostics } from "./settings/useRuntimeDiagnostics";
 import {
   createUrlLibraryDraft,
@@ -125,17 +124,11 @@ import type {
   AirdropProject,
   AppTheme,
   ChromeProfile,
-  FullProfileBackupPreview,
-  FullProfileBackupResult,
-  FullProfileRestorePreview,
-  ProfileBackupResult,
   ProfileImportCandidate,
   ProfileDocument,
   ProjectUrl,
   ProfileMarker,
   ProfileSettings,
-  RootHealthReport,
-  RootRepairResult,
   UrlLibraryItem
 } from "./types";
 import { useBrowserSessions } from "./useBrowserSessions";
@@ -234,26 +227,26 @@ function App() {
   const [windowFocusing, setWindowFocusing] = useState(false);
   const [layoutSourceProfileId, setLayoutSourceProfileId] = useState("");
   const [openingProjectId, setOpeningProjectId] = useState<string | null>(null);
-  const [healthReport, setHealthReport] = useState<RootHealthReport | null>(null);
-  const [healthChecking, setHealthChecking] = useState(false);
-  const [healthRepairing, setHealthRepairing] = useState(false);
-  const [orphanRegisteringId, setOrphanRegisteringId] = useState<string | null>(null);
-  const [repairResult, setRepairResult] = useState<RootRepairResult | null>(null);
-  const [backupResult, setBackupResult] = useState<ProfileBackupResult | null>(null);
-  const [backupPathDraft, setBackupPathDraft] = useState("");
-  const [backupWorking, setBackupWorking] = useState<"create" | "restore" | null>(null);
-  const [restoreConfirmOpen, setRestoreConfirmOpen] = useState(false);
-  const [fullBackupScope, setFullBackupScope] = useState<FullBackupScope>("all");
-  const [fullBackupPreview, setFullBackupPreview] =
-    useState<FullProfileBackupPreview | null>(null);
-  const [fullBackupResult, setFullBackupResult] =
-    useState<FullProfileBackupResult | null>(null);
-  const [fullBackupPathDraft, setFullBackupPathDraft] = useState("");
-  const [fullRestorePreview, setFullRestorePreview] =
-    useState<FullProfileRestorePreview | null>(null);
-  const [fullBackupWorking, setFullBackupWorking] = useState<FullBackupWorking | null>(null);
-  const [fullRestoreConfirmOpen, setFullRestoreConfirmOpen] = useState(false);
   const [message, setMessage] = useState("正在初始化...");
+  const dataSafetySettings = useDataSafetySettings({
+    rootPath,
+    profiles,
+    selectedProfileIds: selectedIds,
+    onPersistProfiles: (nextProfiles, nextMessage) => persist(nextProfiles, nextMessage),
+    onRestoreDocument: restoreDataSafetyDocument,
+    onMessage: setMessage
+  });
+  const {
+    health,
+    lightBackup,
+    fullBackup,
+    fullRestoreConfirmOpen,
+    fullRestorePreview,
+    fullBackupWorking,
+    cancelFullRestore,
+    confirmFullRestore,
+    closeDataSafetyDialogs
+  } = dataSafetySettings;
   const launchingProfileIdsRef = useRef(new Set<string>());
   const bulkOpenCancelledRef = useRef(false);
   const projectOpenCancelledRef = useRef(false);
@@ -485,16 +478,6 @@ function App() {
     }
   }
 
-  function resetFullBackupState() {
-    setFullBackupScope("all");
-    setFullBackupPreview(null);
-    setFullBackupResult(null);
-    setFullBackupPathDraft("");
-    setFullRestorePreview(null);
-    setFullBackupWorking(null);
-    setFullRestoreConfirmOpen(false);
-  }
-
   async function readRootData(path: string): Promise<LoadedRootData> {
     const status = await profileApi.initProfileRoot(path);
     const document = await profileApi.loadProfiles(path);
@@ -506,11 +489,7 @@ function App() {
 
   async function commitLoadedRoot(path: string, loaded: LoadedRootData) {
     clearLaunchConfirmationRefresh();
-    setHealthReport(null);
-    setRepairResult(null);
-    setBackupResult(null);
-    setRestoreConfirmOpen(false);
-    resetFullBackupState();
+    dataSafetySettings.resetDataSafetyState();
     setRootPath(path);
     setRootPathDraft(path);
     setRootStatus(loaded.status);
@@ -655,6 +634,45 @@ function App() {
     setSelectedIds((current) =>
       current.filter((id) => nextProfiles.some((profile) => profile.id === id))
     );
+    setMessage(nextMessage);
+  }
+
+  function restoreDataSafetyDocument({
+    document,
+    settings: restoredSettings,
+    rootStatus: status,
+    chromeStatus: chrome,
+    message: nextMessage
+  }: {
+    document: ProfileDocument;
+    settings: ProfileSettings;
+    rootStatus: RootStatus;
+    chromeStatus: ChromeStatus;
+    message: string;
+  }) {
+    setProfiles(document.profiles);
+    setProjects(document.projects);
+    setSettings(restoredSettings);
+    setBrowserPathDraft(restoredSettings.browserPath);
+    setThemeDraft(restoredSettings.theme);
+    setRootStatus(status);
+    setChromeStatus(chrome);
+    setEditingId(null);
+    setEditingProfileDraft(null);
+    setEditingProjectId(null);
+    setEditingProjectDraft(null);
+    setNewProfileDraft(null);
+    setNewProjectDraft(null);
+    setPendingProjectDeleteId(null);
+    setPendingDelete(null);
+    setSelectedIds([]);
+    setBulkTag("");
+    setBulkUrl("");
+    setProjectQuery("");
+    setOpeningProjectId(null);
+    setProfileSizes({});
+    launchingProfileIdsRef.current.clear();
+    projectOpenCancelledRef.current = false;
     setMessage(nextMessage);
   }
 
@@ -1081,15 +1099,14 @@ function App() {
     setRootPathDraft(rootPath);
     setBrowserPathDraft(settings.browserPath);
     setThemeDraft(settings.theme);
-    setRestoreConfirmOpen(false);
-    setFullRestoreConfirmOpen(false);
+    closeDataSafetyDialogs();
     resetRuntimeDiagnostics();
     setSettingsOpen(false);
   }
 
   function closeActiveDialog() {
     if (fullRestoreConfirmOpen) {
-      setFullRestoreConfirmOpen(false);
+      cancelFullRestore();
       return;
     }
     if (pendingBatchDelete) {
@@ -1614,313 +1631,6 @@ function App() {
       await loadRoot(nextRootPath);
     } catch (error) {
       setMessage(errorMessage(error));
-    }
-  }
-
-  async function runRootHealthCheck() {
-    if (!rootPath.trim()) {
-      setMessage("请先填写配置根目录");
-      return;
-    }
-
-    setHealthChecking(true);
-    try {
-      const report = await profileApi.checkProfileRootHealth(rootPath);
-      setHealthReport(report);
-      setRepairResult(null);
-      const { errorCount, warningCount } = report.summary;
-      if (errorCount > 0) {
-        setMessage(`健康检查发现 ${errorCount} 个错误`);
-      } else if (warningCount > 0) {
-        setMessage(`健康检查发现 ${warningCount} 个提醒`);
-      } else {
-        setMessage("目录健康检查通过");
-      }
-    } catch (error) {
-      setMessage(errorMessage(error));
-    } finally {
-      setHealthChecking(false);
-    }
-  }
-
-  async function repairRootHealth() {
-    if (!rootPath.trim()) {
-      setMessage("请先填写配置根目录");
-      return;
-    }
-
-    setHealthRepairing(true);
-    try {
-      const result = await profileApi.repairProfileRootHealth(rootPath);
-      setRepairResult(result);
-      setHealthReport(result.health);
-      if (result.repairedCount > 0) {
-        setMessage(`已修复 ${result.repairedCount} 个问题`);
-      } else {
-        setMessage("没有可自动修复的问题");
-      }
-    } catch (error) {
-      setMessage(errorMessage(error));
-    } finally {
-      setHealthRepairing(false);
-    }
-  }
-
-  async function registerOrphanProfile(profileId: string) {
-    if (!rootPath.trim()) {
-      setMessage("请先填写配置根目录");
-      return;
-    }
-    if (profiles.some((profile) => profile.id === profileId)) {
-      setMessage(`${profileId} 已经登记`);
-      return;
-    }
-
-    const now = new Date().toISOString();
-    const profile: ChromeProfile = {
-      id: profileId,
-      name: profileId,
-      tags: [],
-      notes: "从已有 Profile 目录登记",
-      status: "active",
-      accountPlatforms: [],
-      accentColor: defaultAccentColor(profileId),
-      createdAt: now,
-      updatedAt: now,
-      lastOpenedAt: null
-    };
-
-    setOrphanRegisteringId(profileId);
-    try {
-      await persist([...profiles, profile], `已登记 ${profileId}`);
-      const report = await profileApi.checkProfileRootHealth(rootPath);
-      setHealthReport(report);
-      setRepairResult(null);
-    } catch (error) {
-      setMessage(errorMessage(error));
-    } finally {
-      setOrphanRegisteringId(null);
-    }
-  }
-
-  async function createBackup() {
-    if (!rootPath.trim()) {
-      setMessage("请先填写配置根目录");
-      return;
-    }
-
-    setBackupWorking("create");
-    try {
-      const backup = await profileApi.createProfilesBackup(rootPath);
-      setBackupResult(backup);
-      setBackupPathDraft(backup.path);
-      setRestoreConfirmOpen(false);
-      setMessage(`已创建备份：${backup.profileCount} 个账号`);
-    } catch (error) {
-      setMessage(errorMessage(error));
-    } finally {
-      setBackupWorking(null);
-    }
-  }
-
-  function requestRestoreBackup() {
-    const backupPath = backupPathDraft.trim();
-    if (!backupPath) {
-      setMessage("请先填写备份文件路径");
-      return;
-    }
-
-    setRestoreConfirmOpen(true);
-  }
-
-  async function restoreBackup() {
-    const backupPath = backupPathDraft.trim();
-    setBackupWorking("restore");
-    try {
-      const document = await profileApi.restoreProfilesBackup(rootPath, backupPath);
-      const restoredSettings = normalizeSettings(document.settings);
-      const status = await profileApi.initProfileRoot(rootPath);
-      const chrome = await profileApi.detectChrome(restoredSettings.browserPath);
-      setProfiles(document.profiles);
-      setProjects(document.projects);
-      setSettings(restoredSettings);
-      setBrowserPathDraft(restoredSettings.browserPath);
-      setThemeDraft(restoredSettings.theme);
-      setRootStatus(status);
-      setChromeStatus(chrome);
-      setEditingId(null);
-      setEditingProfileDraft(null);
-      setEditingProjectId(null);
-      setEditingProjectDraft(null);
-      setNewProfileDraft(null);
-      setNewProjectDraft(null);
-      setPendingProjectDeleteId(null);
-      setPendingDelete(null);
-      setSelectedIds([]);
-      setBulkTag("");
-      setBulkUrl("");
-      setProjectQuery("");
-      setOpeningProjectId(null);
-      setProfileSizes({});
-      setHealthReport(null);
-      setRepairResult(null);
-      setBackupResult(null);
-      setRestoreConfirmOpen(false);
-      launchingProfileIdsRef.current.clear();
-      projectOpenCancelledRef.current = false;
-      setMessage(`已从备份恢复 ${document.profiles.length} 个账号`);
-    } catch (error) {
-      setMessage(errorMessage(error));
-    } finally {
-      setBackupWorking(null);
-    }
-  }
-
-  function selectedFullBackupProfileIds() {
-    if (fullBackupScope === "all") {
-      return [];
-    }
-
-    return selectedIds;
-  }
-
-  function updateFullBackupScope(scope: FullBackupScope) {
-    setFullBackupScope(scope);
-    setFullBackupPreview(null);
-    setFullBackupResult(null);
-  }
-
-  async function previewFullBackup() {
-    if (!rootPath.trim()) {
-      setMessage("请先填写配置根目录");
-      return;
-    }
-    if (fullBackupScope === "selected" && selectedIds.length === 0) {
-      setMessage("请先选择要完整备份的账号");
-      return;
-    }
-
-    setFullBackupWorking("preview");
-    setFullBackupResult(null);
-    try {
-      const preview = await profileApi.previewFullProfileBackup(
-        rootPath,
-        selectedFullBackupProfileIds()
-      );
-      setFullBackupPreview(preview);
-      setMessage(`已预览完整备份：${preview.profileCount} 个账号`);
-    } catch (error) {
-      setMessage(errorMessage(error));
-    } finally {
-      setFullBackupWorking(null);
-    }
-  }
-
-  async function createFullBackup() {
-    if (!rootPath.trim()) {
-      setMessage("请先填写配置根目录");
-      return;
-    }
-    if (fullBackupScope === "selected" && selectedIds.length === 0) {
-      setMessage("请先选择要完整备份的账号");
-      return;
-    }
-
-    setFullBackupWorking("create");
-    try {
-      const backup = await profileApi.createFullProfileBackup(
-        rootPath,
-        selectedFullBackupProfileIds()
-      );
-      setFullBackupResult(backup);
-      setFullBackupPathDraft(backup.path);
-      setFullRestorePreview(null);
-      setFullRestoreConfirmOpen(false);
-      setMessage(`完整备份已创建：${backup.profileCount} 个账号`);
-    } catch (error) {
-      setMessage(errorMessage(error));
-    } finally {
-      setFullBackupWorking(null);
-    }
-  }
-
-  async function previewFullRestore() {
-    const backupPath = fullBackupPathDraft.trim();
-    if (!backupPath) {
-      setMessage("请先填写完整备份目录路径");
-      return;
-    }
-
-    setFullBackupWorking("restore-preview");
-    setFullRestorePreview(null);
-    setFullRestoreConfirmOpen(false);
-    try {
-      const preview = await profileApi.previewFullProfileRestore(rootPath, backupPath);
-      setFullRestorePreview(preview);
-      setMessage(`已扫描完整备份：${preview.profileCount} 个账号`);
-    } catch (error) {
-      setMessage(errorMessage(error));
-    } finally {
-      setFullBackupWorking(null);
-    }
-  }
-
-  function requestFullRestore() {
-    if (!fullRestorePreview) {
-      setMessage("请先扫描完整备份");
-      return;
-    }
-
-    setFullRestoreConfirmOpen(true);
-  }
-
-  async function restoreFullBackup() {
-    if (!fullRestorePreview) {
-      return;
-    }
-
-    setFullBackupWorking("restore");
-    try {
-      const document = await profileApi.restoreFullProfileBackup(
-        rootPath,
-        fullRestorePreview.path,
-        true
-      );
-      const restoredSettings = normalizeSettings(document.settings);
-      const status = await profileApi.initProfileRoot(rootPath);
-      const chrome = await profileApi.detectChrome(restoredSettings.browserPath);
-      setProfiles(document.profiles);
-      setProjects(document.projects);
-      setSettings(restoredSettings);
-      setBrowserPathDraft(restoredSettings.browserPath);
-      setThemeDraft(restoredSettings.theme);
-      setRootStatus(status);
-      setChromeStatus(chrome);
-      setEditingId(null);
-      setEditingProfileDraft(null);
-      setEditingProjectId(null);
-      setEditingProjectDraft(null);
-      setNewProfileDraft(null);
-      setNewProjectDraft(null);
-      setPendingProjectDeleteId(null);
-      setPendingDelete(null);
-      setSelectedIds([]);
-      setBulkTag("");
-      setBulkUrl("");
-      setProjectQuery("");
-      setOpeningProjectId(null);
-      setProfileSizes({});
-      setHealthReport(null);
-      setRepairResult(null);
-      setFullRestorePreview(null);
-      setFullRestoreConfirmOpen(false);
-      launchingProfileIdsRef.current.clear();
-      projectOpenCancelledRef.current = false;
-      setMessage(`完整备份已恢复：${document.profiles.length} 个账号`);
-    } catch (error) {
-      setMessage(errorMessage(error));
-    } finally {
-      setFullBackupWorking(null);
     }
   }
 
@@ -3317,46 +3027,9 @@ function App() {
             onRevealRootDirectory: revealRootDirectory,
             onRevealBackupsDirectory: revealBackupsDirectory
           }}
-          health={{
-            healthReport,
-            healthChecking,
-            healthRepairing,
-            orphanRegisteringId,
-            repairResult,
-            onHealthCheck: runRootHealthCheck,
-            onRepairHealth: repairRootHealth,
-            onRegisterOrphanProfile: registerOrphanProfile
-          }}
-          lightBackup={{
-            backupResult,
-            backupPathDraft,
-            backupWorking,
-            restoreConfirmOpen,
-            onCreateBackup: createBackup,
-            onRequestRestoreBackup: requestRestoreBackup,
-            onConfirmRestoreBackup: restoreBackup,
-            onCancelRestoreBackup: () => setRestoreConfirmOpen(false),
-            onBackupPathChange: setBackupPathDraft
-          }}
-          fullBackup={{
-            fullBackupScope,
-            fullBackupPreview,
-            fullBackupResult,
-            fullBackupPathDraft,
-            fullRestorePreview,
-            fullBackupWorking,
-            selectedProfileCount: selectedIds.length,
-            onFullBackupScopeChange: updateFullBackupScope,
-            onPreviewFullBackup: previewFullBackup,
-            onCreateFullBackup: createFullBackup,
-            onPreviewFullRestore: previewFullRestore,
-            onRequestFullRestore: requestFullRestore,
-            onFullBackupPathChange: (value) => {
-              setFullBackupPathDraft(value);
-              setFullRestorePreview(null);
-              setFullRestoreConfirmOpen(false);
-            }
-          }}
+          health={health}
+          lightBackup={lightBackup}
+          fullBackup={fullBackup}
           runtimeDiagnostics={runtimeDiagnostics}
           onClose={closeSettingsDialog}
         />
@@ -3366,8 +3039,8 @@ function App() {
         <FullRestoreConfirmDialog
           preview={fullRestorePreview}
           working={fullBackupWorking === "restore"}
-          onCancel={() => setFullRestoreConfirmOpen(false)}
-          onConfirm={restoreFullBackup}
+          onCancel={cancelFullRestore}
+          onConfirm={confirmFullRestore}
         />
       ) : null}
     </div>

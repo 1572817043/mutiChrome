@@ -1,0 +1,415 @@
+import { useState } from "react";
+import { normalizeSettings, profileApi, type ChromeStatus, type RootStatus } from "../api";
+import { defaultAccentColor } from "../domain/profileModel";
+import { errorMessage } from "../shared/windowAutomationErrors";
+import type {
+  ChromeProfile,
+  FullProfileBackupPreview,
+  FullProfileBackupResult,
+  FullProfileRestorePreview,
+  ProfileBackupResult,
+  ProfileDocument,
+  ProfileSettings,
+  RootHealthReport,
+  RootRepairResult
+} from "../types";
+import type {
+  FullBackupScope,
+  FullBackupWorking,
+  SettingsDialogFullBackupProps,
+  SettingsDialogHealthProps,
+  SettingsDialogLightBackupProps
+} from "./SettingsDialog";
+
+interface RestoreDocumentInput {
+  document: ProfileDocument;
+  settings: ProfileSettings;
+  rootStatus: RootStatus;
+  chromeStatus: ChromeStatus;
+  message: string;
+}
+
+interface UseDataSafetySettingsOptions {
+  rootPath: string;
+  profiles: ChromeProfile[];
+  selectedProfileIds: string[];
+  onPersistProfiles: (nextProfiles: ChromeProfile[], message: string) => Promise<void>;
+  onRestoreDocument: (input: RestoreDocumentInput) => void;
+  onMessage: (message: string) => void;
+}
+
+export function useDataSafetySettings({
+  rootPath,
+  profiles,
+  selectedProfileIds,
+  onPersistProfiles,
+  onRestoreDocument,
+  onMessage
+}: UseDataSafetySettingsOptions) {
+  const [healthReport, setHealthReport] = useState<RootHealthReport | null>(null);
+  const [healthChecking, setHealthChecking] = useState(false);
+  const [healthRepairing, setHealthRepairing] = useState(false);
+  const [orphanRegisteringId, setOrphanRegisteringId] = useState<string | null>(null);
+  const [repairResult, setRepairResult] = useState<RootRepairResult | null>(null);
+  const [backupResult, setBackupResult] = useState<ProfileBackupResult | null>(null);
+  const [backupPathDraft, setBackupPathDraft] = useState("");
+  const [backupWorking, setBackupWorking] = useState<"create" | "restore" | null>(null);
+  const [restoreConfirmOpen, setRestoreConfirmOpen] = useState(false);
+  const [fullBackupScope, setFullBackupScope] = useState<FullBackupScope>("all");
+  const [fullBackupPreview, setFullBackupPreview] = useState<FullProfileBackupPreview | null>(null);
+  const [fullBackupResult, setFullBackupResult] = useState<FullProfileBackupResult | null>(null);
+  const [fullBackupPathDraft, setFullBackupPathDraft] = useState("");
+  const [fullRestorePreview, setFullRestorePreview] =
+    useState<FullProfileRestorePreview | null>(null);
+  const [fullBackupWorking, setFullBackupWorking] = useState<FullBackupWorking | null>(null);
+  const [fullRestoreConfirmOpen, setFullRestoreConfirmOpen] = useState(false);
+
+  function resetDataSafetyState() {
+    setHealthReport(null);
+    setRepairResult(null);
+    setBackupResult(null);
+    setRestoreConfirmOpen(false);
+    setFullBackupScope("all");
+    setFullBackupPreview(null);
+    setFullBackupResult(null);
+    setFullBackupPathDraft("");
+    setFullRestorePreview(null);
+    setFullBackupWorking(null);
+    setFullRestoreConfirmOpen(false);
+  }
+
+  function closeDataSafetyDialogs() {
+    setRestoreConfirmOpen(false);
+    setFullRestoreConfirmOpen(false);
+  }
+
+  function clearLightBackupRestoreState() {
+    setHealthReport(null);
+    setRepairResult(null);
+    setBackupResult(null);
+    setRestoreConfirmOpen(false);
+  }
+
+  function clearFullBackupRestoreState() {
+    setHealthReport(null);
+    setRepairResult(null);
+    setFullRestorePreview(null);
+    setFullRestoreConfirmOpen(false);
+  }
+
+  async function runRootHealthCheck() {
+    if (!rootPath.trim()) {
+      onMessage("请先填写配置根目录");
+      return;
+    }
+
+    setHealthChecking(true);
+    try {
+      const report = await profileApi.checkProfileRootHealth(rootPath);
+      setHealthReport(report);
+      setRepairResult(null);
+      const { errorCount, warningCount } = report.summary;
+      if (errorCount > 0) {
+        onMessage(`健康检查发现 ${errorCount} 个错误`);
+      } else if (warningCount > 0) {
+        onMessage(`健康检查发现 ${warningCount} 个提醒`);
+      } else {
+        onMessage("目录健康检查通过");
+      }
+    } catch (error) {
+      onMessage(errorMessage(error));
+    } finally {
+      setHealthChecking(false);
+    }
+  }
+
+  async function repairRootHealth() {
+    if (!rootPath.trim()) {
+      onMessage("请先填写配置根目录");
+      return;
+    }
+
+    setHealthRepairing(true);
+    try {
+      const result = await profileApi.repairProfileRootHealth(rootPath);
+      setRepairResult(result);
+      setHealthReport(result.health);
+      onMessage(
+        result.repairedCount > 0
+          ? `已修复 ${result.repairedCount} 个问题`
+          : "没有可自动修复的问题"
+      );
+    } catch (error) {
+      onMessage(errorMessage(error));
+    } finally {
+      setHealthRepairing(false);
+    }
+  }
+
+  async function registerOrphanProfile(profileId: string) {
+    if (!rootPath.trim()) {
+      onMessage("请先填写配置根目录");
+      return;
+    }
+    if (profiles.some((profile) => profile.id === profileId)) {
+      onMessage(`${profileId} 已经登记`);
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const profile: ChromeProfile = {
+      id: profileId,
+      name: profileId,
+      tags: [],
+      notes: "从已有 Profile 目录登记",
+      status: "active",
+      accountPlatforms: [],
+      accentColor: defaultAccentColor(profileId),
+      createdAt: now,
+      updatedAt: now,
+      lastOpenedAt: null
+    };
+
+    setOrphanRegisteringId(profileId);
+    try {
+      await onPersistProfiles([...profiles, profile], `已登记 ${profileId}`);
+      const report = await profileApi.checkProfileRootHealth(rootPath);
+      setHealthReport(report);
+      setRepairResult(null);
+    } catch (error) {
+      onMessage(errorMessage(error));
+    } finally {
+      setOrphanRegisteringId(null);
+    }
+  }
+
+  async function createBackup() {
+    if (!rootPath.trim()) {
+      onMessage("请先填写配置根目录");
+      return;
+    }
+
+    setBackupWorking("create");
+    try {
+      const backup = await profileApi.createProfilesBackup(rootPath);
+      setBackupResult(backup);
+      setBackupPathDraft(backup.path);
+      setRestoreConfirmOpen(false);
+      onMessage(`已创建备份：${backup.profileCount} 个账号`);
+    } catch (error) {
+      onMessage(errorMessage(error));
+    } finally {
+      setBackupWorking(null);
+    }
+  }
+
+  function requestRestoreBackup() {
+    if (!backupPathDraft.trim()) {
+      onMessage("请先填写备份文件路径");
+      return;
+    }
+
+    setRestoreConfirmOpen(true);
+  }
+
+  async function restoreBackup() {
+    const backupPath = backupPathDraft.trim();
+    setBackupWorking("restore");
+    try {
+      const document = await profileApi.restoreProfilesBackup(rootPath, backupPath);
+      const settings = normalizeSettings(document.settings);
+      const rootStatus = await profileApi.initProfileRoot(rootPath);
+      const chromeStatus = await profileApi.detectChrome(settings.browserPath);
+      onRestoreDocument({
+        document,
+        settings,
+        rootStatus,
+        chromeStatus,
+        message: `已从备份恢复 ${document.profiles.length} 个账号`
+      });
+      clearLightBackupRestoreState();
+    } catch (error) {
+      onMessage(errorMessage(error));
+    } finally {
+      setBackupWorking(null);
+    }
+  }
+
+  function selectedFullBackupProfileIds() {
+    return fullBackupScope === "all" ? [] : selectedProfileIds;
+  }
+
+  function updateFullBackupScope(scope: FullBackupScope) {
+    setFullBackupScope(scope);
+    setFullBackupPreview(null);
+    setFullBackupResult(null);
+  }
+
+  async function previewFullBackup() {
+    if (!rootPath.trim()) {
+      onMessage("请先填写配置根目录");
+      return;
+    }
+    if (fullBackupScope === "selected" && selectedProfileIds.length === 0) {
+      onMessage("请先选择要完整备份的账号");
+      return;
+    }
+
+    setFullBackupWorking("preview");
+    setFullBackupResult(null);
+    try {
+      const preview = await profileApi.previewFullProfileBackup(
+        rootPath,
+        selectedFullBackupProfileIds()
+      );
+      setFullBackupPreview(preview);
+      onMessage(`已预览完整备份：${preview.profileCount} 个账号`);
+    } catch (error) {
+      onMessage(errorMessage(error));
+    } finally {
+      setFullBackupWorking(null);
+    }
+  }
+
+  async function createFullBackup() {
+    if (!rootPath.trim()) {
+      onMessage("请先填写配置根目录");
+      return;
+    }
+    if (fullBackupScope === "selected" && selectedProfileIds.length === 0) {
+      onMessage("请先选择要完整备份的账号");
+      return;
+    }
+
+    setFullBackupWorking("create");
+    try {
+      const backup = await profileApi.createFullProfileBackup(
+        rootPath,
+        selectedFullBackupProfileIds()
+      );
+      setFullBackupResult(backup);
+      setFullBackupPathDraft(backup.path);
+      setFullRestorePreview(null);
+      setFullRestoreConfirmOpen(false);
+      onMessage(`完整备份已创建：${backup.profileCount} 个账号`);
+    } catch (error) {
+      onMessage(errorMessage(error));
+    } finally {
+      setFullBackupWorking(null);
+    }
+  }
+
+  async function previewFullRestore() {
+    const backupPath = fullBackupPathDraft.trim();
+    if (!backupPath) {
+      onMessage("请先填写完整备份目录路径");
+      return;
+    }
+
+    setFullBackupWorking("restore-preview");
+    setFullRestorePreview(null);
+    setFullRestoreConfirmOpen(false);
+    try {
+      const preview = await profileApi.previewFullProfileRestore(rootPath, backupPath);
+      setFullRestorePreview(preview);
+      onMessage(`已扫描完整备份：${preview.profileCount} 个账号`);
+    } catch (error) {
+      onMessage(errorMessage(error));
+    } finally {
+      setFullBackupWorking(null);
+    }
+  }
+
+  function requestFullRestore() {
+    if (!fullRestorePreview) {
+      onMessage("请先扫描完整备份");
+      return;
+    }
+
+    setFullRestoreConfirmOpen(true);
+  }
+
+  async function restoreFullBackup() {
+    if (!fullRestorePreview) {
+      return;
+    }
+
+    setFullBackupWorking("restore");
+    try {
+      const document = await profileApi.restoreFullProfileBackup(
+        rootPath,
+        fullRestorePreview.path,
+        true
+      );
+      const settings = normalizeSettings(document.settings);
+      const rootStatus = await profileApi.initProfileRoot(rootPath);
+      const chromeStatus = await profileApi.detectChrome(settings.browserPath);
+      onRestoreDocument({
+        document,
+        settings,
+        rootStatus,
+        chromeStatus,
+        message: `完整备份已恢复：${document.profiles.length} 个账号`
+      });
+      clearFullBackupRestoreState();
+    } catch (error) {
+      onMessage(errorMessage(error));
+    } finally {
+      setFullBackupWorking(null);
+    }
+  }
+
+  const health: SettingsDialogHealthProps = {
+    healthReport,
+    healthChecking,
+    healthRepairing,
+    orphanRegisteringId,
+    repairResult,
+    onHealthCheck: runRootHealthCheck,
+    onRepairHealth: repairRootHealth,
+    onRegisterOrphanProfile: registerOrphanProfile
+  };
+  const lightBackup: SettingsDialogLightBackupProps = {
+    backupResult,
+    backupPathDraft,
+    backupWorking,
+    restoreConfirmOpen,
+    onCreateBackup: createBackup,
+    onRequestRestoreBackup: requestRestoreBackup,
+    onConfirmRestoreBackup: restoreBackup,
+    onCancelRestoreBackup: () => setRestoreConfirmOpen(false),
+    onBackupPathChange: setBackupPathDraft
+  };
+  const fullBackup: SettingsDialogFullBackupProps = {
+    fullBackupScope,
+    fullBackupPreview,
+    fullBackupResult,
+    fullBackupPathDraft,
+    fullRestorePreview,
+    fullBackupWorking,
+    selectedProfileCount: selectedProfileIds.length,
+    onFullBackupScopeChange: updateFullBackupScope,
+    onPreviewFullBackup: previewFullBackup,
+    onCreateFullBackup: createFullBackup,
+    onPreviewFullRestore: previewFullRestore,
+    onRequestFullRestore: requestFullRestore,
+    onFullBackupPathChange: (value) => {
+      setFullBackupPathDraft(value);
+      setFullRestorePreview(null);
+      setFullRestoreConfirmOpen(false);
+    }
+  };
+
+  return {
+    health,
+    lightBackup,
+    fullBackup,
+    fullRestoreConfirmOpen,
+    fullRestorePreview,
+    fullBackupWorking,
+    cancelFullRestore: () => setFullRestoreConfirmOpen(false),
+    confirmFullRestore: restoreFullBackup,
+    resetDataSafetyState,
+    closeDataSafetyDialogs
+  };
+}
