@@ -10,7 +10,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { normalizeSettings, profileApi, type BrowserSessionSnapshot } from "./api";
 import App from "./App";
-import type { ChromeProfile, ProfileDocument } from "./types";
+import type { ChromeProfile, ProfileDocument, RootHealthReport } from "./types";
 
 interface TestProject {
   id: string;
@@ -4742,6 +4742,9 @@ describe("App launcher layout", () => {
     fireEvent.change(within(dialog).getByLabelText("备份文件路径"), {
       target: { value: "/tmp/multichrome-backup.json" }
     });
+    fireEvent.change(within(dialog).getByLabelText("完整备份目录路径"), {
+      target: { value: "/tmp/full-profiles-1" }
+    });
     await user.click(within(dialog).getByRole("button", { name: "从备份恢复" }));
     expect(await within(dialog).findByText("确认从备份恢复")).toBeTruthy();
 
@@ -4750,6 +4753,80 @@ describe("App launcher layout", () => {
     const reopenedDialog = await screen.findByRole("dialog", { name: "设置" });
 
     expect(within(reopenedDialog).queryByText("确认从备份恢复")).toBeNull();
+    expect(
+      (within(reopenedDialog).getByLabelText("备份文件路径") as HTMLInputElement).value
+    ).toBe("/tmp/multichrome-backup.json");
+    expect(
+      (within(reopenedDialog).getByLabelText("完整备份目录路径") as HTMLInputElement).value
+    ).toBe("/tmp/full-profiles-1");
+  });
+
+  test("切换根目录会保留轻量备份路径并清除完整备份草稿", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    const dialog = await openSettingsDialog(user);
+    fireEvent.change(within(dialog).getByLabelText("备份文件路径"), {
+      target: { value: "/tmp/multichrome-backup.json" }
+    });
+    fireEvent.change(within(dialog).getByLabelText("完整备份目录路径"), {
+      target: { value: "/tmp/full-profiles-1" }
+    });
+    changeRootPathDraft(dialog, "/tmp/other-root");
+    await detectRootPathDraft(user, dialog);
+
+    await waitFor(() => {
+      expect((within(dialog).getByLabelText("配置根目录") as HTMLInputElement).value).toBe(
+        "/tmp/other-root"
+      );
+    });
+    expect((within(dialog).getByLabelText("备份文件路径") as HTMLInputElement).value).toBe(
+      "/tmp/multichrome-backup.json"
+    );
+    expect(
+      (within(dialog).getByLabelText("完整备份目录路径") as HTMLInputElement).value
+    ).toBe("");
+  });
+
+  test("切换根目录不会提前结束进行中的健康检查", async () => {
+    const user = userEvent.setup();
+    let resolveHealthCheck!: (report: RootHealthReport) => void;
+    const checkHealthSpy = vi.spyOn(profileApi, "checkProfileRootHealth").mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveHealthCheck = resolve;
+        })
+    );
+    render(<App />);
+
+    const dialog = await openSettingsDialog(user);
+    await user.click(within(dialog).getByRole("button", { name: "健康检查" }));
+    expect((within(dialog).getByRole("button", { name: "检查中" }) as HTMLButtonElement).disabled).toBe(
+      true
+    );
+
+    changeRootPathDraft(dialog, "/tmp/other-root");
+    await detectRootPathDraft(user, dialog);
+    await waitFor(() => {
+      expect((within(dialog).getByLabelText("配置根目录") as HTMLInputElement).value).toBe(
+        "/tmp/other-root"
+      );
+    });
+    expect((within(dialog).getByRole("button", { name: "检查中" }) as HTMLButtonElement).disabled).toBe(
+      true
+    );
+
+    resolveHealthCheck({
+      rootPath: "~/MultiChromeProfiles",
+      summary: { profileCount: 0, warningCount: 0, errorCount: 0 },
+      issues: []
+    });
+    await waitFor(() => {
+      expect((within(dialog).getByRole("button", { name: "健康检查" }) as HTMLButtonElement).disabled).toBe(
+        false
+      );
+    });
+    checkHealthSpy.mockRestore();
   });
 
   test("设置弹窗按 Esc 会关闭并丢弃未保存的 Chrome 路径草稿", async () => {
@@ -4924,6 +5001,9 @@ describe("App launcher layout", () => {
 
     expect(await within(dialog).findByDisplayValue("/tmp/multichrome-backup.json")).toBeTruthy();
     expect(await screen.findByText("已创建备份：2 个账号")).toBeTruthy();
+    fireEvent.change(within(dialog).getByLabelText("完整备份目录路径"), {
+      target: { value: "/tmp/full-profiles-1" }
+    });
 
     await user.click(within(dialog).getByRole("button", { name: "从备份恢复" }));
 
@@ -4936,6 +5016,12 @@ describe("App launcher layout", () => {
       "~/MultiChromeProfiles",
       "/tmp/multichrome-backup.json"
     );
+    expect((within(dialog).getByLabelText("备份文件路径") as HTMLInputElement).value).toBe(
+      "/tmp/multichrome-backup.json"
+    );
+    expect(
+      (within(dialog).getByLabelText("完整备份目录路径") as HTMLInputElement).value
+    ).toBe("/tmp/full-profiles-1");
     createBackupSpy.mockRestore();
     restoreBackupSpy.mockRestore();
   });
@@ -5002,6 +5088,9 @@ describe("App launcher layout", () => {
 
     await user.click(await screen.findByRole("button", { name: "设置" }));
     const dialog = await screen.findByRole("dialog", { name: "设置" });
+    fireEvent.change(within(dialog).getByLabelText("备份文件路径"), {
+      target: { value: "/tmp/multichrome-backup.json" }
+    });
     fireEvent.change(within(dialog).getByLabelText("完整备份目录路径"), {
       target: { value: "/tmp/full-profiles-1" }
     });
@@ -5019,6 +5108,12 @@ describe("App launcher layout", () => {
 
     expect(await screen.findByRole("button", { name: "选择 备份号" })).toBeTruthy();
     expect(restoreSpy).toHaveBeenCalledWith("~/MultiChromeProfiles", "/tmp/full-profiles-1", true);
+    expect((within(dialog).getByLabelText("备份文件路径") as HTMLInputElement).value).toBe(
+      "/tmp/multichrome-backup.json"
+    );
+    expect(
+      (within(dialog).getByLabelText("完整备份目录路径") as HTMLInputElement).value
+    ).toBe("/tmp/full-profiles-1");
     previewSpy.mockRestore();
     restoreSpy.mockRestore();
   });
