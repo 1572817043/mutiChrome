@@ -87,6 +87,10 @@ import {
   SettingsDialog
 } from "./settings/SettingsDialog";
 import { useDataSafetySettings } from "./settings/useDataSafetySettings";
+import {
+  useRootSettings,
+  type RootSettingsLoadedData
+} from "./settings/useRootSettings";
 import { useRuntimeDiagnostics } from "./settings/useRuntimeDiagnostics";
 import {
   createUrlLibraryDraft,
@@ -122,7 +126,6 @@ import {
 import type {
   AccountPlatform,
   AirdropProject,
-  AppTheme,
   ChromeProfile,
   ProfileImportCandidate,
   ProfileDocument,
@@ -154,19 +157,12 @@ interface PendingDelete {
   mode: DeleteMode;
 }
 
-interface LoadedRootData {
-  status: RootStatus;
-  document: ProfileDocument;
-  settings: ProfileSettings;
+interface LoadedRootData extends RootSettingsLoadedData {
   launchEvents: BrowserLaunchEvent[];
-  chrome: ChromeStatus;
 }
 
 function App() {
   const [rootPath, setRootPath] = useState("");
-  const [rootPathDraft, setRootPathDraft] = useState("");
-  const [rootStatus, setRootStatus] = useState<RootStatus | null>(null);
-  const [chromeStatus, setChromeStatus] = useState<ChromeStatus | null>(null);
   const [settings, setSettings] = useState<ProfileSettings>({
     browserPath: DEFAULT_BROWSER_PATH,
     favoriteUrls: [],
@@ -174,8 +170,6 @@ function App() {
     urlLibrary: [],
     theme: "light"
   });
-  const [browserPathDraft, setBrowserPathDraft] = useState(DEFAULT_BROWSER_PATH);
-  const [themeDraft, setThemeDraft] = useState<AppTheme>("light");
   const [profiles, setProfiles] = useState<ChromeProfile[]>([]);
   const [projects, setProjects] = useState<AirdropProject[]>([]);
   const [activeView, setActiveView] = useState<ActiveView>("accounts");
@@ -228,6 +222,24 @@ function App() {
   const [layoutSourceProfileId, setLayoutSourceProfileId] = useState("");
   const [openingProjectId, setOpeningProjectId] = useState<string | null>(null);
   const [message, setMessage] = useState("正在初始化...");
+  const {
+    rootSettings,
+    chromeStatus,
+    themeDraft,
+    resetDrafts: resetRootSettingsDrafts,
+    syncLoadedRoot,
+    syncPersistedSettings,
+    syncRestoredRoot
+  } = useRootSettings<LoadedRootData>({
+    rootPath,
+    settings,
+    onLoadRoot: loadRoot,
+    onReadRootData: readRootData,
+    onCommitLoadedRoot: commitLoadedRoot,
+    onPersistSettings: (nextSettings) =>
+      persist(profiles, "设置已保存", nextSettings),
+    onMessage: setMessage
+  });
   const dataSafetySettings = useDataSafetySettings({
     rootPath,
     profiles,
@@ -491,12 +503,8 @@ function App() {
     clearLaunchConfirmationRefresh();
     dataSafetySettings.resetDataSafetyState();
     setRootPath(path);
-    setRootPathDraft(path);
-    setRootStatus(loaded.status);
+    syncLoadedRoot(path, loaded.status, loaded.settings, loaded.chrome);
     setSettings(loaded.settings);
-    setBrowserPathDraft(loaded.settings.browserPath);
-    setThemeDraft(loaded.settings.theme);
-    setChromeStatus(loaded.chrome);
     setProfiles(loaded.document.profiles);
     setProjects(loaded.document.projects);
     launchEventsRef.current = loaded.launchEvents;
@@ -599,10 +607,6 @@ function App() {
     return selectedProfiles.filter((profile) => runningIds.has(profile.id));
   }
 
-  function updateRootPathDraft(value: string) {
-    setRootPathDraft(value);
-  }
-
   async function persist(
     nextProfiles: ChromeProfile[],
     nextMessage: string,
@@ -625,12 +629,7 @@ function App() {
     setProfiles(nextProfiles);
     setProjects(sanitizedProjects);
     setSettings(sanitizedSettings);
-    if (sanitizedSettings.browserPath !== settings.browserPath) {
-      setBrowserPathDraft(sanitizedSettings.browserPath);
-    }
-    setRootStatus((current) =>
-      current ? { ...current, profileCount: nextProfiles.length } : current
-    );
+    syncPersistedSettings(sanitizedSettings, nextProfiles.length);
     setSelectedIds((current) =>
       current.filter((id) => nextProfiles.some((profile) => profile.id === id))
     );
@@ -653,10 +652,7 @@ function App() {
     setProfiles(document.profiles);
     setProjects(document.projects);
     setSettings(restoredSettings);
-    setBrowserPathDraft(restoredSettings.browserPath);
-    setThemeDraft(restoredSettings.theme);
-    setRootStatus(status);
-    setChromeStatus(chrome);
+    syncRestoredRoot(status, restoredSettings, chrome);
     setEditingId(null);
     setEditingProfileDraft(null);
     setEditingProjectId(null);
@@ -1028,77 +1024,14 @@ function App() {
     }
   }
 
-  async function saveSettingsDraft() {
-    const nextRootPath = rootPathDraft.trim();
-    if (!nextRootPath) {
-      setMessage("请先填写配置根目录");
-      return;
-    }
-
-    if (nextRootPath === rootPath) {
-      const nextSettings = normalizeSettings({
-        ...settings,
-        browserPath: browserPathDraft,
-        theme: themeDraft
-      });
-      try {
-        await persist(profiles, "设置已保存", nextSettings);
-        setBrowserPathDraft(nextSettings.browserPath);
-        setThemeDraft(nextSettings.theme);
-      } catch (error) {
-        setMessage(errorMessage(error));
-        return;
-      }
-
-      try {
-        setChromeStatus(await profileApi.detectChrome(nextSettings.browserPath));
-      } catch (error) {
-        setChromeStatus(null);
-        setMessage(errorMessage(error));
-      }
-      return;
-    }
-
-    try {
-      const loaded = await readRootData(nextRootPath);
-      const nextSettings = normalizeSettings({
-        ...loaded.settings,
-        browserPath: browserPathDraft,
-        theme: themeDraft
-      });
-      const nextDocument = { ...loaded.document, settings: nextSettings };
-      await profileApi.saveProfiles(nextRootPath, nextDocument);
-
-      let chrome = loaded.chrome;
-      let chromeDetectionError: unknown = null;
-      try {
-        chrome = await profileApi.detectChrome(nextSettings.browserPath);
-      } catch (error) {
-        chromeDetectionError = error;
-      }
-
-      await commitLoadedRoot(nextRootPath, { ...loaded, document: nextDocument, settings: nextSettings, chrome });
-      if (chromeDetectionError) {
-        setChromeStatus(null);
-        setMessage(errorMessage(chromeDetectionError));
-      }
-    } catch (error) {
-      setMessage(errorMessage(error));
-    }
-  }
-
   function openSettingsDialog() {
-    setRootPathDraft(rootPath);
-    setBrowserPathDraft(settings.browserPath);
-    setThemeDraft(settings.theme);
+    resetRootSettingsDrafts();
     resetRuntimeDiagnostics();
     setSettingsOpen(true);
   }
 
   function closeSettingsDialog() {
-    setRootPathDraft(rootPath);
-    setBrowserPathDraft(settings.browserPath);
-    setThemeDraft(settings.theme);
+    resetRootSettingsDrafts();
     closeDataSafetyDialogs();
     resetRuntimeDiagnostics();
     setSettingsOpen(false);
@@ -1617,48 +1550,6 @@ function App() {
       projectOpenCancelledRef.current = false;
       bulkOpenDelayResolveRef.current = null;
       setOpeningProjectId(null);
-    }
-  }
-
-  async function applyRootPath() {
-    const nextRootPath = rootPathDraft.trim();
-    if (!nextRootPath) {
-      setMessage("请先填写配置根目录");
-      return;
-    }
-
-    try {
-      await loadRoot(nextRootPath);
-    } catch (error) {
-      setMessage(errorMessage(error));
-    }
-  }
-
-  async function revealRootDirectory() {
-    if (!rootPath.trim()) {
-      setMessage("请先填写配置根目录");
-      return;
-    }
-
-    try {
-      await profileApi.revealPath(rootPath);
-      setMessage("已打开数据目录");
-    } catch (error) {
-      setMessage(errorMessage(error));
-    }
-  }
-
-  async function revealBackupsDirectory() {
-    if (!rootPath.trim()) {
-      setMessage("请先填写配置根目录");
-      return;
-    }
-
-    try {
-      await profileApi.revealProfileBackupsDir(rootPath);
-      setMessage("已打开备份目录");
-    } catch (error) {
-      setMessage(errorMessage(error));
     }
   }
 
@@ -3013,20 +2904,7 @@ function App() {
 
       {settingsOpen ? (
         <SettingsDialog
-          rootSettings={{
-            rootPathDraft,
-            rootStatus,
-            chromeStatus,
-            browserPathDraft,
-            themeDraft,
-            onRootPathChange: updateRootPathDraft,
-            onBrowserPathChange: setBrowserPathDraft,
-            onThemeChange: setThemeDraft,
-            onApplyRootPath: applyRootPath,
-            onSaveSettings: saveSettingsDraft,
-            onRevealRootDirectory: revealRootDirectory,
-            onRevealBackupsDirectory: revealBackupsDirectory
-          }}
+          rootSettings={rootSettings}
           health={health}
           lightBackup={lightBackup}
           fullBackup={fullBackup}
