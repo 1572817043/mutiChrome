@@ -51,7 +51,7 @@ export interface RuntimeDiagnosticsProps {
 }
 
 export interface SettingsDialogProps {
-  rootPath: string;
+  rootPathDraft: string;
   rootStatus: RootStatus | null;
   chromeStatus: ChromeStatus | null;
   healthReport: RootHealthReport | null;
@@ -98,7 +98,7 @@ export interface SettingsDialogProps {
 }
 
 export function SettingsDialog({
-  rootPath,
+  rootPathDraft,
   rootStatus,
   chromeStatus,
   healthReport,
@@ -211,7 +211,7 @@ export function SettingsDialog({
           <div className="path-row">
             <input
               id="root-path"
-              value={rootPath}
+              value={rootPathDraft}
               onChange={(event) => onRootPathChange(event.target.value)}
             />
             <button className="secondary-button compact" type="button" onClick={onApplyRootPath}>
