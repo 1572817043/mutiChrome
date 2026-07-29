@@ -8,76 +8,99 @@ import { UrlShortcutGroup } from "../url-library/UrlShortcutGroup";
 import type { ChromeProfile } from "../types";
 
 interface BulkActionBarProps {
+  selection: BulkActionSelectionProps;
+  urlQueue: BulkActionUrlQueueProps;
+  tagging: BulkActionTaggingProps;
+  windowActions: BulkActionWindowProps;
+  activity: BulkActionActivityProps;
+}
+
+interface BulkActionSelectionProps {
   selectedCount: number;
-  bulkTag: string;
-  bulkUrl: string;
-  bulkOpenIntervalSeconds: string;
-  bulkOpenRunning: boolean;
-  windowInspecting: boolean;
-  windowTiling: boolean;
-  windowSyncing: boolean;
-  windowFocusing: boolean;
   selectedProfiles: ChromeProfile[];
-  runningProfileIds: string[];
-  layoutSourceProfileId: string;
-  browserOperations: BrowserOperation[];
-  launchEvents: BrowserLaunchEvent[];
-  favoriteUrls: string[];
-  recentUrls: string[];
-  retryFailureCount: number;
-  onBulkTagChange: (value: string) => void;
-  onBulkUrlChange: (value: string) => void;
-  onBulkOpenIntervalChange: (value: string) => void;
-  onLayoutSourceProfileChange: (value: string) => void;
-  onAppendTags: () => void;
-  onAddFavoriteUrl: () => void;
-  onRemoveFavoriteUrl: (url: string) => void;
-  onOpenUrl: () => void;
-  onRetryFailures: () => void;
-  onInspectWindows: () => void;
-  onTileWindows: () => void;
-  onSyncLayout: () => void;
-  onFocusWindows: () => void;
-  onStopOpenQueue: () => void;
   onRequestDelete: () => void;
   onClear: () => void;
 }
 
+interface BulkActionUrlQueueProps {
+  bulkUrl: string;
+  bulkOpenIntervalSeconds: string;
+  bulkOpenRunning: boolean;
+  retryFailureCount: number;
+  favoriteUrls: string[];
+  recentUrls: string[];
+  onBulkUrlChange: (value: string) => void;
+  onBulkOpenIntervalChange: (value: string) => void;
+  onAddFavoriteUrl: () => void;
+  onRemoveFavoriteUrl: (url: string) => void;
+  onOpenUrl: () => void;
+  onRetryFailures: () => void;
+  onStopOpenQueue: () => void;
+}
+
+interface BulkActionTaggingProps {
+  bulkTag: string;
+  onBulkTagChange: (value: string) => void;
+  onAppendTags: () => void;
+}
+
+interface BulkActionWindowProps {
+  windowInspecting: boolean;
+  windowTiling: boolean;
+  windowSyncing: boolean;
+  windowFocusing: boolean;
+  runningProfileIds: string[];
+  layoutSourceProfileId: string;
+  onLayoutSourceProfileChange: (value: string) => void;
+  onInspectWindows: () => void;
+  onTileWindows: () => void;
+  onSyncLayout: () => void;
+  onFocusWindows: () => void;
+}
+
+interface BulkActionActivityProps {
+  browserOperations: BrowserOperation[];
+  launchEvents: BrowserLaunchEvent[];
+}
+
 export function BulkActionBar({
-  selectedCount,
-  bulkTag,
-  bulkUrl,
-  bulkOpenIntervalSeconds,
-  bulkOpenRunning,
-  windowInspecting,
-  windowTiling,
-  windowSyncing,
-  windowFocusing,
-  selectedProfiles,
-  runningProfileIds,
-  layoutSourceProfileId,
-  browserOperations,
-  launchEvents,
-  favoriteUrls,
-  recentUrls,
-  retryFailureCount,
-  onBulkTagChange,
-  onBulkUrlChange,
-  onBulkOpenIntervalChange,
-  onLayoutSourceProfileChange,
-  onAppendTags,
-  onAddFavoriteUrl,
-  onRemoveFavoriteUrl,
-  onOpenUrl,
-  onRetryFailures,
-  onInspectWindows,
-  onTileWindows,
-  onSyncLayout,
-  onFocusWindows,
-  onStopOpenQueue,
-  onRequestDelete,
-  onClear
+  selection,
+  urlQueue,
+  tagging,
+  windowActions,
+  activity
 }: BulkActionBarProps) {
+  const { selectedCount, selectedProfiles, onRequestDelete, onClear } = selection;
+  const {
+    bulkUrl,
+    bulkOpenIntervalSeconds,
+    bulkOpenRunning,
+    favoriteUrls,
+    recentUrls,
+    retryFailureCount,
+    onBulkUrlChange,
+    onBulkOpenIntervalChange,
+    onAddFavoriteUrl,
+    onRemoveFavoriteUrl,
+    onOpenUrl,
+    onRetryFailures,
+    onStopOpenQueue
+  } = urlQueue;
+  const { bulkTag, onBulkTagChange, onAppendTags } = tagging;
+  const {
+    windowInspecting,
+    windowTiling,
+    windowSyncing,
+    windowFocusing,
+    runningProfileIds,
+    layoutSourceProfileId,
+    onLayoutSourceProfileChange,
+    onInspectWindows,
+    onTileWindows,
+    onSyncLayout,
+    onFocusWindows
+  } = windowActions;
+  const { browserOperations, launchEvents } = activity;
   const [expanded, setExpanded] = useState(false);
   const visibleRecentUrls = recentUrls.filter((url) => !favoriteUrls.includes(url));
   const hasBulkUrl = bulkUrl.trim().length > 0;

@@ -3203,39 +3203,49 @@ function App() {
         </section>
 
         <BulkActionBar
-          selectedCount={selectedProfiles.length}
-          bulkTag={bulkTag}
-          bulkUrl={bulkUrl}
-          bulkOpenIntervalSeconds={bulkOpenIntervalSeconds}
-          bulkOpenRunning={bulkOpenRunning}
-          windowInspecting={windowInspecting}
-          windowTiling={windowTiling}
-          windowSyncing={windowSyncing}
-          windowFocusing={windowFocusing}
-          selectedProfiles={selectedProfiles}
-          runningProfileIds={runningProfileIds}
-          layoutSourceProfileId={resolvedLayoutSourceProfileId}
-          browserOperations={browserOperations}
-          launchEvents={launchEvents}
-          favoriteUrls={settings.favoriteUrls}
-          recentUrls={settings.recentUrls}
-          retryFailureCount={lastBulkLaunchRetry?.profileIds.length ?? 0}
-          onBulkTagChange={setBulkTag}
-          onBulkUrlChange={updateBulkUrl}
-          onBulkOpenIntervalChange={setBulkOpenIntervalSeconds}
-          onLayoutSourceProfileChange={setLayoutSourceProfileId}
-          onAppendTags={() => void appendBulkTags()}
-          onAddFavoriteUrl={() => void addFavoriteUrl()}
-          onRemoveFavoriteUrl={(url) => void removeFavoriteUrl(url)}
-          onOpenUrl={() => void openUrlForSelectedProfiles()}
-          onRetryFailures={() => void retryFailedBulkLaunch()}
-          onInspectWindows={() => void inspectWindowsForSelectedProfiles()}
-          onTileWindows={() => void tileWindowsForSelectedProfiles()}
-          onSyncLayout={() => void syncLayoutForSelectedProfiles()}
-          onFocusWindows={() => void focusWindowsForSelectedProfiles()}
-          onStopOpenQueue={stopBulkOpenQueue}
-          onRequestDelete={requestDeleteSelectedProfiles}
-          onClear={clearSelection}
+          selection={{
+            selectedCount: selectedProfiles.length,
+            selectedProfiles,
+            onRequestDelete: requestDeleteSelectedProfiles,
+            onClear: clearSelection
+          }}
+          urlQueue={{
+            bulkUrl,
+            bulkOpenIntervalSeconds,
+            bulkOpenRunning,
+            retryFailureCount: lastBulkLaunchRetry?.profileIds.length ?? 0,
+            favoriteUrls: settings.favoriteUrls,
+            recentUrls: settings.recentUrls,
+            onBulkUrlChange: updateBulkUrl,
+            onBulkOpenIntervalChange: setBulkOpenIntervalSeconds,
+            onAddFavoriteUrl: () => void addFavoriteUrl(),
+            onRemoveFavoriteUrl: (url) => void removeFavoriteUrl(url),
+            onOpenUrl: () => void openUrlForSelectedProfiles(),
+            onRetryFailures: () => void retryFailedBulkLaunch(),
+            onStopOpenQueue: stopBulkOpenQueue
+          }}
+          tagging={{
+            bulkTag,
+            onBulkTagChange: setBulkTag,
+            onAppendTags: () => void appendBulkTags()
+          }}
+          windowActions={{
+            windowInspecting,
+            windowTiling,
+            windowSyncing,
+            windowFocusing,
+            runningProfileIds,
+            layoutSourceProfileId: resolvedLayoutSourceProfileId,
+            onLayoutSourceProfileChange: setLayoutSourceProfileId,
+            onInspectWindows: () => void inspectWindowsForSelectedProfiles(),
+            onTileWindows: () => void tileWindowsForSelectedProfiles(),
+            onSyncLayout: () => void syncLayoutForSelectedProfiles(),
+            onFocusWindows: () => void focusWindowsForSelectedProfiles()
+          }}
+          activity={{
+            browserOperations,
+            launchEvents
+          }}
         />
 
         {showImport ? (
