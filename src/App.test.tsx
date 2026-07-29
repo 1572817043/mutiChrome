@@ -4487,6 +4487,248 @@ describe("App launcher layout", () => {
     expect(savedDocument().settings.browserPath).toBe("/Applications/Google Chrome.app");
   });
 
+  test("设置弹窗关闭会丢弃未检测的配置根目录草稿", async () => {
+    const user = userEvent.setup();
+    const initProfileRootSpy = vi.spyOn(profileApi, "initProfileRoot");
+    const loadProfilesSpy = vi.spyOn(profileApi, "loadProfiles");
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "设置" }));
+    initProfileRootSpy.mockClear();
+    loadProfilesSpy.mockClear();
+    const documentBeforeClose = savedDocument();
+    const dialog = await screen.findByRole("dialog", { name: "设置" });
+    fireEvent.change(within(dialog).getByLabelText("配置根目录"), {
+      target: { value: "/tmp/other-root" }
+    });
+
+    await user.click(within(dialog).getByRole("button", { name: "关闭设置" }));
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    const reopenedDialog = await screen.findByRole("dialog", { name: "设置" });
+
+    expect((within(reopenedDialog).getByLabelText("配置根目录") as HTMLInputElement).value).toBe(
+      "~/MultiChromeProfiles"
+    );
+    expect(initProfileRootSpy).not.toHaveBeenCalled();
+    expect(loadProfilesSpy).not.toHaveBeenCalled();
+    expect(savedDocument()).toEqual(documentBeforeClose);
+    initProfileRootSpy.mockRestore();
+    loadProfilesSpy.mockRestore();
+  });
+
+  test("设置弹窗保存会应用配置根目录草稿", async () => {
+    const user = userEvent.setup();
+    const saveProfilesSpy = vi.spyOn(profileApi, "saveProfiles");
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "设置" }));
+    const dialog = await screen.findByRole("dialog", { name: "设置" });
+    fireEvent.change(within(dialog).getByLabelText("配置根目录"), {
+      target: { value: "/tmp/other-root" }
+    });
+    await user.click(within(dialog).getByRole("button", { name: "保存设置" }));
+
+    await waitFor(() => {
+      expect(saveProfilesSpy).toHaveBeenCalledWith(
+        "/tmp/other-root",
+        expect.objectContaining({ settings: expect.any(Object) })
+      );
+    });
+    saveProfilesSpy.mockRestore();
+  });
+
+  test("设置弹窗检测空白配置根目录不会加载或切换根目录", async () => {
+    const user = userEvent.setup();
+    const initProfileRootSpy = vi.spyOn(profileApi, "initProfileRoot");
+    const loadProfilesSpy = vi.spyOn(profileApi, "loadProfiles");
+    const saveProfilesSpy = vi.spyOn(profileApi, "saveProfiles");
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(await screen.findByRole("button", { name: "设置" }));
+    initProfileRootSpy.mockClear();
+    loadProfilesSpy.mockClear();
+    saveProfilesSpy.mockClear();
+    const dialog = await screen.findByRole("dialog", { name: "设置" });
+    const rootPathInput = within(dialog).getByLabelText("配置根目录");
+    fireEvent.change(rootPathInput, { target: { value: "   " } });
+
+    await user.click(
+      within(rootPathInput.parentElement as HTMLElement).getByRole("button", { name: "检测" })
+    );
+
+    expect(screen.getByRole("status").textContent).toBe("请先填写配置根目录");
+    expect(initProfileRootSpy).not.toHaveBeenCalled();
+    expect(loadProfilesSpy).not.toHaveBeenCalled();
+    expect(saveProfilesSpy).not.toHaveBeenCalled();
+
+    initProfileRootSpy.mockRestore();
+    loadProfilesSpy.mockRestore();
+    saveProfilesSpy.mockRestore();
+  });
+
+  test("设置弹窗保存空白配置根目录不会加载或保存", async () => {
+    const user = userEvent.setup();
+    const initProfileRootSpy = vi.spyOn(profileApi, "initProfileRoot");
+    const loadProfilesSpy = vi.spyOn(profileApi, "loadProfiles");
+    const saveProfilesSpy = vi.spyOn(profileApi, "saveProfiles");
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "设置" }));
+    initProfileRootSpy.mockClear();
+    loadProfilesSpy.mockClear();
+    saveProfilesSpy.mockClear();
+    const dialog = await screen.findByRole("dialog", { name: "设置" });
+    fireEvent.change(within(dialog).getByLabelText("配置根目录"), {
+      target: { value: "   " }
+    });
+    await user.click(within(dialog).getByRole("button", { name: "保存设置" }));
+
+    expect(screen.getByRole("status").textContent).toBe("请先填写配置根目录");
+    expect(initProfileRootSpy).not.toHaveBeenCalled();
+    expect(loadProfilesSpy).not.toHaveBeenCalled();
+    expect(saveProfilesSpy).not.toHaveBeenCalled();
+
+    initProfileRootSpy.mockRestore();
+    loadProfilesSpy.mockRestore();
+    saveProfilesSpy.mockRestore();
+  });
+
+  test("设置弹窗保存切换根目录失败时保留当前根和设置草稿", async () => {
+    const user = userEvent.setup();
+    const targetDocument = documentWith([profile({ id: "target-001", name: "目标账号" })]);
+    const initProfileRootSpy = vi.spyOn(profileApi, "initProfileRoot");
+    const loadProfilesSpy = vi.spyOn(profileApi, "loadProfiles");
+    const saveProfilesSpy = vi.spyOn(profileApi, "saveProfiles");
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(await screen.findByRole("button", { name: "设置" }));
+    initProfileRootSpy.mockResolvedValue({ rootExists: true, writable: true, profileCount: 1 });
+    loadProfilesSpy.mockResolvedValue(targetDocument);
+    saveProfilesSpy.mockRejectedValue(new Error("目标根写入失败"));
+    const dialog = await screen.findByRole("dialog", { name: "设置" });
+    fireEvent.change(within(dialog).getByLabelText("配置根目录"), {
+      target: { value: "/tmp/other-root" }
+    });
+    fireEvent.change(within(dialog).getByLabelText("Chrome 路径"), {
+      target: { value: "/tmp/User Chrome.app" }
+    });
+    await user.click(within(dialog).getByRole("button", { name: "夜晚" }));
+    await user.click(within(dialog).getByRole("button", { name: "保存设置" }));
+
+    await waitFor(() => expect(screen.getByRole("status").textContent).toBe("目标根写入失败"));
+    expect((within(dialog).getByLabelText("配置根目录") as HTMLInputElement).value).toBe(
+      "/tmp/other-root"
+    );
+    expect((within(dialog).getByLabelText("Chrome 路径") as HTMLInputElement).value).toBe(
+      "/tmp/User Chrome.app"
+    );
+    expect(within(dialog).getByRole("button", { name: "夜晚" }).getAttribute("aria-pressed")).toBe(
+      "true"
+    );
+    expect(screen.queryByText("目标账号")).toBeNull();
+    expect(screen.getByRole("button", { name: "选择 主号" }).getAttribute("aria-pressed")).toBe(
+      "true"
+    );
+
+    initProfileRootSpy.mockRestore();
+    loadProfilesSpy.mockRestore();
+    saveProfilesSpy.mockRestore();
+  });
+
+  test("设置弹窗保存切换根目录后 Chrome 检测失败仍保留新根", async () => {
+    const user = userEvent.setup();
+    const targetDocument = documentWith([profile({ id: "target-001", name: "目标账号" })]);
+    targetDocument.settings.browserPath = "/Applications/Target Chrome.app";
+    const initProfileRootSpy = vi.spyOn(profileApi, "initProfileRoot");
+    const loadProfilesSpy = vi.spyOn(profileApi, "loadProfiles");
+    const saveProfilesSpy = vi.spyOn(profileApi, "saveProfiles");
+    const detectChromeSpy = vi.spyOn(profileApi, "detectChrome");
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "设置" }));
+    initProfileRootSpy.mockResolvedValue({ rootExists: true, writable: true, profileCount: 1 });
+    loadProfilesSpy.mockResolvedValue(targetDocument);
+    saveProfilesSpy.mockResolvedValue();
+    detectChromeSpy.mockImplementation(async (path) => {
+      if (path === "/tmp/User Chrome.app") {
+        throw new Error("Chrome 检测失败");
+      }
+      return { available: true, appPath: path ?? null };
+    });
+    const dialog = await screen.findByRole("dialog", { name: "设置" });
+    fireEvent.change(within(dialog).getByLabelText("配置根目录"), {
+      target: { value: "/tmp/other-root" }
+    });
+    fireEvent.change(within(dialog).getByLabelText("Chrome 路径"), {
+      target: { value: "/tmp/User Chrome.app" }
+    });
+    await user.click(within(dialog).getByRole("button", { name: "保存设置" }));
+
+    await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Chrome 检测失败"));
+    expect((within(dialog).getByLabelText("配置根目录") as HTMLInputElement).value).toBe(
+      "/tmp/other-root"
+    );
+    expect(screen.getByText("目标账号")).toBeTruthy();
+    expect(screen.queryByText("主号")).toBeNull();
+
+    initProfileRootSpy.mockRestore();
+    loadProfilesSpy.mockRestore();
+    saveProfilesSpy.mockRestore();
+    detectChromeSpy.mockRestore();
+  });
+
+  test("设置弹窗保存切换根目录时合并草稿且保留目标根数据", async () => {
+    const user = userEvent.setup();
+    const targetDocument = documentWith(
+      [profile({ id: "target-001", name: "目标账号" })],
+      [project({ id: "target-project", name: "目标项目", profileIds: ["target-001"] })]
+    );
+    targetDocument.settings = {
+      browserPath: "/Applications/Target Chrome.app",
+      favoriteUrls: ["https://target.example/favorite"],
+      recentUrls: ["https://target.example/recent"],
+      urlLibrary: [],
+      theme: "light"
+    };
+    const initProfileRootSpy = vi.spyOn(profileApi, "initProfileRoot");
+    const loadProfilesSpy = vi.spyOn(profileApi, "loadProfiles");
+    const saveProfilesSpy = vi.spyOn(profileApi, "saveProfiles");
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "设置" }));
+    initProfileRootSpy.mockResolvedValue({ rootExists: true, writable: true, profileCount: 1 });
+    loadProfilesSpy.mockResolvedValue(targetDocument);
+    saveProfilesSpy.mockResolvedValue();
+    const dialog = await screen.findByRole("dialog", { name: "设置" });
+    fireEvent.change(within(dialog).getByLabelText("配置根目录"), {
+      target: { value: "/tmp/other-root" }
+    });
+    fireEvent.change(within(dialog).getByLabelText("Chrome 路径"), {
+      target: { value: "/tmp/User Chrome.app" }
+    });
+    await user.click(within(dialog).getByRole("button", { name: "夜晚" }));
+    await user.click(within(dialog).getByRole("button", { name: "保存设置" }));
+
+    await waitFor(() => expect(saveProfilesSpy).toHaveBeenCalledTimes(1));
+    const [savedRootPath, savedDocument] = saveProfilesSpy.mock.calls[0];
+    expect(savedRootPath).toBe("/tmp/other-root");
+    expect(savedDocument.profiles).toEqual(targetDocument.profiles);
+    expect(savedDocument.projects).toEqual(targetDocument.projects);
+    expect(savedDocument.settings).toMatchObject({
+      browserPath: "/tmp/User Chrome.app",
+      theme: "dark",
+      favoriteUrls: ["https://target.example/favorite"],
+      recentUrls: ["https://target.example/recent"]
+    });
+    expect(savedDocument.settings).not.toHaveProperty("rootPath");
+
+    initProfileRootSpy.mockRestore();
+    loadProfilesSpy.mockRestore();
+    saveProfilesSpy.mockRestore();
+  });
+
   test("设置弹窗的主题草稿关闭会丢弃，保存后才持久化", async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -5091,6 +5333,7 @@ describe("App launcher layout", () => {
       .spyOn(profileApi, "navigateRuntimeTab")
       .mockReturnValue(navigationPromise);
     const listTabsSpy = vi.spyOn(profileApi, "listRuntimeTabs").mockResolvedValue([]);
+    const initProfileRootSpy = vi.spyOn(profileApi, "initProfileRoot");
     render(<App />);
 
     await user.click(await screen.findByRole("button", { name: "选择 主号" }));
@@ -5107,14 +5350,14 @@ describe("App launcher layout", () => {
       )
     );
 
-    fireEvent.change(within(dialog).getByLabelText("配置根目录"), {
+    const rootPathInput = within(dialog).getByLabelText("配置根目录");
+    fireEvent.change(rootPathInput, {
       target: { value: "/tmp/other-root" }
     });
-    await waitFor(() =>
-      expect((within(dialog).getByLabelText("配置根目录") as HTMLInputElement).value).toBe(
-        "/tmp/other-root"
-      )
+    await user.click(
+      within(rootPathInput.parentElement as HTMLElement).getByRole("button", { name: "检测" })
     );
+    await waitFor(() => expect(initProfileRootSpy).toHaveBeenLastCalledWith("/tmp/other-root"));
 
     resolveNavigation({
       profileId: "account-001",
@@ -5132,6 +5375,7 @@ describe("App launcher layout", () => {
     const listTabsCallCount = listTabsSpy.mock.calls.length;
     navigateSpy.mockRestore();
     listTabsSpy.mockRestore();
+    initProfileRootSpy.mockRestore();
 
     expect(navigateUrl).toBe("");
     expect(oldSuccess).toBeNull();

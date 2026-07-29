@@ -94,7 +94,7 @@ const fullRestorePreview: FullProfileRestorePreview = {
 
 function renderSettingsDialog(overrides: Partial<SettingsDialogProps> = {}) {
   const props: SettingsDialogProps = {
-    rootPath: "/tmp/multichrome",
+    rootPathDraft: "/tmp/multichrome",
     rootStatus: { rootExists: true, writable: true, profileCount: 2 },
     chromeStatus: { available: true, appPath: "/Applications/Google Chrome.app" },
     healthReport,
@@ -441,7 +441,7 @@ function renderSettingsDialogProps(
   overrides: Partial<SettingsDialogProps> = {}
 ): SettingsDialogProps {
   return {
-    rootPath: "/tmp/multichrome",
+    rootPathDraft: "/tmp/multichrome",
     rootStatus: { rootExists: true, writable: true, profileCount: 2 },
     chromeStatus: { available: true, appPath: "/Applications/Google Chrome.app" },
     healthReport,

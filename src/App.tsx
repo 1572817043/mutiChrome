@@ -132,6 +132,7 @@ import type {
   FullProfileRestorePreview,
   ProfileBackupResult,
   ProfileImportCandidate,
+  ProfileDocument,
   ProjectUrl,
   ProfileMarker,
   ProfileSettings,
@@ -184,8 +185,17 @@ interface PendingDelete {
   mode: DeleteMode;
 }
 
+interface LoadedRootData {
+  status: RootStatus;
+  document: ProfileDocument;
+  settings: ProfileSettings;
+  launchEvents: BrowserLaunchEvent[];
+  chrome: ChromeStatus;
+}
+
 function App() {
   const [rootPath, setRootPath] = useState("");
+  const [rootPathDraft, setRootPathDraft] = useState("");
   const [rootStatus, setRootStatus] = useState<RootStatus | null>(null);
   const [chromeStatus, setChromeStatus] = useState<ChromeStatus | null>(null);
   const [settings, setSettings] = useState<ProfileSettings>({
@@ -514,7 +524,6 @@ function App() {
   async function boot() {
     try {
       const defaultPath = await profileApi.defaultRootPath();
-      setRootPath(defaultPath);
       await loadRoot(defaultPath);
     } catch (error) {
       setMessage(errorMessage(error));
@@ -531,29 +540,34 @@ function App() {
     setFullRestoreConfirmOpen(false);
   }
 
-  async function loadRoot(path: string) {
-    setMessage("正在检查配置根目录...");
+  async function readRootData(path: string): Promise<LoadedRootData> {
+    const status = await profileApi.initProfileRoot(path);
+    const document = await profileApi.loadProfiles(path);
+    const settings = normalizeSettings(document.settings);
+    const launchEvents = await loadBrowserLaunchEvents(path);
+    const chrome = await profileApi.detectChrome(settings.browserPath);
+    return { status, document, settings, launchEvents, chrome };
+  }
+
+  async function commitLoadedRoot(path: string, loaded: LoadedRootData) {
     clearLaunchConfirmationRefresh();
     setHealthReport(null);
     setRepairResult(null);
     setBackupResult(null);
     setRestoreConfirmOpen(false);
     resetFullBackupState();
-    const status = await profileApi.initProfileRoot(path);
-    const document = await profileApi.loadProfiles(path);
-    const loadedSettings = normalizeSettings(document.settings);
-    const loadedLaunchEvents = await loadBrowserLaunchEvents(path);
-    const chrome = await profileApi.detectChrome(loadedSettings.browserPath);
-    setRootStatus(status);
-    setSettings(loadedSettings);
-    setBrowserPathDraft(loadedSettings.browserPath);
-    setThemeDraft(loadedSettings.theme);
-    setChromeStatus(chrome);
-    setProfiles(document.profiles);
-    setProjects(document.projects);
-    launchEventsRef.current = loadedLaunchEvents;
-    setLaunchEvents(loadedLaunchEvents);
-    await refreshRunningProfiles(path, document.profiles);
+    setRootPath(path);
+    setRootPathDraft(path);
+    setRootStatus(loaded.status);
+    setSettings(loaded.settings);
+    setBrowserPathDraft(loaded.settings.browserPath);
+    setThemeDraft(loaded.settings.theme);
+    setChromeStatus(loaded.chrome);
+    setProfiles(loaded.document.profiles);
+    setProjects(loaded.document.projects);
+    launchEventsRef.current = loaded.launchEvents;
+    setLaunchEvents(loaded.launchEvents);
+    await refreshRunningProfiles(path, loaded.document.profiles);
     setEditingId(null);
     setEditingProfileDraft(null);
     setEditingProjectId(null);
@@ -592,7 +606,14 @@ function App() {
     setSelectedImportPaths([]);
     setImportScanning(false);
     setImportingProfiles(false);
-    setMessage(status.writable ? "根目录正常" : "根目录不可写");
+    setMessage(loaded.status.writable ? "根目录正常" : "根目录不可写");
+  }
+
+  async function loadRoot(path: string) {
+    setMessage("正在检查配置根目录...");
+    const loaded = await readRootData(path);
+    await commitLoadedRoot(path, loaded);
+    return loaded;
   }
 
   async function loadBrowserLaunchEvents(path: string): Promise<BrowserLaunchEvent[]> {
@@ -645,22 +666,15 @@ function App() {
   }
 
   function updateRootPathDraft(value: string) {
-    setRootPath(value);
-    setHealthReport(null);
-    setRepairResult(null);
-    setBackupResult(null);
-    setRestoreConfirmOpen(false);
-    setFullBackupPreview(null);
-    setFullBackupResult(null);
-    setFullRestorePreview(null);
-    setFullRestoreConfirmOpen(false);
+    setRootPathDraft(value);
   }
 
   async function persist(
     nextProfiles: ChromeProfile[],
     nextMessage: string,
     nextSettings = settings,
-    nextProjects = projects
+    nextProjects = projects,
+    targetRootPath = rootPath
   ) {
     const sanitizedSettings = normalizeSettings(nextSettings);
     const existingProfileIds = new Set(nextProfiles.map((profile) => profile.id));
@@ -668,7 +682,7 @@ function App() {
       ...project,
       profileIds: project.profileIds.filter((profileId) => existingProfileIds.has(profileId))
     }));
-    await profileApi.saveProfiles(rootPath, {
+    await profileApi.saveProfiles(targetRootPath, {
       version: 1,
       settings: sanitizedSettings,
       profiles: nextProfiles,
@@ -1042,16 +1056,66 @@ function App() {
   }
 
   async function saveSettingsDraft() {
-    const nextSettings = normalizeSettings({
-      ...settings,
-      browserPath: browserPathDraft,
-      theme: themeDraft
-    });
-    await persist(profiles, "设置已保存", nextSettings);
-    setChromeStatus(await profileApi.detectChrome(nextSettings.browserPath));
+    const nextRootPath = rootPathDraft.trim();
+    if (!nextRootPath) {
+      setMessage("请先填写配置根目录");
+      return;
+    }
+
+    if (nextRootPath === rootPath) {
+      const nextSettings = normalizeSettings({
+        ...settings,
+        browserPath: browserPathDraft,
+        theme: themeDraft
+      });
+      try {
+        await persist(profiles, "设置已保存", nextSettings);
+        setBrowserPathDraft(nextSettings.browserPath);
+        setThemeDraft(nextSettings.theme);
+      } catch (error) {
+        setMessage(errorMessage(error));
+        return;
+      }
+
+      try {
+        setChromeStatus(await profileApi.detectChrome(nextSettings.browserPath));
+      } catch (error) {
+        setChromeStatus(null);
+        setMessage(errorMessage(error));
+      }
+      return;
+    }
+
+    try {
+      const loaded = await readRootData(nextRootPath);
+      const nextSettings = normalizeSettings({
+        ...loaded.settings,
+        browserPath: browserPathDraft,
+        theme: themeDraft
+      });
+      const nextDocument = { ...loaded.document, settings: nextSettings };
+      await profileApi.saveProfiles(nextRootPath, nextDocument);
+
+      let chrome = loaded.chrome;
+      let chromeDetectionError: unknown = null;
+      try {
+        chrome = await profileApi.detectChrome(nextSettings.browserPath);
+      } catch (error) {
+        chromeDetectionError = error;
+      }
+
+      await commitLoadedRoot(nextRootPath, { ...loaded, document: nextDocument, settings: nextSettings, chrome });
+      if (chromeDetectionError) {
+        setChromeStatus(null);
+        setMessage(errorMessage(chromeDetectionError));
+      }
+    } catch (error) {
+      setMessage(errorMessage(error));
+    }
   }
 
   function openSettingsDialog() {
+    setRootPathDraft(rootPath);
     setBrowserPathDraft(settings.browserPath);
     setThemeDraft(settings.theme);
     resetRuntimeDiagnostics();
@@ -1059,6 +1123,7 @@ function App() {
   }
 
   function closeSettingsDialog() {
+    setRootPathDraft(rootPath);
     setBrowserPathDraft(settings.browserPath);
     setThemeDraft(settings.theme);
     setRestoreConfirmOpen(false);
@@ -1772,8 +1837,14 @@ function App() {
   }
 
   async function applyRootPath() {
+    const nextRootPath = rootPathDraft.trim();
+    if (!nextRootPath) {
+      setMessage("请先填写配置根目录");
+      return;
+    }
+
     try {
-      await loadRoot(rootPath);
+      await loadRoot(nextRootPath);
     } catch (error) {
       setMessage(errorMessage(error));
     }
@@ -3455,7 +3526,7 @@ function App() {
 
       {settingsOpen ? (
         <SettingsDialog
-          rootPath={rootPath}
+          rootPathDraft={rootPathDraft}
           rootStatus={rootStatus}
           chromeStatus={chromeStatus}
           healthReport={healthReport}
