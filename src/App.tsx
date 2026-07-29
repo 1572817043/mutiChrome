@@ -18,8 +18,6 @@ import {
   normalizeSettings,
   profileApi,
   profilePath,
-  type BrowserRuntimeNavigationResult,
-  type BrowserRuntimeTabSnapshot,
   type BrowserSessionSnapshot,
   type BrowserSessionStatus,
   type ChromeStatus,
@@ -88,9 +86,9 @@ import { ProjectsView } from "./projects/ProjectsView";
 import {
   SettingsDialog,
   type FullBackupScope,
-  type FullBackupWorking,
-  type RuntimeDiagnosticsStatus
+  type FullBackupWorking
 } from "./settings/SettingsDialog";
+import { useRuntimeDiagnostics } from "./settings/useRuntimeDiagnostics";
 import {
   createUrlLibraryDraft,
   createUrlLibraryItem,
@@ -148,17 +146,6 @@ interface BulkLaunchRetryState {
   url: string;
 }
 
-interface RuntimeDiagnosticsState {
-  status: RuntimeDiagnosticsStatus;
-  tabs: BrowserRuntimeTabSnapshot[];
-  error: string | null;
-  navigationConfirmationMessage: string | null;
-  navigateUrl: string;
-  navigateStatus: RuntimeDiagnosticsStatus;
-  navigateResult: BrowserRuntimeNavigationResult | null;
-  navigateError: string | null;
-}
-
 type DevImportMeta = ImportMeta & {
   env?: {
     DEV?: boolean;
@@ -169,17 +156,6 @@ const RUNNING_STATUS_POLL_MS = 5000;
 const LAUNCH_CONFIRMATION_DELAY_MS = 2000;
 const MAX_BROWSER_OPERATIONS = 20;
 const BROWSER_COMMAND_TIMEOUT_MS = 120_000;
-const RUNTIME_NAVIGATION_CONFIRMATION_POLL_MS = 100;
-const RUNTIME_NAVIGATION_CONFIRMATION_MAX_ATTEMPTS = 3;
-
-function runtimeNavigationUrlMatches(targetUrl: string, tabUrl: string): boolean {
-  try {
-    return new URL(targetUrl).href === new URL(tabUrl).href;
-  } catch {
-    return targetUrl.replace(/\/+$/, "") === tabUrl.replace(/\/+$/, "");
-  }
-}
-
 interface PendingDelete {
   profile: ChromeProfile;
   mode: DeleteMode;
@@ -236,17 +212,6 @@ function App() {
   const [importingProfiles, setImportingProfiles] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [runtimeDiagnosticsState, setRuntimeDiagnosticsState] =
-    useState<RuntimeDiagnosticsState>({
-      status: "idle",
-      tabs: [],
-      error: null,
-      navigationConfirmationMessage: null,
-      navigateUrl: "",
-      navigateStatus: "idle",
-      navigateResult: null,
-      navigateError: null
-    });
   const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
   const [pendingBatchDelete, setPendingBatchDelete] = useState<ChromeProfile[] | null>(null);
   const [batchDeleteWorking, setBatchDeleteWorking] = useState<DeleteMode | null>(null);
@@ -263,10 +228,6 @@ function App() {
   const [launchEvents, setLaunchEvents] = useState<BrowserLaunchEvent[]>([]);
   const launchEventsRef = useRef<BrowserLaunchEvent[]>([]);
   const launchEventsSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const runtimeDiagnosticsRequestIdRef = useRef(0);
-  const runtimeDiagnosticsProfileIdRef = useRef<string | null>(null);
-  const runtimeDiagnosticsRootPathRef = useRef("");
-  const settingsOpenRef = useRef(false);
   const [windowInspecting, setWindowInspecting] = useState(false);
   const [windowTiling, setWindowTiling] = useState(false);
   const [windowSyncing, setWindowSyncing] = useState(false);
@@ -364,6 +325,16 @@ function App() {
 
     return profiles.find((profile) => profile.id === selectedIds[0]) ?? null;
   }, [profiles, selectedIds]);
+  const { runtimeDiagnostics, resetRuntimeDiagnostics } = useRuntimeDiagnostics({
+    rootPath,
+    settingsOpen,
+    selectedProfile: runtimeDiagnosticsProfile,
+    session: runtimeDiagnosticsProfile
+      ? browserSessionsById[runtimeDiagnosticsProfile.id] ?? null
+      : null,
+    selectedProfileCount: selectedIds.length,
+    enabled: Boolean((import.meta as DevImportMeta).env?.DEV)
+  });
   const profileIds = useMemo(() => profiles.map((profile) => profile.id), [profiles]);
   const totalProfiles = profiles.length;
   const hasSelectedProfiles = selectedProfiles.length > 0;
@@ -404,29 +375,13 @@ function App() {
     );
   }, [settings.urlLibrary, urlLibraryQuery]);
 
-  runtimeDiagnosticsProfileIdRef.current = runtimeDiagnosticsProfile?.id ?? null;
-  runtimeDiagnosticsRootPathRef.current = rootPath;
-  settingsOpenRef.current = settingsOpen;
-
   useEffect(() => {
     void boot();
   }, []);
 
   useEffect(() => {
-    return () => {
-      runtimeDiagnosticsRequestIdRef.current += 1;
-    };
-  }, []);
-
-  useEffect(() => {
     document.documentElement.dataset.theme = settingsOpen ? themeDraft : settings.theme;
   }, [settings.theme, settingsOpen, themeDraft]);
-
-  useEffect(() => {
-    if (settingsOpen) {
-      resetRuntimeDiagnostics();
-    }
-  }, [runtimeDiagnosticsProfile?.id, rootPath]);
 
   useEffect(() => {
     if (!rootPath || activeView !== "accounts") {
@@ -1130,194 +1085,6 @@ function App() {
     setFullRestoreConfirmOpen(false);
     resetRuntimeDiagnostics();
     setSettingsOpen(false);
-  }
-
-  function resetRuntimeDiagnostics() {
-    runtimeDiagnosticsRequestIdRef.current += 1;
-    setRuntimeDiagnosticsState({
-      status: "idle",
-      tabs: [],
-      error: null,
-      navigationConfirmationMessage: null,
-      navigateUrl: "",
-      navigateStatus: "idle",
-      navigateResult: null,
-      navigateError: null
-    });
-  }
-
-  function isRuntimeDiagnosticsRequestCurrent(
-    requestId: number,
-    profileId: string,
-    requestRootPath: string
-  ) {
-    return (
-      runtimeDiagnosticsRequestIdRef.current === requestId &&
-      settingsOpenRef.current &&
-      runtimeDiagnosticsProfileIdRef.current === profileId &&
-      runtimeDiagnosticsRootPathRef.current === requestRootPath
-    );
-  }
-
-  async function readRuntimeTabsForSelectedProfile() {
-    if (!runtimeDiagnosticsProfile) {
-      return;
-    }
-
-    const profileId = runtimeDiagnosticsProfile.id;
-    const requestRootPath = rootPath;
-    const requestId = runtimeDiagnosticsRequestIdRef.current + 1;
-    runtimeDiagnosticsRequestIdRef.current = requestId;
-    setRuntimeDiagnosticsState((current) => ({
-      ...current,
-      status: "loading",
-      tabs: [],
-      error: null,
-      navigationConfirmationMessage: null
-    }));
-    try {
-      const tabs = await profileApi.listRuntimeTabs(requestRootPath, profileId);
-      if (!isRuntimeDiagnosticsRequestCurrent(requestId, profileId, requestRootPath)) {
-        return;
-      }
-      setRuntimeDiagnosticsState((current) => ({
-        ...current,
-        status: "succeeded",
-        tabs,
-        error: null,
-        navigationConfirmationMessage: null
-      }));
-    } catch (error) {
-      if (!isRuntimeDiagnosticsRequestCurrent(requestId, profileId, requestRootPath)) {
-        return;
-      }
-      setRuntimeDiagnosticsState((current) => ({
-        ...current,
-        status: "failed",
-        tabs: [],
-        error: errorMessage(error),
-        navigationConfirmationMessage: null
-      }));
-    }
-  }
-
-  function updateRuntimeNavigationUrl(value: string) {
-    setRuntimeDiagnosticsState((current) => ({
-      ...current,
-      navigateUrl: value,
-      navigateStatus: "idle",
-      navigateResult: null,
-      navigateError: null,
-      navigationConfirmationMessage: null
-    }));
-  }
-
-  async function navigateRuntimeTabForSelectedProfile() {
-    if (!runtimeDiagnosticsProfile) {
-      return;
-    }
-    const url = runtimeDiagnosticsState.navigateUrl.trim();
-    if (!url) {
-      return;
-    }
-
-    const profileId = runtimeDiagnosticsProfile.id;
-    const requestRootPath = rootPath;
-    const requestId = runtimeDiagnosticsRequestIdRef.current + 1;
-    runtimeDiagnosticsRequestIdRef.current = requestId;
-    setRuntimeDiagnosticsState((current) => ({
-      ...current,
-      navigateStatus: "loading",
-      navigateResult: null,
-      navigateError: null
-    }));
-
-    try {
-      const result = await profileApi.navigateRuntimeTab(
-        requestRootPath,
-        profileId,
-        url
-      );
-      if (!isRuntimeDiagnosticsRequestCurrent(requestId, profileId, requestRootPath)) {
-        return;
-      }
-
-      setRuntimeDiagnosticsState((current) => ({
-        ...current,
-        status: "loading",
-        error: null,
-        navigationConfirmationMessage: null,
-        navigateStatus: "succeeded",
-        navigateResult: result,
-        navigateError: null
-      }));
-
-      try {
-        let tabs: BrowserRuntimeTabSnapshot[] = [];
-        for (
-          let attempt = 0;
-          attempt < RUNTIME_NAVIGATION_CONFIRMATION_MAX_ATTEMPTS;
-          attempt += 1
-        ) {
-          tabs = await profileApi.listRuntimeTabs(requestRootPath, profileId);
-          if (!isRuntimeDiagnosticsRequestCurrent(requestId, profileId, requestRootPath)) {
-            return;
-          }
-
-          const navigationConfirmed = tabs.some(
-            (tab) =>
-              tab.targetId === result.targetId && runtimeNavigationUrlMatches(result.url, tab.url)
-          );
-          if (navigationConfirmed) {
-            setRuntimeDiagnosticsState((current) => ({
-              ...current,
-              status: "succeeded",
-              tabs,
-              error: null,
-              navigationConfirmationMessage: null
-            }));
-            return;
-          }
-
-          if (attempt < RUNTIME_NAVIGATION_CONFIRMATION_MAX_ATTEMPTS - 1) {
-            await new Promise<void>((resolve) =>
-              setTimeout(resolve, RUNTIME_NAVIGATION_CONFIRMATION_POLL_MS)
-            );
-            if (!isRuntimeDiagnosticsRequestCurrent(requestId, profileId, requestRootPath)) {
-              return;
-            }
-          }
-        }
-
-        setRuntimeDiagnosticsState((current) => ({
-          ...current,
-          status: "succeeded",
-          tabs,
-          error: null,
-          navigationConfirmationMessage: "导航成功，但暂未确认标签页已更新。"
-        }));
-      } catch (error) {
-        if (!isRuntimeDiagnosticsRequestCurrent(requestId, profileId, requestRootPath)) {
-          return;
-        }
-        setRuntimeDiagnosticsState((current) => ({
-          ...current,
-          status: "failed",
-          error: `导航成功，但刷新标签页失败：${errorMessage(error)}`,
-          navigationConfirmationMessage: null
-        }));
-      }
-    } catch (error) {
-      if (!isRuntimeDiagnosticsRequestCurrent(requestId, profileId, requestRootPath)) {
-        return;
-      }
-      setRuntimeDiagnosticsState((current) => ({
-        ...current,
-        navigateStatus: "failed",
-        navigateResult: null,
-        navigateError: errorMessage(error)
-      }));
-    }
   }
 
   function closeActiveDialog() {
@@ -3590,26 +3357,7 @@ function App() {
               setFullRestoreConfirmOpen(false);
             }
           }}
-          runtimeDiagnostics={{
-            enabled: Boolean((import.meta as DevImportMeta).env?.DEV),
-            selectedProfileCount: selectedIds.length,
-            selectedProfileName: runtimeDiagnosticsProfile?.name ?? null,
-            session: runtimeDiagnosticsProfile
-              ? browserSessionsById[runtimeDiagnosticsProfile.id] ?? null
-              : null,
-            status: runtimeDiagnosticsState.status,
-            tabs: runtimeDiagnosticsState.tabs,
-            error: runtimeDiagnosticsState.error,
-            navigationConfirmationMessage:
-              runtimeDiagnosticsState.navigationConfirmationMessage,
-            onReadTabs: readRuntimeTabsForSelectedProfile,
-            navigateUrl: runtimeDiagnosticsState.navigateUrl,
-            navigateStatus: runtimeDiagnosticsState.navigateStatus,
-            navigateResult: runtimeDiagnosticsState.navigateResult,
-            navigateError: runtimeDiagnosticsState.navigateError,
-            onNavigateUrlChange: updateRuntimeNavigationUrl,
-            onNavigate: navigateRuntimeTabForSelectedProfile
-          }}
+          runtimeDiagnostics={runtimeDiagnostics}
           onClose={closeSettingsDialog}
         />
       ) : null}
