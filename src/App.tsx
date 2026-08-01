@@ -75,11 +75,9 @@ import {
 } from "./domain/profileModel";
 import {
   isReplacementCreatedAt,
-  mergeQueuedProfiles,
-  mergeQueuedProjects,
-  mergeQueuedSettings,
   nextSequentialId
 } from "./domain/profileDocumentMutationModel";
+import { useProfileDocumentMutations } from "./domain/useProfileDocumentMutations";
 import { BatchCreateProfilesDialog } from "./profiles/BatchCreateProfilesDialog";
 import {
   DeleteConfirmDialog,
@@ -248,16 +246,33 @@ function App() {
   const [layoutSourceProfileId, setLayoutSourceProfileId] = useState("");
   const [openingProjectId, setOpeningProjectId] = useState<string | null>(null);
   const [message, setMessage] = useState("正在初始化...");
-  const rootPathRef = useRef(rootPath);
-  const profilesRef = useRef(profiles);
-  const settingsRef = useRef(settings);
-  const projectsRef = useRef(projects);
-  const documentGenerationRef = useRef(0);
-  const documentMutationQueueRef = useRef<Promise<void>>(Promise.resolve());
-  rootPathRef.current = rootPath;
-  profilesRef.current = profiles;
-  settingsRef.current = settings;
-  projectsRef.current = projects;
+  const {
+    enqueueDocumentMutation,
+    persistDocument,
+    commitProfileDocumentState,
+    replaceProfileDocumentState,
+    getProfileDocumentSnapshot
+  } = useProfileDocumentMutations({
+    rootPath,
+    profiles,
+    settings,
+    projects,
+    saveDocument: (targetRootPath, document) =>
+      profileApi.saveProfiles(targetRootPath, document),
+    normalizeDocumentSettings: normalizeSettings,
+    onCommitDocumentState: (documentState, nextMessage) => {
+      setProfiles(documentState.profiles);
+      setProjects(documentState.projects);
+      setSettings(documentState.settings);
+      syncPersistedSettings(documentState.settings, documentState.profiles.length);
+      setSelectedIds((current) =>
+        current.filter((id) =>
+          documentState.profiles.some((profile) => profile.id === id)
+        )
+      );
+      setMessage(nextMessage);
+    }
+  });
   const {
     importPath,
     importCandidates,
@@ -552,11 +567,12 @@ function App() {
     clearLaunchConfirmationRefresh();
     dataSafetySettings.resetDataSafetyState();
     resetForLoadedRoot();
-    documentGenerationRef.current += 1;
-    rootPathRef.current = path;
-    settingsRef.current = loaded.settings;
-    profilesRef.current = loaded.document.profiles;
-    projectsRef.current = loaded.document.projects;
+    replaceProfileDocumentState({
+      rootPath: path,
+      profiles: loaded.document.profiles,
+      settings: loaded.settings,
+      projects: loaded.document.projects
+    });
     setRootPath(path);
     syncLoadedRoot(path, loaded.status, loaded.settings, loaded.chrome);
     setSettings(loaded.settings);
@@ -667,61 +683,18 @@ function App() {
     targetRootPath = rootPath,
     shouldCommit?: () => boolean
   ): Promise<boolean> {
-    const baseProfiles = profiles;
-    const baseSettings = settings;
-    const baseProjects = projects;
-    const generation = documentGenerationRef.current;
-    const isCurrentDocument = () =>
-      documentGenerationRef.current === generation &&
-      rootPathRef.current === targetRootPath;
-    return enqueueDocumentMutation(async () => {
-      if (!isCurrentDocument()) {
-        return false;
-      }
-      const { profiles: queuedProfiles, remappedIds } = mergeQueuedProfiles(
-        baseProfiles,
-        profilesRef.current,
-        nextProfiles
-      );
-      const sanitizedSettings = normalizeSettings(
-        mergeQueuedSettings(baseSettings, settingsRef.current, nextSettings)
-      );
-      const remappedRequestedProjects = nextProjects.map((project) => ({
-        ...project,
-        profileIds: project.profileIds.map(
-          (profileId) => remappedIds.get(profileId) ?? profileId
-        )
-      }));
-      const queuedProjects = mergeQueuedProjects(
-        baseProjects,
-        projectsRef.current,
-        remappedRequestedProjects
-      );
-      const existingProfileIds = new Set(queuedProfiles.map((profile) => profile.id));
-      const sanitizedProjects = queuedProjects.map((project) => ({
-        ...project,
-        profileIds: project.profileIds
-          .filter((profileId) => existingProfileIds.has(profileId))
-      }));
-      if (shouldCommit && !shouldCommit()) {
-        return false;
-      }
-      await profileApi.saveProfiles(targetRootPath, {
-        version: 1,
-        settings: sanitizedSettings,
-        profiles: queuedProfiles,
-        projects: sanitizedProjects
-      });
-      if (!isCurrentDocument() || (shouldCommit && !shouldCommit())) {
-        return true;
-      }
-      commitProfileDocumentState(
-        queuedProfiles,
-        sanitizedSettings,
-        sanitizedProjects,
-        nextMessage
-      );
-      return true;
+    return persistDocument({
+      profiles: nextProfiles,
+      message: nextMessage,
+      settings: nextSettings,
+      projects: nextProjects,
+      baseDocument: {
+        profiles,
+        settings,
+        projects
+      },
+      targetRootPath,
+      shouldCommit
     });
   }
 
@@ -734,8 +707,9 @@ function App() {
         return "not-saved";
       }
 
-      const targetRootPath = rootPathRef.current;
-      const shouldNotifyRollback = () => rootPathRef.current === targetRootPath;
+      const { rootPath: targetRootPath } = getProfileDocumentSnapshot();
+      const shouldNotifyRollback = () =>
+        getProfileDocumentSnapshot().rootPath === targetRootPath;
       const now = new Date().toISOString();
       const createdProfiles: ChromeProfile[] = [];
       try {
@@ -750,6 +724,7 @@ function App() {
           }
 
           const profileUid = createProfileUid();
+          const currentDocument = getProfileDocumentSnapshot();
           const profile = createProfile(
             {
               name: candidate.suggestedName,
@@ -762,7 +737,7 @@ function App() {
                 importedAt: now
               }
             },
-            [...profilesRef.current, ...createdProfiles],
+            [...currentDocument.profiles, ...createdProfiles],
             now
           );
           const marker: ProfileMarker = {
@@ -793,10 +768,11 @@ function App() {
           return "not-saved";
         }
 
-        const nextProfiles = [...profilesRef.current, ...createdProfiles];
-        const sanitizedSettings = normalizeSettings(settingsRef.current);
+        const currentDocument = getProfileDocumentSnapshot();
+        const nextProfiles = [...currentDocument.profiles, ...createdProfiles];
+        const sanitizedSettings = normalizeSettings(currentDocument.settings);
         const existingProfileIds = new Set(nextProfiles.map((profile) => profile.id));
-        const sanitizedProjects = projectsRef.current.map((project) => ({
+        const sanitizedProjects = currentDocument.projects.map((project) => ({
           ...project,
           profileIds: project.profileIds.filter((profileId) =>
             existingProfileIds.has(profileId)
@@ -853,34 +829,6 @@ function App() {
     });
   }
 
-  function enqueueDocumentMutation<T>(task: () => Promise<T>): Promise<T> {
-    const queued = documentMutationQueueRef.current.then(task, task);
-    documentMutationQueueRef.current = queued.then(
-      () => undefined,
-      () => undefined
-    );
-    return queued;
-  }
-
-  function commitProfileDocumentState(
-    nextProfiles: ChromeProfile[],
-    nextSettings: ProfileSettings,
-    nextProjects: AirdropProject[],
-    nextMessage: string
-  ) {
-    profilesRef.current = nextProfiles;
-    projectsRef.current = nextProjects;
-    settingsRef.current = nextSettings;
-    setProfiles(nextProfiles);
-    setProjects(nextProjects);
-    setSettings(nextSettings);
-    syncPersistedSettings(nextSettings, nextProfiles.length);
-    setSelectedIds((current) =>
-      current.filter((id) => nextProfiles.some((profile) => profile.id === id))
-    );
-    setMessage(nextMessage);
-  }
-
   async function rollbackCreatedProfiles(
     targetRootPath: string,
     createdProfiles: ChromeProfile[]
@@ -915,7 +863,7 @@ function App() {
     restore
   }: RestoreDataSafetyDocumentInput): Promise<boolean> {
     return enqueueDocumentMutation(async () => {
-      if (rootPathRef.current !== targetRootPath) {
+      if (getProfileDocumentSnapshot().rootPath !== targetRootPath) {
         return false;
       }
       const {
@@ -925,13 +873,14 @@ function App() {
         chromeStatus: chrome,
         message: nextMessage
       } = await restore();
-      if (rootPathRef.current !== targetRootPath) {
+      if (getProfileDocumentSnapshot().rootPath !== targetRootPath) {
         return false;
       }
-      documentGenerationRef.current += 1;
-      profilesRef.current = document.profiles;
-      projectsRef.current = document.projects;
-      settingsRef.current = restoredSettings;
+      replaceProfileDocumentState({
+        profiles: document.profiles,
+        settings: restoredSettings,
+        projects: document.projects
+      });
       setProfiles(document.profiles);
       setProjects(document.projects);
       setSettings(restoredSettings);
