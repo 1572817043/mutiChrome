@@ -1190,6 +1190,13 @@ pub fn import_profile_dir(
     marker: Option<ProfileMarker>,
 ) -> Result<(), String> {
     let target = safe_profile_dir(root, target_profile_id)?;
+    match fs::create_dir(&target) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err("目标 profile 目录已存在".to_string());
+        }
+        Err(error) => return Err(error.to_string()),
+    }
     match copy_directory(source_path, &target).and_then(|_| {
         if let Some(marker) = marker.as_ref() {
             write_profile_marker(&target, marker)?;
@@ -1199,7 +1206,9 @@ pub fn import_profile_dir(
         Ok(()) => Ok(()),
         Err(error) => {
             if target.exists() {
-                let _ = fs::remove_dir_all(&target);
+                if let Err(cleanup_error) = fs::remove_dir_all(&target) {
+                    return Err(format!("{error}；清理失败：{cleanup_error}"));
+                }
             }
             Err(error)
         }
@@ -1824,6 +1833,108 @@ mod tests {
         assert!(marker.contains("\"app\": \"MultiChrome\""));
         assert!(marker.contains("\"profileUid\": \"profile-uid-001\""));
         assert!(marker.contains("\"sourcePath\":"));
+    }
+
+    #[test]
+    fn import_profile_dir_preserves_existing_target_when_import_fails() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let external_dir = tempfile::tempdir().expect("external dir");
+        init_root(temp_dir.path()).expect("init root");
+        let target_file = temp_dir
+            .path()
+            .join("profiles/account-003/Default/Preferences");
+        fs::create_dir_all(target_file.parent().expect("target parent"))
+            .expect("create existing target");
+        fs::write(&target_file, b"existing prefs").expect("write existing target");
+        fs::create_dir_all(external_dir.path().join("Default")).expect("create external profile");
+        fs::write(
+            external_dir.path().join("Default/Preferences"),
+            b"new prefs",
+        )
+        .expect("write external prefs");
+
+        let error = import_profile_dir(temp_dir.path(), external_dir.path(), "account-003", None)
+            .expect_err("existing target must reject import");
+
+        assert!(error.contains("目标 profile 目录已存在"));
+        assert_eq!(
+            fs::read(&target_file).expect("existing target"),
+            b"existing prefs"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_profile_dir_reports_cleanup_failure_after_import_error() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let external_dir = tempfile::tempdir().expect("external dir");
+        init_root(temp_dir.path()).expect("init root");
+        fs::create_dir_all(external_dir.path().join(".multichrome.json"))
+            .expect("create marker conflict");
+        fs::write(
+            external_dir.path().join(".multichrome.json/conflict"),
+            b"conflict",
+        )
+        .expect("write marker conflict");
+        let payload_dir = external_dir.path().join("payload");
+        fs::create_dir(&payload_dir).expect("create payload");
+        for index in 0..2_000 {
+            fs::write(payload_dir.join(format!("{index:04}.txt")), b"payload")
+                .expect("write payload");
+        }
+
+        let profiles_dir = temp_dir.path().join("profiles");
+        let target = profiles_dir.join("account-003");
+        let original_mode = fs::metadata(&profiles_dir)
+            .expect("profiles metadata")
+            .permissions()
+            .mode();
+        let watcher_profiles_dir = profiles_dir.clone();
+        let watcher_target = target.clone();
+        let watcher = thread::spawn(move || {
+            let started = Instant::now();
+            while !watcher_target.exists() {
+                assert!(started.elapsed() < Duration::from_secs(5), "target timeout");
+                thread::sleep(Duration::from_millis(1));
+            }
+            let mut permissions = fs::metadata(&watcher_profiles_dir)
+                .expect("watcher profiles metadata")
+                .permissions();
+            permissions.set_mode(0o500);
+            fs::set_permissions(&watcher_profiles_dir, permissions)
+                .expect("make profiles read only");
+        });
+
+        let result = import_profile_dir(
+            temp_dir.path(),
+            external_dir.path(),
+            "account-003",
+            Some(ProfileMarker {
+                schema_version: 1,
+                app: "MultiChrome".to_string(),
+                profile_uid: "profile-uid-cleanup".to_string(),
+                profile_id: "account-003".to_string(),
+                name: "导入号".to_string(),
+                source_path: external_dir.path().to_string_lossy().to_string(),
+                source_folder_name: "external".to_string(),
+                imported_at: "2026-08-01T00:00:00.000Z".to_string(),
+            }),
+        );
+        watcher.join().expect("watcher");
+
+        let mut permissions = fs::metadata(&profiles_dir)
+            .expect("restore profiles metadata")
+            .permissions();
+        permissions.set_mode(original_mode);
+        fs::set_permissions(&profiles_dir, permissions).expect("restore profiles permissions");
+
+        let error = result.expect_err("marker conflict must fail import");
+        assert!(error.contains("清理失败"));
+        assert!(target.exists());
     }
 
     #[test]

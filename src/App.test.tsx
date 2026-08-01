@@ -53,6 +53,20 @@ describe("App launcher layout", () => {
     ]);
   });
 
+  test("超大顺序 ID 不会让冲突重分配生成重复 ID", async () => {
+    const { nextSequentialId } = (await import("./App")) as typeof import("./App") & {
+      nextSequentialId: (prefix: string, entities: Array<{ id: string }>) => string;
+    };
+
+    expect(
+      nextSequentialId("url-", [
+        { id: "url-001" },
+        { id: "url-002" },
+        { id: "url-9007199254740992" }
+      ])
+    ).toBe("url-003");
+  });
+
   beforeEach(() => {
     localStorage.clear();
     localStorage.setItem(
@@ -2194,6 +2208,493 @@ describe("App launcher layout", () => {
     deleteSpy.mockRestore();
   });
 
+  test("导入目标目录已存在失败时不会删除既有目录", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(profileApi, "scanProfileImportCandidates").mockResolvedValue([
+      importCandidate({
+        path: "/Volumes/SATA/profiles/twitter-main",
+        suggestedName: "推特主号"
+      })
+    ]);
+    const importSpy = vi
+      .spyOn(profileApi, "importProfileData")
+      .mockRejectedValue(new Error("目标 profile 目录已存在"));
+    const deleteSpy = vi.spyOn(profileApi, "deleteProfileData").mockResolvedValue();
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "导入" }));
+    fireEvent.change(screen.getByLabelText("导入来源目录"), {
+      target: { value: "/Volumes/SATA/profiles" }
+    });
+    await user.click(screen.getByRole("button", { name: "扫描导入目录" }));
+    await user.click(await screen.findByRole("button", { name: "导入选中 1 个" }));
+
+    expect(await screen.findByText("目标 profile 目录已存在")).toBeTruthy();
+    expect(importSpy).toHaveBeenCalledWith(
+      "~/MultiChromeProfiles",
+      "/Volumes/SATA/profiles/twitter-main",
+      "account-003",
+      expect.any(Object)
+    );
+    expect(deleteSpy).not.toHaveBeenCalled();
+    expect(savedDocument().profiles).toHaveLength(2);
+    importSpy.mockRestore();
+    deleteSpy.mockRestore();
+  });
+
+  test("批量导入失败且回滚失败时同时提示原始错误和账号 ID", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(profileApi, "scanProfileImportCandidates").mockResolvedValue([
+      importCandidate({
+        path: "/Volumes/SATA/profiles/twitter-main",
+        suggestedName: "推特主号"
+      }),
+      importCandidate({
+        path: "/Volumes/SATA/profiles/galxe-01",
+        folderName: "galxe-01",
+        suggestedName: "Galxe 01"
+      })
+    ]);
+    vi.spyOn(profileApi, "importProfileData")
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("复制失败"));
+    const deleteSpy = vi
+      .spyOn(profileApi, "deleteProfileData")
+      .mockRejectedValue(new Error("目录被占用"));
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "导入" }));
+    fireEvent.change(screen.getByLabelText("导入来源目录"), {
+      target: { value: "/Volumes/SATA/profiles" }
+    });
+    await user.click(screen.getByRole("button", { name: "扫描导入目录" }));
+    await user.click(await screen.findByRole("button", { name: "导入选中 2 个" }));
+
+    expect(
+      await screen.findByText("复制失败；回滚失败账号：account-003")
+    ).toBeTruthy();
+    expect(savedDocument().profiles).toHaveLength(2);
+    expect(deleteSpy).toHaveBeenCalledWith("~/MultiChromeProfiles", "account-003");
+    expect(deleteSpy).not.toHaveBeenCalledWith("~/MultiChromeProfiles", "account-004");
+  });
+
+  test("并发保存账号编辑不会覆盖正在导入的账号", async () => {
+    const user = userEvent.setup();
+    const importCopy = deferred<void>();
+    vi.spyOn(profileApi, "scanProfileImportCandidates").mockResolvedValue([
+      importCandidate({
+        path: "/Volumes/SATA/profiles/twitter-main",
+        suggestedName: "推特主号"
+      })
+    ]);
+    const importSpy = vi
+      .spyOn(profileApi, "importProfileData")
+      .mockReturnValue(importCopy.promise);
+    const deleteSpy = vi.spyOn(profileApi, "deleteProfileData").mockResolvedValue();
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "导入" }));
+    fireEvent.change(screen.getByLabelText("导入来源目录"), {
+      target: { value: "/Volumes/SATA/profiles" }
+    });
+    await user.click(screen.getByRole("button", { name: "扫描导入目录" }));
+    await user.click(await screen.findByRole("button", { name: "导入选中 1 个" }));
+    await waitFor(() => {
+      expect(importSpy).toHaveBeenCalledTimes(1);
+    });
+
+    await user.click(screen.getByRole("button", { name: "编辑 主号" }));
+    const dialog = await screen.findByRole("dialog", { name: "编辑 主号" });
+    await user.clear(within(dialog).getByLabelText("名称"));
+    await user.type(within(dialog).getByLabelText("名称"), "并发改名主号");
+    await user.click(within(dialog).getByRole("button", { name: "保存账号" }));
+
+    await act(async () => {
+      importCopy.resolve();
+      await importCopy.promise;
+    });
+
+    await waitFor(() => {
+      const names = savedDocument().profiles.map((item) => item.name);
+      expect(names).toContain("并发改名主号");
+      expect(names).toContain("推特主号");
+    });
+    expect(deleteSpy).not.toHaveBeenCalled();
+    importSpy.mockRestore();
+    deleteSpy.mockRestore();
+  });
+
+  test("两个排队的普通保存分别修改不同账号时最终都保留", async () => {
+    const user = userEvent.setup();
+    const firstSave = deferred<void>();
+    const openProfileSpy = vi
+      .spyOn(profileApi, "openProfile")
+      .mockResolvedValue("/tmp/profile");
+    const saveProfilesSpy = vi
+      .spyOn(profileApi, "saveProfiles")
+      .mockImplementationOnce(() => firstSave.promise)
+      .mockResolvedValue(undefined);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "打开 主号" }));
+    await waitFor(() => {
+      expect(saveProfilesSpy).toHaveBeenCalledTimes(1);
+    });
+    await user.click(screen.getByRole("button", { name: "打开 抽奖号" }));
+    expect(saveProfilesSpy).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      firstSave.resolve();
+      await firstSave.promise;
+    });
+
+    await waitFor(() => {
+      expect(saveProfilesSpy).toHaveBeenCalledTimes(2);
+    });
+    const finalProfiles = saveProfilesSpy.mock.calls[1][1].profiles;
+    expect(finalProfiles.find((item) => item.id === "account-001")?.lastOpenedAt).not.toBeNull();
+    expect(finalProfiles.find((item) => item.id === "account-002")?.lastOpenedAt).not.toBeNull();
+    openProfileSpy.mockRestore();
+    saveProfilesSpy.mockRestore();
+  });
+
+  test("同一账号名称编辑和 lastOpenedAt 并发修改时最终都保留", async () => {
+    const user = userEvent.setup();
+    const delayedOpen = deferred<string>();
+    const openProfileSpy = vi
+      .spyOn(profileApi, "openProfile")
+      .mockReturnValue(delayedOpen.promise);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "打开 主号" }));
+    await waitFor(() => {
+      expect(openProfileSpy).toHaveBeenCalledTimes(1);
+    });
+
+    await user.click(screen.getByRole("button", { name: "编辑 主号" }));
+    const dialog = await screen.findByRole("dialog", { name: "编辑 主号" });
+    await user.clear(within(dialog).getByLabelText("名称"));
+    await user.type(within(dialog).getByLabelText("名称"), "并发改名主号");
+    await user.click(within(dialog).getByRole("button", { name: "保存账号" }));
+    await waitFor(() => {
+      expect(savedDocument().profiles[0].name).toBe("并发改名主号");
+    });
+
+    await act(async () => {
+      delayedOpen.resolve("/tmp/account-001");
+      await delayedOpen.promise;
+    });
+
+    await waitFor(() => {
+      const stored = savedDocument().profiles[0];
+      expect(stored.name).toBe("并发改名主号");
+      expect(stored.lastOpenedAt).not.toBeNull();
+    });
+    openProfileSpy.mockRestore();
+  });
+
+  test("账号删除后排队的 stale 更新不能复活已删账号", async () => {
+    const user = userEvent.setup();
+    const staleOpen = deferred<string>();
+    const openProfileSpy = vi
+      .spyOn(profileApi, "openProfile")
+      .mockReturnValue(staleOpen.promise);
+    const saveProfilesSpy = vi.spyOn(profileApi, "saveProfiles");
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "打开 主号" }));
+    await waitFor(() => {
+      expect(openProfileSpy).toHaveBeenCalledTimes(1);
+    });
+    await user.click(screen.getByRole("button", { name: "编辑 主号" }));
+    const editDialog = await screen.findByRole("dialog", { name: "编辑 主号" });
+    await user.click(within(editDialog).getByRole("button", { name: "只删除记录" }));
+    const confirmDialog = await screen.findByRole("dialog", {
+      name: "确认只删除账号记录"
+    });
+    await user.click(within(confirmDialog).getByRole("button", { name: "确认删除" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "选择 主号" })).toBeNull();
+    });
+
+    await act(async () => {
+      staleOpen.resolve("/tmp/account-001");
+      await staleOpen.promise;
+    });
+    await waitFor(() => {
+      expect(saveProfilesSpy).toHaveBeenCalledTimes(2);
+    });
+
+    expect(savedDocument().profiles.map((item) => item.id)).toEqual(["account-002"]);
+    expect(screen.queryByRole("button", { name: "选择 主号" })).toBeNull();
+    openProfileSpy.mockRestore();
+    saveProfilesSpy.mockRestore();
+  });
+
+  test("导入占用新 ID 时并发新建账号不会覆盖导入记录", async () => {
+    const user = userEvent.setup();
+    const importCopy = deferred<void>();
+    vi.spyOn(profileApi, "scanProfileImportCandidates").mockResolvedValue([
+      importCandidate({
+        path: "/Volumes/SATA/profiles/twitter-main",
+        suggestedName: "推特主号"
+      })
+    ]);
+    const importSpy = vi
+      .spyOn(profileApi, "importProfileData")
+      .mockReturnValue(importCopy.promise);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "导入" }));
+    fireEvent.change(screen.getByLabelText("导入来源目录"), {
+      target: { value: "/Volumes/SATA/profiles" }
+    });
+    await user.click(screen.getByRole("button", { name: "扫描导入目录" }));
+    await user.click(await screen.findByRole("button", { name: "导入选中 1 个" }));
+    await waitFor(() => {
+      expect(importSpy).toHaveBeenCalledTimes(1);
+    });
+
+    await user.click(screen.getByRole("button", { name: "新建账号" }));
+    const dialog = await screen.findByRole("dialog", { name: "新建账号" });
+    await user.clear(within(dialog).getByLabelText("名称"));
+    await user.type(within(dialog).getByLabelText("名称"), "并发新建号");
+    await user.click(within(dialog).getByRole("button", { name: "保存账号" }));
+
+    await act(async () => {
+      importCopy.resolve();
+      await importCopy.promise;
+    });
+
+    await waitFor(() => {
+      expect(savedDocument().profiles.map((item) => item.name)).toEqual(
+        expect.arrayContaining(["推特主号", "并发新建号"])
+      );
+    });
+    const created = savedDocument().profiles.slice(2);
+    expect(created).toHaveLength(2);
+    expect(new Set(created.map((item) => item.id)).size).toBe(2);
+    expect(created.find((item) => item.name === "推特主号")?.importSource).toMatchObject({
+      sourcePath: "/Volumes/SATA/profiles/twitter-main"
+    });
+    expect(created.find((item) => item.name === "并发新建号")?.importSource).toBeUndefined();
+  });
+
+  test("取消导入时目录回滚失败会提示账号 ID 且保留新来源路径", async () => {
+    const user = userEvent.setup();
+    const importCopy = deferred<void>();
+    vi.spyOn(profileApi, "scanProfileImportCandidates").mockResolvedValue([
+      importCandidate({
+        path: "/Volumes/SATA/profiles/twitter-main",
+        suggestedName: "推特主号"
+      })
+    ]);
+    const importSpy = vi
+      .spyOn(profileApi, "importProfileData")
+      .mockReturnValue(importCopy.promise);
+    const deleteSpy = vi
+      .spyOn(profileApi, "deleteProfileData")
+      .mockRejectedValue(new Error("目录被占用"));
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "导入" }));
+    const importPathInput = screen.getByLabelText("导入来源目录");
+    fireEvent.change(importPathInput, {
+      target: { value: "/Volumes/SATA/profiles" }
+    });
+    await user.click(screen.getByRole("button", { name: "扫描导入目录" }));
+    await user.click(await screen.findByRole("button", { name: "导入选中 1 个" }));
+    await waitFor(() => {
+      expect(importSpy).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.change(importPathInput, {
+      target: { value: "/Volumes/SATA/new-profiles" }
+    });
+    await act(async () => {
+      importCopy.resolve();
+      await importCopy.promise;
+    });
+
+    await waitFor(() => {
+      expect(deleteSpy).toHaveBeenCalledWith("~/MultiChromeProfiles", "account-003");
+    });
+    expect(
+      await screen.findByText("导入已取消，但回滚失败账号：account-003")
+    ).toBeTruthy();
+    expect((importPathInput as HTMLInputElement).value).toBe(
+      "/Volumes/SATA/new-profiles"
+    );
+    expect(savedDocument().profiles).toHaveLength(2);
+  });
+
+  test("跨 root 取消导入回滚失败不会污染新 root 消息", async () => {
+    const user = userEvent.setup();
+    const importCopy = deferred<void>();
+    const targetDocument = documentWith([
+      profile({ id: "target-001", name: "目标账号" })
+    ]);
+    vi.spyOn(profileApi, "scanProfileImportCandidates").mockResolvedValue([
+      importCandidate({
+        path: "/Volumes/SATA/profiles/twitter-main",
+        suggestedName: "推特主号"
+      })
+    ]);
+    const importSpy = vi
+      .spyOn(profileApi, "importProfileData")
+      .mockReturnValue(importCopy.promise);
+    const deleteSpy = vi
+      .spyOn(profileApi, "deleteProfileData")
+      .mockRejectedValue(new Error("目录被占用"));
+    const loadProfilesSpy = vi
+      .spyOn(profileApi, "loadProfiles")
+      .mockImplementation(async (path) =>
+        path === "/tmp/other-root" ? targetDocument : savedDocument()
+      );
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "导入" }));
+    fireEvent.change(screen.getByLabelText("导入来源目录"), {
+      target: { value: "/Volumes/SATA/profiles" }
+    });
+    await user.click(screen.getByRole("button", { name: "扫描导入目录" }));
+    await user.click(await screen.findByRole("button", { name: "导入选中 1 个" }));
+    await waitFor(() => {
+      expect(importSpy).toHaveBeenCalledTimes(1);
+    });
+
+    const settingsDialog = await openSettingsDialog(user);
+    changeRootPathDraft(settingsDialog, "/tmp/other-root");
+    await user.click(within(settingsDialog).getByRole("button", { name: "保存设置" }));
+    expect(await screen.findByRole("button", { name: "选择 目标账号" })).toBeTruthy();
+
+    await act(async () => {
+      importCopy.resolve();
+      await importCopy.promise;
+    });
+
+    await waitFor(() => {
+      expect(deleteSpy).toHaveBeenCalledWith("~/MultiChromeProfiles", "account-003");
+    });
+    expect(
+      screen.queryByText("导入已取消，但回滚失败账号：account-003")
+    ).toBeNull();
+    expect(screen.getByRole("button", { name: "选择 目标账号" })).toBeTruthy();
+    loadProfilesSpy.mockRestore();
+  });
+
+  test("同 root 重新检测不会用正常状态覆盖取消导入回滚失败提示", async () => {
+    const user = userEvent.setup();
+    const importCopy = deferred<void>();
+    const reloadRefresh = deferred<BrowserSessionSnapshot[]>();
+    let snapshotCallCount = 0;
+    vi.spyOn(profileApi, "snapshotBrowserSessions").mockImplementation(() => {
+      snapshotCallCount += 1;
+      return snapshotCallCount === 2 ? reloadRefresh.promise : Promise.resolve([]);
+    });
+    vi.spyOn(profileApi, "scanProfileImportCandidates").mockResolvedValue([
+      importCandidate({
+        path: "/Volumes/SATA/profiles/twitter-main",
+        suggestedName: "推特主号"
+      })
+    ]);
+    const importSpy = vi
+      .spyOn(profileApi, "importProfileData")
+      .mockReturnValue(importCopy.promise);
+    const deleteSpy = vi
+      .spyOn(profileApi, "deleteProfileData")
+      .mockRejectedValue(new Error("目录被占用"));
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "导入" }));
+    fireEvent.change(screen.getByLabelText("导入来源目录"), {
+      target: { value: "/Volumes/SATA/profiles" }
+    });
+    await user.click(screen.getByRole("button", { name: "扫描导入目录" }));
+    await user.click(await screen.findByRole("button", { name: "导入选中 1 个" }));
+    await waitFor(() => {
+      expect(importSpy).toHaveBeenCalledTimes(1);
+    });
+
+    const settingsDialog = await openSettingsDialog(user);
+    await detectRootPathDraft(user, settingsDialog);
+    await waitFor(() => {
+      expect(snapshotCallCount).toBe(2);
+    });
+
+    await act(async () => {
+      importCopy.resolve();
+      await importCopy.promise;
+    });
+
+    await waitFor(() => {
+      expect(deleteSpy).toHaveBeenCalledWith("~/MultiChromeProfiles", "account-003");
+    });
+    expect(
+      await screen.findByText("导入已取消，但回滚失败账号：account-003")
+    ).toBeTruthy();
+
+    await act(async () => {
+      reloadRefresh.resolve([]);
+      await reloadRefresh.promise;
+    });
+    expect(screen.getByText("导入已取消，但回滚失败账号：account-003")).toBeTruthy();
+  });
+
+  test("同 root 取消导入后复制失败会提示原始错误且不删除未复制目录", async () => {
+    const user = userEvent.setup();
+    const importCopy = deferred<void>();
+    vi.spyOn(profileApi, "scanProfileImportCandidates").mockResolvedValue([
+      importCandidate({
+        path: "/Volumes/SATA/profiles/twitter-main",
+        suggestedName: "推特主号"
+      })
+    ]);
+    const importSpy = vi
+      .spyOn(profileApi, "importProfileData")
+      .mockReturnValue(importCopy.promise);
+    const deleteSpy = vi
+      .spyOn(profileApi, "deleteProfileData")
+      .mockRejectedValue(new Error("目录被占用"));
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "导入" }));
+    const importPathInput = screen.getByLabelText("导入来源目录");
+    fireEvent.change(importPathInput, {
+      target: { value: "/Volumes/SATA/profiles" }
+    });
+    await user.click(screen.getByRole("button", { name: "扫描导入目录" }));
+    await user.click(await screen.findByRole("button", { name: "导入选中 1 个" }));
+    await waitFor(() => {
+      expect(importSpy).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.change(importPathInput, {
+      target: { value: "/Volumes/SATA/new-profiles" }
+    });
+    await act(async () => {
+      importCopy.reject(new Error("复制失败；清理失败：权限不足"));
+      await importCopy.promise.catch(() => undefined);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("导入已取消：复制失败；清理失败：权限不足")).toBeTruthy();
+    });
+    expect(deleteSpy).not.toHaveBeenCalled();
+    expect(
+      screen.queryByText(
+        "导入已取消：复制失败；清理失败：权限不足；回滚失败账号：account-003"
+      )
+    ).toBeNull();
+    expect(
+      screen.getByText("导入已取消：复制失败；清理失败：权限不足")
+    ).toBeTruthy();
+    expect((importPathInput as HTMLInputElement).value).toBe(
+      "/Volumes/SATA/new-profiles"
+    );
+    expect(savedDocument().profiles).toHaveLength(2);
+  });
+
   test("主界面不显示说明性标题和副标题", async () => {
     render(<App />);
 
@@ -3425,6 +3926,234 @@ describe("App launcher layout", () => {
     expect(await screen.findByRole("button", { name: "打开项目 Galxe 每日" })).toBeTruthy();
   });
 
+  test("stale 账号保存不会回滚并发新增的项目和网址库设置", async () => {
+    const user = userEvent.setup();
+    const delayedOpen = deferred<string>();
+    const openProfileSpy = vi
+      .spyOn(profileApi, "openProfile")
+      .mockReturnValue(delayedOpen.promise);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "打开 主号" }));
+    await waitFor(() => {
+      expect(openProfileSpy).toHaveBeenCalledTimes(1);
+    });
+
+    await user.click(screen.getByRole("button", { name: "项目" }));
+    await user.click(screen.getByRole("button", { name: "新建项目" }));
+    const projectDialog = await screen.findByRole("dialog", { name: "新建项目" });
+    await user.clear(within(projectDialog).getByLabelText("项目名称"));
+    await user.type(within(projectDialog).getByLabelText("项目名称"), "并发项目 A");
+    await user.type(within(projectDialog).getByLabelText("项目网址"), "project.example");
+    await user.click(
+      within(projectDialog).getByRole("button", {
+        name: "绑定账号 主号 account-001"
+      })
+    );
+    await user.click(
+      within(projectDialog).getByRole("button", { name: "保存项目" })
+    );
+    await waitFor(() => {
+      expect(savedDocument().projects[0]?.name).toBe("并发项目 A");
+    });
+    await user.click(screen.getByRole("button", { name: "新建项目" }));
+    const secondProjectDialog = await screen.findByRole("dialog", { name: "新建项目" });
+    await user.clear(within(secondProjectDialog).getByLabelText("项目名称"));
+    await user.type(within(secondProjectDialog).getByLabelText("项目名称"), "并发项目 B");
+    await user.type(within(secondProjectDialog).getByLabelText("项目网址"), "project-b.example");
+    await user.click(
+      within(secondProjectDialog).getByRole("button", {
+        name: "绑定账号 抽奖号 account-002"
+      })
+    );
+    await user.click(
+      within(secondProjectDialog).getByRole("button", { name: "保存项目" })
+    );
+    await waitFor(() => {
+      expect(savedDocument().projects.map((item) => item.name)).toEqual([
+        "并发项目 A",
+        "并发项目 B"
+      ]);
+    });
+
+    await user.click(screen.getByRole("button", { name: "网址库" }));
+    await user.click(screen.getByRole("button", { name: "新建" }));
+    const urlDialog = await screen.findByRole("dialog", { name: "新建网址" });
+    await user.type(within(urlDialog).getByLabelText("网址名称"), "并发网址 A");
+    await user.type(within(urlDialog).getByLabelText("网址 URL"), "url.example");
+    await user.click(within(urlDialog).getByRole("button", { name: "保存网址" }));
+    await waitFor(() => {
+      expect(savedDocument().settings.urlLibrary[0]?.name).toBe("并发网址 A");
+    });
+    await user.click(screen.getByRole("button", { name: "新建" }));
+    const secondUrlDialog = await screen.findByRole("dialog", { name: "新建网址" });
+    await user.type(within(secondUrlDialog).getByLabelText("网址名称"), "并发网址 B");
+    await user.type(within(secondUrlDialog).getByLabelText("网址 URL"), "url-b.example");
+    await user.click(within(secondUrlDialog).getByRole("button", { name: "保存网址" }));
+    await waitFor(() => {
+      expect(savedDocument().settings.urlLibrary.map((item: any) => item.name)).toEqual([
+        "并发网址 B",
+        "并发网址 A"
+      ]);
+    });
+
+    await act(async () => {
+      delayedOpen.resolve("/tmp/account-001");
+      await delayedOpen.promise;
+    });
+
+    await waitFor(() => {
+      const stored = savedDocument();
+      expect(stored.projects.map((item) => item.name)).toEqual([
+        "并发项目 A",
+        "并发项目 B"
+      ]);
+      expect(stored.projects.map((item) => item.profileIds)).toEqual([
+        ["account-001"],
+        ["account-002"]
+      ]);
+      expect(stored.settings.urlLibrary.map((item: any) => item.name)).toEqual([
+        "并发网址 B",
+        "并发网址 A"
+      ]);
+      expect(stored.settings.urlLibrary.map((item: any) => item.url)).toEqual([
+        "https://url-b.example",
+        "https://url.example"
+      ]);
+      expect(stored.profiles[0].lastOpenedAt).not.toBeNull();
+    });
+    openProfileSpy.mockRestore();
+  });
+
+  test("stale 账号保存后满额 recentUrls 的新网址和置顶顺序仍保留", async () => {
+    const user = userEvent.setup();
+    const delayedOpen = deferred<string>();
+    const document = savedDocument();
+    document.settings.recentUrls = [
+      "https://old-01.example",
+      "https://old-02.example",
+      "https://old-03.example",
+      "https://old-04.example",
+      "https://old-05.example",
+      "https://old-06.example",
+      "https://old-07.example",
+      "https://old-08.example",
+      "https://old-09.example",
+      "https://old-10.example"
+    ];
+    localStorage.setItem("multichrome.profileDocument", JSON.stringify(document));
+    let openCallCount = 0;
+    const openProfileSpy = vi
+      .spyOn(profileApi, "openProfile")
+      .mockImplementation(() => {
+        openCallCount += 1;
+        return openCallCount === 1
+          ? delayedOpen.promise
+          : Promise.resolve("/tmp/account-001");
+      });
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "打开 主号" }));
+    await waitFor(() => {
+      expect(openProfileSpy).toHaveBeenCalledTimes(1);
+    });
+
+    await user.click(screen.getByRole("button", { name: "选择 抽奖号" }));
+    await user.type(screen.getByLabelText("批量打开网址"), "fresh.example");
+    await user.click(screen.getByRole("button", { name: "打开指定网址" }));
+    await waitFor(() => {
+      expect(savedDocument().settings.recentUrls[0]).toBe("https://fresh.example");
+    });
+
+    await user.clear(screen.getByLabelText("批量打开网址"));
+    await user.type(screen.getByLabelText("批量打开网址"), "old-05.example");
+    await user.click(screen.getByRole("button", { name: "打开指定网址" }));
+    await waitFor(() => {
+      expect(savedDocument().settings.recentUrls[0]).toBe(
+        "https://old-05.example"
+      );
+    });
+
+    await act(async () => {
+      delayedOpen.resolve("/tmp/account-001");
+      await delayedOpen.promise;
+    });
+
+    await waitFor(() => {
+      expect(savedDocument().profiles[0].lastOpenedAt).not.toBeNull();
+    });
+    expect(savedDocument().settings.recentUrls.slice(0, 2)).toEqual([
+      "https://old-05.example",
+      "https://fresh.example"
+    ]);
+    expect(savedDocument().settings.recentUrls).toHaveLength(10);
+    openProfileSpy.mockRestore();
+  });
+
+  test("stale 账号保存后并发新增的网址库项目仍保留在头部", async () => {
+    const user = userEvent.setup();
+    const delayedOpen = deferred<string>();
+    const document = savedDocument();
+    document.settings.urlLibrary = [
+      {
+        id: "url-001",
+        name: "旧网址",
+        url: "https://old.example",
+        tags: [],
+        notes: "",
+        createdAt: "2026-07-15T00:00:00.000Z",
+        updatedAt: "2026-07-15T00:00:00.000Z"
+      } as any
+    ];
+    localStorage.setItem("multichrome.profileDocument", JSON.stringify(document));
+    const openProfileSpy = vi
+      .spyOn(profileApi, "openProfile")
+      .mockReturnValue(delayedOpen.promise);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "打开 主号" }));
+    await waitFor(() => {
+      expect(openProfileSpy).toHaveBeenCalledTimes(1);
+    });
+
+    await user.click(screen.getByRole("button", { name: "网址库" }));
+    await user.click(screen.getByRole("button", { name: "新建" }));
+    const urlDialog = await screen.findByRole("dialog", { name: "新建网址" });
+    await user.type(within(urlDialog).getByLabelText("网址名称"), "新网址 A");
+    await user.type(within(urlDialog).getByLabelText("网址 URL"), "fresh.example");
+    await user.click(within(urlDialog).getByRole("button", { name: "保存网址" }));
+    await waitFor(() => {
+      expect(savedDocument().settings.urlLibrary[0]?.name).toBe("新网址 A");
+    });
+    await user.click(screen.getByRole("button", { name: "新建" }));
+    const secondUrlDialog = await screen.findByRole("dialog", { name: "新建网址" });
+    await user.type(within(secondUrlDialog).getByLabelText("网址名称"), "新网址 B");
+    await user.type(within(secondUrlDialog).getByLabelText("网址 URL"), "fresh-b.example");
+    await user.click(within(secondUrlDialog).getByRole("button", { name: "保存网址" }));
+    await waitFor(() => {
+      expect(savedDocument().settings.urlLibrary.map((item: any) => item.name)).toEqual([
+        "新网址 B",
+        "新网址 A",
+        "旧网址"
+      ]);
+    });
+
+    await act(async () => {
+      delayedOpen.resolve("/tmp/account-001");
+      await delayedOpen.promise;
+    });
+
+    await waitFor(() => {
+      expect(savedDocument().profiles[0].lastOpenedAt).not.toBeNull();
+    });
+    expect(savedDocument().settings.urlLibrary.map((item: any) => item.name)).toEqual([
+      "新网址 B",
+      "新网址 A",
+      "旧网址"
+    ]);
+    openProfileSpy.mockRestore();
+  });
+
   test("项目可以保存多个网址并在卡片显示网址数量", async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -4530,6 +5259,66 @@ describe("App launcher layout", () => {
     saveProfilesSpy.mockRestore();
   });
 
+  test("旧 root 普通保存返回后不会覆盖新 root 的 UI 和 refs", async () => {
+    const user = userEvent.setup();
+    const oldRootSave = deferred<void>();
+    const targetDocument = documentWith([
+      profile({ id: "target-001", name: "目标账号" })
+    ]);
+    const loadProfilesSpy = vi
+      .spyOn(profileApi, "loadProfiles")
+      .mockImplementation(async (path) =>
+        path === "/tmp/other-root" ? targetDocument : savedDocument()
+      );
+    const saveProfilesSpy = vi
+      .spyOn(profileApi, "saveProfiles")
+      .mockImplementation((path) =>
+        path === "~/MultiChromeProfiles" ? oldRootSave.promise : Promise.resolve()
+      );
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "编辑 主号" }));
+    const editDialog = await screen.findByRole("dialog", { name: "编辑 主号" });
+    await user.clear(within(editDialog).getByLabelText("名称"));
+    await user.type(within(editDialog).getByLabelText("名称"), "旧根改名");
+    await user.click(within(editDialog).getByRole("button", { name: "保存账号" }));
+    await waitFor(() => {
+      expect(saveProfilesSpy).toHaveBeenCalledWith(
+        "~/MultiChromeProfiles",
+        expect.any(Object)
+      );
+    });
+
+    const settingsDialog = await openSettingsDialog(user);
+    changeRootPathDraft(settingsDialog, "/tmp/other-root");
+    await user.click(within(settingsDialog).getByRole("button", { name: "保存设置" }));
+    expect(await screen.findByRole("button", { name: "选择 目标账号" })).toBeTruthy();
+
+    await act(async () => {
+      oldRootSave.resolve();
+      await oldRootSave.promise;
+    });
+
+    expect(screen.getByRole("button", { name: "选择 目标账号" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "选择 旧根改名" })).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "编辑 目标账号" }));
+    const targetDialog = await screen.findByRole("dialog", { name: "编辑 目标账号" });
+    await user.clear(within(targetDialog).getByLabelText("名称"));
+    await user.type(within(targetDialog).getByLabelText("名称"), "目标根改名");
+    await user.click(within(targetDialog).getByRole("button", { name: "保存账号" }));
+    await waitFor(() => {
+      const targetSaves = saveProfilesSpy.mock.calls.filter(
+        ([path]) => path === "/tmp/other-root"
+      );
+      expect(targetSaves[targetSaves.length - 1]?.[1].profiles).toEqual([
+        expect.objectContaining({ id: "target-001", name: "目标根改名" })
+      ]);
+    });
+    loadProfilesSpy.mockRestore();
+    saveProfilesSpy.mockRestore();
+  });
+
   test("设置弹窗检测空白配置根目录不会加载或切换根目录", async () => {
     const user = userEvent.setup();
     const initProfileRootSpy = vi.spyOn(profileApi, "initProfileRoot");
@@ -5026,6 +5815,271 @@ describe("App launcher layout", () => {
     restoreBackupSpy.mockRestore();
   });
 
+  test("同 root 恢复在 pending 普通保存后仍以恢复文档为最终状态", async () => {
+    const user = userEvent.setup();
+    const pendingSave = deferred<void>();
+    const restoredDocument = documentWith([
+      profile({ id: "account-009", name: "恢复号", notes: "来自备份" })
+    ]);
+    const saveProfilesSpy = vi
+      .spyOn(profileApi, "saveProfiles")
+      .mockImplementationOnce(() => pendingSave.promise)
+      .mockResolvedValue(undefined);
+    const restoreBackupSpy = vi
+      .spyOn(profileApi, "restoreProfilesBackup")
+      .mockResolvedValue(restoredDocument);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "编辑 主号" }));
+    const editDialog = await screen.findByRole("dialog", { name: "编辑 主号" });
+    await user.clear(within(editDialog).getByLabelText("名称"));
+    await user.type(within(editDialog).getByLabelText("名称"), "旧保存名称");
+    await user.click(within(editDialog).getByRole("button", { name: "保存账号" }));
+    await waitFor(() => {
+      expect(saveProfilesSpy).toHaveBeenCalledTimes(1);
+    });
+
+    const settingsDialog = await openSettingsDialog(user);
+    fireEvent.change(within(settingsDialog).getByLabelText("备份文件路径"), {
+      target: { value: "/tmp/multichrome-backup.json" }
+    });
+    await user.click(
+      within(settingsDialog).getByRole("button", { name: "从备份恢复" })
+    );
+    await user.click(
+      within(settingsDialog).getByRole("button", { name: "确认恢复" })
+    );
+    expect(restoreBackupSpy).not.toHaveBeenCalled();
+
+    await act(async () => {
+      pendingSave.resolve();
+      await pendingSave.promise;
+    });
+
+    await waitFor(() => {
+      expect(restoreBackupSpy).toHaveBeenCalledTimes(1);
+      expect(screen.getByRole("button", { name: "选择 恢复号" })).toBeTruthy();
+    });
+    expect(screen.queryByRole("button", { name: "选择 旧保存名称" })).toBeNull();
+    expect(saveProfilesSpy).toHaveBeenCalledTimes(1);
+    saveProfilesSpy.mockRestore();
+    restoreBackupSpy.mockRestore();
+  });
+
+  test("恢复期间切换根目录不会把旧根恢复文档写入新根", async () => {
+    const user = userEvent.setup();
+    const restoreRequest = deferred<ProfileDocument>();
+    const restoredDocument = documentWith([
+      profile({ id: "account-009", name: "恢复号", notes: "来自备份" })
+    ]);
+    const targetDocument = documentWith([
+      profile({ id: "target-001", name: "目标账号" })
+    ]);
+    const saveProfilesSpy = vi
+      .spyOn(profileApi, "saveProfiles")
+      .mockResolvedValue(undefined);
+    const restoreBackupSpy = vi
+      .spyOn(profileApi, "restoreProfilesBackup")
+      .mockReturnValue(restoreRequest.promise);
+    const initProfileRootSpy = vi.spyOn(profileApi, "initProfileRoot");
+    const loadProfilesSpy = vi.spyOn(profileApi, "loadProfiles");
+    render(<App />);
+
+    const settingsDialog = await openSettingsDialog(user);
+    fireEvent.change(within(settingsDialog).getByLabelText("备份文件路径"), {
+      target: { value: "/tmp/multichrome-backup.json" }
+    });
+    await user.click(
+      within(settingsDialog).getByRole("button", { name: "从备份恢复" })
+    );
+    await user.click(
+      within(settingsDialog).getByRole("button", { name: "确认恢复" })
+    );
+    await waitFor(() => {
+      expect(restoreBackupSpy).toHaveBeenCalledWith(
+        "~/MultiChromeProfiles",
+        "/tmp/multichrome-backup.json"
+      );
+    });
+
+    initProfileRootSpy.mockResolvedValue({
+      rootExists: true,
+      writable: true,
+      profileCount: 1
+    });
+    loadProfilesSpy.mockResolvedValue(targetDocument);
+    changeRootPathDraft(settingsDialog, "/tmp/other-root");
+    await user.click(within(settingsDialog).getByRole("button", { name: "保存设置" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "选择 目标账号" })).toBeTruthy();
+    });
+
+    const bSave = deferred<void>();
+    saveProfilesSpy.mockImplementation(() => bSave.promise);
+    await user.click(screen.getByRole("button", { name: "编辑 目标账号" }));
+    const targetEditDialog = await screen.findByRole("dialog", { name: "编辑 目标账号" });
+    await user.clear(within(targetEditDialog).getByLabelText("名称"));
+    await user.type(within(targetEditDialog).getByLabelText("名称"), "目标账号已保存");
+    await user.click(within(targetEditDialog).getByRole("button", { name: "保存账号" }));
+    await waitFor(() => {
+      expect(saveProfilesSpy.mock.calls[saveProfilesSpy.mock.calls.length - 1][0]).toBe(
+        "/tmp/other-root"
+      );
+    });
+
+    await act(async () => {
+      restoreRequest.resolve(restoredDocument);
+      await restoreRequest.promise;
+    });
+
+    await act(async () => {
+      bSave.resolve();
+      await bSave.promise;
+    });
+
+    await waitFor(() => {
+      expect(
+        saveProfilesSpy.mock.calls.some(
+          ([path, document]) =>
+            path === "/tmp/other-root" &&
+            document.profiles.some((profile) => profile.id === "target-001")
+        )
+      ).toBe(true);
+    });
+    expect(
+      saveProfilesSpy.mock.calls.some(
+        ([path, document]) =>
+          path === "/tmp/other-root" &&
+          document.profiles.some((profile) => profile.id === "account-009")
+      )
+    ).toBe(false);
+    expect(screen.getByRole("button", { name: "选择 目标账号已保存" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "选择 恢复号" })).toBeNull();
+    saveProfilesSpy.mockRestore();
+    restoreBackupSpy.mockRestore();
+    initProfileRootSpy.mockRestore();
+    loadProfilesSpy.mockRestore();
+  });
+
+  test("轻量恢复会等待恢复 API 完成后才清理确认态", async () => {
+    const user = userEvent.setup();
+    const restoreRequest = deferred<ProfileDocument>();
+    const restoredDocument = documentWith([
+      profile({ id: "account-009", name: "恢复号", notes: "来自备份" })
+    ]);
+    const restoreBackupSpy = vi
+      .spyOn(profileApi, "restoreProfilesBackup")
+      .mockReturnValue(restoreRequest.promise);
+    render(<App />);
+
+    const dialog = await openSettingsDialog(user);
+    fireEvent.change(within(dialog).getByLabelText("备份文件路径"), {
+      target: { value: "/tmp/multichrome-backup.json" }
+    });
+    await user.click(within(dialog).getByRole("button", { name: "从备份恢复" }));
+    await user.click(within(dialog).getByRole("button", { name: "确认恢复" }));
+    await waitFor(() => {
+      expect(restoreBackupSpy).toHaveBeenCalledTimes(1);
+    });
+
+    expect(within(dialog).getByText("确认从备份恢复")).toBeTruthy();
+    expect(
+      within(dialog).getByRole("button", { name: "恢复中" })
+    ).toHaveProperty("disabled", true);
+    expect(screen.queryByRole("button", { name: "选择 恢复号" })).toBeNull();
+
+    await act(async () => {
+      restoreRequest.resolve(restoredDocument);
+      await restoreRequest.promise;
+    });
+
+    expect(await screen.findByRole("button", { name: "选择 恢复号" })).toBeTruthy();
+    expect(within(dialog).queryByText("确认从备份恢复")).toBeNull();
+    restoreBackupSpy.mockRestore();
+  });
+
+  test("轻量恢复后 Chrome 检测失败仍提交恢复 UI 并提示", async () => {
+    const user = userEvent.setup();
+    const restoredDocument = documentWith([
+      profile({ id: "account-009", name: "恢复号", notes: "来自备份" })
+    ]);
+    const restoreBackupSpy = vi
+      .spyOn(profileApi, "restoreProfilesBackup")
+      .mockResolvedValue(restoredDocument);
+    render(<App />);
+    await screen.findByText("根目录正常");
+    const detectChromeSpy = vi
+      .spyOn(profileApi, "detectChrome")
+      .mockRejectedValue(new Error("Chrome 检测失败"));
+
+    const dialog = await openSettingsDialog(user);
+    fireEvent.change(within(dialog).getByLabelText("备份文件路径"), {
+      target: { value: "/tmp/multichrome-backup.json" }
+    });
+    await user.click(within(dialog).getByRole("button", { name: "从备份恢复" }));
+    await user.click(within(dialog).getByRole("button", { name: "确认恢复" }));
+
+    expect(await screen.findByRole("button", { name: "选择 恢复号" })).toBeTruthy();
+    expect(
+      await screen.findByText("已从备份恢复 1 个账号；Chrome 检测失败")
+    ).toBeTruthy();
+    expect(within(dialog).queryByText("确认从备份恢复")).toBeNull();
+    detectChromeSpy.mockRestore();
+    restoreBackupSpy.mockRestore();
+  });
+
+  test("恢复落盘后检测延迟期间排队的旧保存不会覆盖恢复结果", async () => {
+    const user = userEvent.setup();
+    const detectRequest = deferred<Awaited<ReturnType<typeof profileApi.detectChrome>>>();
+    const restoredDocument = documentWith([
+      profile({ id: "account-009", name: "恢复号", notes: "来自备份" })
+    ]);
+    const restoreBackupSpy = vi
+      .spyOn(profileApi, "restoreProfilesBackup")
+      .mockResolvedValue(restoredDocument);
+    const saveProfilesSpy = vi
+      .spyOn(profileApi, "saveProfiles")
+      .mockResolvedValue(undefined);
+    render(<App />);
+    await screen.findByText("根目录正常");
+    const detectChromeSpy = vi
+      .spyOn(profileApi, "detectChrome")
+      .mockReturnValue(detectRequest.promise);
+
+    const settingsDialog = await openSettingsDialog(user);
+    fireEvent.change(within(settingsDialog).getByLabelText("备份文件路径"), {
+      target: { value: "/tmp/multichrome-backup.json" }
+    });
+    await user.click(within(settingsDialog).getByRole("button", { name: "从备份恢复" }));
+    await user.click(within(settingsDialog).getByRole("button", { name: "确认恢复" }));
+    await waitFor(() => {
+      expect(restoreBackupSpy).toHaveBeenCalledTimes(1);
+      expect(detectChromeSpy).toHaveBeenCalledTimes(1);
+    });
+
+    await user.click(within(settingsDialog).getByRole("button", { name: "关闭设置" }));
+    await user.click(screen.getByRole("button", { name: "编辑 主号" }));
+    const editDialog = await screen.findByRole("dialog", { name: "编辑 主号" });
+    await user.clear(within(editDialog).getByLabelText("名称"));
+    await user.type(within(editDialog).getByLabelText("名称"), "旧保存名称");
+    await user.click(within(editDialog).getByRole("button", { name: "保存账号" }));
+    expect(saveProfilesSpy).not.toHaveBeenCalled();
+
+    await act(async () => {
+      detectRequest.reject(new Error("Chrome 检测失败"));
+      await detectRequest.promise.catch(() => undefined);
+    });
+
+    expect(await screen.findByRole("button", { name: "选择 恢复号" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "选择 旧保存名称" })).toBeNull();
+    await waitFor(() => {
+      expect(saveProfilesSpy).not.toHaveBeenCalled();
+    });
+    detectChromeSpy.mockRestore();
+    restoreBackupSpy.mockRestore();
+    saveProfilesSpy.mockRestore();
+  });
+
   test("设置弹窗可以预览并创建选中账号的完整备份", async () => {
     const user = userEvent.setup();
     const previewSpy = vi
@@ -5116,6 +6170,125 @@ describe("App launcher layout", () => {
     ).toBe("/tmp/full-profiles-1");
     previewSpy.mockRestore();
     restoreSpy.mockRestore();
+  });
+
+  test("完整恢复会等待 pending 导入复制完成后再替换目录", async () => {
+    const user = userEvent.setup();
+    const importCopy = deferred<void>();
+    vi.spyOn(profileApi, "scanProfileImportCandidates").mockResolvedValue([
+      importCandidate({
+        path: "/Volumes/SATA/profiles/twitter-main",
+        suggestedName: "推特主号"
+      })
+    ]);
+    const importSpy = vi
+      .spyOn(profileApi, "importProfileData")
+      .mockReturnValue(importCopy.promise);
+    const previewSpy = vi
+      .spyOn(profileApi, "previewFullProfileRestore")
+      .mockResolvedValue({
+        path: "/tmp/full-profiles-1",
+        profileCount: 1,
+        profileIds: ["account-009"],
+        newProfileIds: ["account-009"],
+        overwriteProfileIds: [],
+        totalBytes: 4096
+      });
+    const restoreSpy = vi
+      .spyOn(profileApi, "restoreFullProfileBackup")
+      .mockResolvedValue(
+        documentWith([
+          profile({ id: "account-009", name: "备份号" })
+        ])
+      );
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "导入" }));
+    fireEvent.change(screen.getByLabelText("导入来源目录"), {
+      target: { value: "/Volumes/SATA/profiles" }
+    });
+    await user.click(screen.getByRole("button", { name: "扫描导入目录" }));
+    await user.click(await screen.findByRole("button", { name: "导入选中 1 个" }));
+    await waitFor(() => {
+      expect(importSpy).toHaveBeenCalledTimes(1);
+    });
+
+    const dialog = await openSettingsDialog(user);
+    fireEvent.change(within(dialog).getByLabelText("完整备份目录路径"), {
+      target: { value: "/tmp/full-profiles-1" }
+    });
+    await user.click(within(dialog).getByRole("button", { name: "扫描完整备份" }));
+    await user.click(await within(dialog).findByRole("button", { name: "恢复完整备份" }));
+    const confirmDialog = await screen.findByRole("dialog", { name: "确认恢复完整备份" });
+    await user.click(within(confirmDialog).getByRole("button", { name: "确认恢复" }));
+
+    expect(restoreSpy).not.toHaveBeenCalled();
+    await act(async () => {
+      importCopy.resolve();
+      await importCopy.promise;
+    });
+
+    await waitFor(() => {
+      expect(restoreSpy).toHaveBeenCalledWith("~/MultiChromeProfiles", "/tmp/full-profiles-1", true);
+      expect(screen.getByRole("button", { name: "选择 备份号" })).toBeTruthy();
+    });
+    previewSpy.mockRestore();
+    restoreSpy.mockRestore();
+  });
+
+  test("轻量恢复进行中不会并发启动完整恢复", async () => {
+    const user = userEvent.setup();
+    const restoreRequest = deferred<ProfileDocument>();
+    const restoredDocument = documentWith([
+      profile({ id: "account-009", name: "恢复号" })
+    ]);
+    const restoreBackupSpy = vi
+      .spyOn(profileApi, "restoreProfilesBackup")
+      .mockReturnValue(restoreRequest.promise);
+    const previewSpy = vi
+      .spyOn(profileApi, "previewFullProfileRestore")
+      .mockResolvedValue({
+        path: "/tmp/full-profiles-1",
+        profileCount: 1,
+        profileIds: ["account-009"],
+        newProfileIds: ["account-009"],
+        overwriteProfileIds: [],
+        totalBytes: 4096
+      });
+    const restoreFullSpy = vi
+      .spyOn(profileApi, "restoreFullProfileBackup")
+      .mockResolvedValue(restoredDocument);
+    render(<App />);
+
+    const dialog = await openSettingsDialog(user);
+    fireEvent.change(within(dialog).getByLabelText("备份文件路径"), {
+      target: { value: "/tmp/multichrome-backup.json" }
+    });
+    await user.click(within(dialog).getByRole("button", { name: "从备份恢复" }));
+    await user.click(within(dialog).getByRole("button", { name: "确认恢复" }));
+    await waitFor(() => {
+      expect(restoreBackupSpy).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.change(within(dialog).getByLabelText("完整备份目录路径"), {
+      target: { value: "/tmp/full-profiles-1" }
+    });
+    await user.click(within(dialog).getByRole("button", { name: "扫描完整备份" }));
+    await user.click(await within(dialog).findByRole("button", { name: "恢复完整备份" }));
+    const confirmDialog = await screen.findByRole("dialog", { name: "确认恢复完整备份" });
+    await user.click(within(confirmDialog).getByRole("button", { name: "确认恢复" }));
+
+    expect(await screen.findByText("恢复正在进行，请稍候")).toBeTruthy();
+    expect(restoreFullSpy).not.toHaveBeenCalled();
+
+    await act(async () => {
+      restoreRequest.resolve(restoredDocument);
+      await restoreRequest.promise;
+    });
+    await screen.findByRole("button", { name: "选择 恢复号" });
+    previewSpy.mockRestore();
+    restoreBackupSpy.mockRestore();
+    restoreFullSpy.mockRestore();
   });
 
   test("设置弹窗可以打开数据目录和备份目录", async () => {
@@ -5702,6 +6875,17 @@ async function flushPromises() {
     await Promise.resolve();
     await Promise.resolve();
   });
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+
+  return { promise, resolve, reject };
 }
 
 async function expandDevDiagnostics(
