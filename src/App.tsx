@@ -241,10 +241,6 @@ function App() {
     settings,
     profiles,
     projects,
-    setRootPath,
-    setSettings,
-    setProfiles,
-    setProjects,
     enqueueDocumentMutation,
     persistDocument,
     commitProfileDocumentState,
@@ -571,11 +567,7 @@ function App() {
       settings: loaded.settings,
       projects: loaded.document.projects
     });
-    setRootPath(path);
     syncLoadedRoot(path, loaded.status, loaded.settings, loaded.chrome);
-    setSettings(loaded.settings);
-    setProfiles(loaded.document.profiles);
-    setProjects(loaded.document.projects);
     launchEventsRef.current = loaded.launchEvents;
     setLaunchEvents(loaded.launchEvents);
     setMessage(loaded.status.writable ? "根目录正常" : "根目录不可写");
@@ -879,9 +871,6 @@ function App() {
         settings: restoredSettings,
         projects: document.projects
       });
-      setProfiles(document.profiles);
-      setProjects(document.projects);
-      setSettings(restoredSettings);
       syncRestoredRoot(status, restoredSettings, chrome);
       setEditingId(null);
       setEditingProfileDraft(null);
