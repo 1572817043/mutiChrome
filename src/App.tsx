@@ -70,6 +70,7 @@ import {
   createProfile,
   defaultAccentColor,
   duplicateProfile,
+  nextProfileId,
   removeProfile,
   updateProfile
 } from "./domain/profileModel";
@@ -80,6 +81,12 @@ import {
 } from "./profiles/DeleteConfirmDialog";
 import { EditProfileDialog } from "./profiles/EditProfileDialog";
 import { ProfileCard, type CardDensity } from "./profiles/ProfileCard";
+import {
+  type ImportPersistResult,
+  importCandidateStatusText,
+  isImportCandidateSelectable,
+  useProfileImport
+} from "./profiles/useProfileImport";
 import { FullRestoreConfirmDialog } from "./data-safety/FullRestoreConfirmDialog";
 import { EditProjectDialog } from "./projects/EditProjectDialog";
 import { ProjectsView } from "./projects/ProjectsView";
@@ -128,9 +135,9 @@ import type {
   AirdropProject,
   ChromeProfile,
   ProfileImportCandidate,
+  ProfileMarker,
   ProfileDocument,
   ProjectUrl,
-  ProfileMarker,
   ProfileSettings,
   UrlLibraryItem
 } from "./types";
@@ -159,6 +166,19 @@ interface PendingDelete {
 
 interface LoadedRootData extends RootSettingsLoadedData {
   launchEvents: BrowserLaunchEvent[];
+}
+
+interface RestoredDataSafetyDocument {
+  document: ProfileDocument;
+  settings: ProfileSettings;
+  rootStatus: RootStatus;
+  chromeStatus: ChromeStatus;
+  message: string;
+}
+
+interface RestoreDataSafetyDocumentInput {
+  targetRootPath: string;
+  restore: () => Promise<RestoredDataSafetyDocument>;
 }
 
 function App() {
@@ -192,12 +212,6 @@ function App() {
   const [pendingUrlDeleteId, setPendingUrlDeleteId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [profileSizes, setProfileSizes] = useState<Record<string, number | null>>({});
-  const [importPath, setImportPath] = useState("");
-  const [importCandidates, setImportCandidates] = useState<ProfileImportCandidate[]>([]);
-  const [selectedImportPaths, setSelectedImportPaths] = useState<string[]>([]);
-  const [importScanning, setImportScanning] = useState(false);
-  const [importingProfiles, setImportingProfiles] = useState(false);
-  const [showImport, setShowImport] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
   const [pendingBatchDelete, setPendingBatchDelete] = useState<ChromeProfile[] | null>(null);
@@ -222,6 +236,36 @@ function App() {
   const [layoutSourceProfileId, setLayoutSourceProfileId] = useState("");
   const [openingProjectId, setOpeningProjectId] = useState<string | null>(null);
   const [message, setMessage] = useState("正在初始化...");
+  const rootPathRef = useRef(rootPath);
+  const profilesRef = useRef(profiles);
+  const settingsRef = useRef(settings);
+  const projectsRef = useRef(projects);
+  const documentGenerationRef = useRef(0);
+  const documentMutationQueueRef = useRef<Promise<void>>(Promise.resolve());
+  rootPathRef.current = rootPath;
+  profilesRef.current = profiles;
+  settingsRef.current = settings;
+  projectsRef.current = projects;
+  const {
+    importPath,
+    importCandidates,
+    selectedImportPaths,
+    importScanning,
+    importingProfiles,
+    showImport,
+    selectedImportCount,
+    scanImportCandidates,
+    toggleImportCandidate,
+    importSelectedCandidates,
+    onImportPathChange,
+    clearImportPreview,
+    toggleImportPanel,
+    resetForLoadedRoot
+  } = useProfileImport({
+    rootPath,
+    onImportCandidates: importCandidatesInQueue,
+    onMessage: setMessage
+  });
   const {
     rootSettings,
     chromeStatus,
@@ -237,14 +281,15 @@ function App() {
     onReadRootData: readRootData,
     onCommitLoadedRoot: commitLoadedRoot,
     onPersistSettings: (nextSettings) =>
-      persist(profiles, "设置已保存", nextSettings),
+      persist(profiles, "设置已保存", nextSettings).then(() => undefined),
     onMessage: setMessage
   });
   const dataSafetySettings = useDataSafetySettings({
     rootPath,
     profiles,
     selectedProfileIds: selectedIds,
-    onPersistProfiles: (nextProfiles, nextMessage) => persist(nextProfiles, nextMessage),
+    onPersistProfiles: (nextProfiles, nextMessage) =>
+      persist(nextProfiles, nextMessage).then(() => undefined),
     onRestoreDocument: restoreDataSafetyDocument,
     onMessage: setMessage
   });
@@ -357,14 +402,6 @@ function App() {
 
     return runningSelectedProfiles[0]?.id ?? "";
   }, [layoutSourceProfileId, runningSelectedProfiles]);
-  const selectedImportCount = useMemo(
-    () =>
-      importCandidates.filter(
-        (candidate) =>
-          isImportCandidateSelectable(candidate) && selectedImportPaths.includes(candidate.path)
-      ).length,
-    [importCandidates, selectedImportPaths]
-  );
   const visibleUrlLibraryItems = useMemo(() => {
     const normalizedQuery = urlLibraryQuery.trim().toLowerCase();
     const urlLibrary = settings.urlLibrary ?? [];
@@ -502,6 +539,12 @@ function App() {
   async function commitLoadedRoot(path: string, loaded: LoadedRootData) {
     clearLaunchConfirmationRefresh();
     dataSafetySettings.resetDataSafetyState();
+    resetForLoadedRoot();
+    documentGenerationRef.current += 1;
+    rootPathRef.current = path;
+    settingsRef.current = loaded.settings;
+    profilesRef.current = loaded.document.profiles;
+    projectsRef.current = loaded.document.projects;
     setRootPath(path);
     syncLoadedRoot(path, loaded.status, loaded.settings, loaded.chrome);
     setSettings(loaded.settings);
@@ -509,6 +552,7 @@ function App() {
     setProjects(loaded.document.projects);
     launchEventsRef.current = loaded.launchEvents;
     setLaunchEvents(loaded.launchEvents);
+    setMessage(loaded.status.writable ? "根目录正常" : "根目录不可写");
     await refreshRunningProfiles(path, loaded.document.profiles);
     setEditingId(null);
     setEditingProfileDraft(null);
@@ -543,12 +587,6 @@ function App() {
     bulkOpenDelayResolveRef.current = null;
     launchingProfileIdsRef.current.clear();
     setProfileSizes({});
-    setImportPath("");
-    setImportCandidates([]);
-    setSelectedImportPaths([]);
-    setImportScanning(false);
-    setImportingProfiles(false);
-    setMessage(loaded.status.writable ? "根目录正常" : "根目录不可写");
   }
 
   async function loadRoot(path: string) {
@@ -612,64 +650,649 @@ function App() {
     nextMessage: string,
     nextSettings = settings,
     nextProjects = projects,
-    targetRootPath = rootPath
-  ) {
-    const sanitizedSettings = normalizeSettings(nextSettings);
-    const existingProfileIds = new Set(nextProfiles.map((profile) => profile.id));
-    const sanitizedProjects = nextProjects.map((project) => ({
-      ...project,
-      profileIds: project.profileIds.filter((profileId) => existingProfileIds.has(profileId))
-    }));
-    await profileApi.saveProfiles(targetRootPath, {
-      version: 1,
-      settings: sanitizedSettings,
-      profiles: nextProfiles,
-      projects: sanitizedProjects
+    targetRootPath = rootPath,
+    shouldCommit?: () => boolean
+  ): Promise<boolean> {
+    const baseProfiles = profiles;
+    const baseSettings = settings;
+    const baseProjects = projects;
+    const generation = documentGenerationRef.current;
+    const isCurrentDocument = () =>
+      documentGenerationRef.current === generation &&
+      rootPathRef.current === targetRootPath;
+    return enqueueDocumentMutation(async () => {
+      if (!isCurrentDocument()) {
+        return false;
+      }
+      const { profiles: queuedProfiles, remappedIds } = mergeQueuedProfiles(
+        baseProfiles,
+        profilesRef.current,
+        nextProfiles
+      );
+      const sanitizedSettings = normalizeSettings(
+        mergeQueuedSettings(baseSettings, settingsRef.current, nextSettings)
+      );
+      const remappedRequestedProjects = nextProjects.map((project) => ({
+        ...project,
+        profileIds: project.profileIds.map(
+          (profileId) => remappedIds.get(profileId) ?? profileId
+        )
+      }));
+      const queuedProjects = mergeQueuedProjects(
+        baseProjects,
+        projectsRef.current,
+        remappedRequestedProjects
+      );
+      const existingProfileIds = new Set(queuedProfiles.map((profile) => profile.id));
+      const sanitizedProjects = queuedProjects.map((project) => ({
+        ...project,
+        profileIds: project.profileIds
+          .filter((profileId) => existingProfileIds.has(profileId))
+      }));
+      if (shouldCommit && !shouldCommit()) {
+        return false;
+      }
+      await profileApi.saveProfiles(targetRootPath, {
+        version: 1,
+        settings: sanitizedSettings,
+        profiles: queuedProfiles,
+        projects: sanitizedProjects
+      });
+      if (!isCurrentDocument() || (shouldCommit && !shouldCommit())) {
+        return true;
+      }
+      commitProfileDocumentState(
+        queuedProfiles,
+        sanitizedSettings,
+        sanitizedProjects,
+        nextMessage
+      );
+      return true;
     });
+  }
+
+  async function importCandidatesInQueue(
+    candidates: ProfileImportCandidate[],
+    shouldCommit: () => boolean
+  ): Promise<ImportPersistResult> {
+    return enqueueDocumentMutation(async () => {
+      if (!shouldCommit()) {
+        return "not-saved";
+      }
+
+      const targetRootPath = rootPathRef.current;
+      const shouldNotifyRollback = () => rootPathRef.current === targetRootPath;
+      const now = new Date().toISOString();
+      const createdProfiles: ChromeProfile[] = [];
+      try {
+        for (const candidate of candidates) {
+          if (!shouldCommit()) {
+            await rollbackCancelledImport(
+              targetRootPath,
+              createdProfiles,
+              shouldNotifyRollback
+            );
+            return "not-saved";
+          }
+
+          const profileUid = createProfileUid();
+          const profile = createProfile(
+            {
+              name: candidate.suggestedName,
+              tags: candidate.suggestedTags,
+              notes: candidate.suggestedNotes.trim() || `来源：${candidate.path}`,
+              importSource: {
+                profileUid,
+                sourcePath: candidate.path,
+                sourceFolderName: candidate.folderName,
+                importedAt: now
+              }
+            },
+            [...profilesRef.current, ...createdProfiles],
+            now
+          );
+          const marker: ProfileMarker = {
+            schemaVersion: 1,
+            app: "MultiChrome",
+            profileUid,
+            profileId: profile.id,
+            name: profile.name,
+            sourcePath: candidate.path,
+            sourceFolderName: candidate.folderName,
+            importedAt: now
+          };
+          await profileApi.importProfileData(
+            targetRootPath,
+            candidate.path,
+            profile.id,
+            marker
+          );
+          createdProfiles.push(profile);
+        }
+
+        if (!shouldCommit()) {
+          await rollbackCancelledImport(
+            targetRootPath,
+            createdProfiles,
+            shouldNotifyRollback
+          );
+          return "not-saved";
+        }
+
+        const nextProfiles = [...profilesRef.current, ...createdProfiles];
+        const sanitizedSettings = normalizeSettings(settingsRef.current);
+        const existingProfileIds = new Set(nextProfiles.map((profile) => profile.id));
+        const sanitizedProjects = projectsRef.current.map((project) => ({
+          ...project,
+          profileIds: project.profileIds.filter((profileId) =>
+            existingProfileIds.has(profileId)
+          )
+        }));
+        await profileApi.saveProfiles(targetRootPath, {
+          version: 1,
+          settings: sanitizedSettings,
+          profiles: nextProfiles,
+          projects: sanitizedProjects
+        });
+
+        if (!shouldCommit()) {
+          return "saved-stale";
+        }
+
+        commitProfileDocumentState(
+          nextProfiles,
+          sanitizedSettings,
+          sanitizedProjects,
+          `已批量导入 ${createdProfiles.length} 个账号`
+        );
+        if (createdProfiles[0]) {
+          setEditingId(createdProfiles[0].id);
+          setEditingProfileDraft(cloneProfileForDraft(createdProfiles[0]));
+        }
+        return "saved-committed";
+      } catch (error) {
+        if (!shouldCommit()) {
+          const rollbackFailures = await rollbackCreatedProfiles(
+            targetRootPath,
+            createdProfiles
+          );
+          if (shouldNotifyRollback()) {
+            const rollbackMessage =
+              rollbackFailures.length > 0
+                ? `；回滚失败账号：${rollbackFailures.join("、")}`
+                : "";
+            setMessage(`导入已取消：${errorMessage(error)}${rollbackMessage}`);
+          }
+          return "not-saved";
+        }
+        const rollbackFailures = await rollbackCreatedProfiles(
+          targetRootPath,
+          createdProfiles
+        );
+        if (rollbackFailures.length === 0) {
+          throw error;
+        }
+        throw new Error(
+          `${errorMessage(error)}；回滚失败账号：${rollbackFailures.join("、")}`
+        );
+      }
+    });
+  }
+
+  function enqueueDocumentMutation<T>(task: () => Promise<T>): Promise<T> {
+    const queued = documentMutationQueueRef.current.then(task, task);
+    documentMutationQueueRef.current = queued.then(
+      () => undefined,
+      () => undefined
+    );
+    return queued;
+  }
+
+  function commitProfileDocumentState(
+    nextProfiles: ChromeProfile[],
+    nextSettings: ProfileSettings,
+    nextProjects: AirdropProject[],
+    nextMessage: string
+  ) {
+    profilesRef.current = nextProfiles;
+    projectsRef.current = nextProjects;
+    settingsRef.current = nextSettings;
     setProfiles(nextProfiles);
-    setProjects(sanitizedProjects);
-    setSettings(sanitizedSettings);
-    syncPersistedSettings(sanitizedSettings, nextProfiles.length);
+    setProjects(nextProjects);
+    setSettings(nextSettings);
+    syncPersistedSettings(nextSettings, nextProfiles.length);
     setSelectedIds((current) =>
       current.filter((id) => nextProfiles.some((profile) => profile.id === id))
     );
     setMessage(nextMessage);
   }
 
+  function mergeQueuedProfiles(
+    baseProfiles: ChromeProfile[],
+    currentProfiles: ChromeProfile[],
+    requestedProfiles: ChromeProfile[]
+  ): { profiles: ChromeProfile[]; remappedIds: Map<string, string> } {
+    const baseById = new Map(baseProfiles.map((profile) => [profile.id, profile]));
+    const currentById = new Map(
+      currentProfiles.map((profile) => [profile.id, profile])
+    );
+    const requestedById = new Map(
+      requestedProfiles.map((profile) => [profile.id, profile])
+    );
+    const merged = currentProfiles.flatMap((profile) => {
+      const base = baseById.get(profile.id);
+      if (!base) {
+        return [profile];
+      }
+      const requested = requestedById.get(profile.id);
+      if (!requested) {
+        return [];
+      }
+      return documentValuesMatch(base, requested)
+        ? [profile]
+        : [mergeProfileFields(base, profile, requested)];
+    });
+    const remappedIds = new Map<string, string>();
+    for (const profile of requestedProfiles) {
+      if (baseById.has(profile.id)) {
+        continue;
+      }
+      const current = currentById.get(profile.id);
+      if (!current) {
+        merged.push(profile);
+        continue;
+      }
+      if (!documentValuesMatch(current, profile)) {
+        const nextId = nextProfileId([...merged, ...requestedProfiles]);
+        remappedIds.set(profile.id, nextId);
+        merged.push({ ...profile, id: nextId });
+      }
+    }
+    return { profiles: merged, remappedIds };
+  }
+
+  function documentValuesMatch(left: unknown, right: unknown): boolean {
+    return JSON.stringify(left) === JSON.stringify(right);
+  }
+
+  function mergeProfileFields(
+    base: ChromeProfile,
+    current: ChromeProfile,
+    requested: ChromeProfile
+  ): ChromeProfile {
+    return {
+      ...current,
+      name: mergeProfileField(base.name, current.name, requested.name),
+      tags: mergeProfileField(base.tags, current.tags, requested.tags),
+      notes: mergeProfileField(base.notes, current.notes, requested.notes),
+      status: mergeProfileField(base.status, current.status, requested.status),
+      accountPlatforms: mergeProfileField(
+        base.accountPlatforms,
+        current.accountPlatforms,
+        requested.accountPlatforms
+      ),
+      accentColor: mergeProfileField(
+        base.accentColor,
+        current.accentColor,
+        requested.accentColor
+      ),
+      importSource: mergeProfileField(
+        base.importSource,
+        current.importSource,
+        requested.importSource
+      ),
+      createdAt: mergeProfileField(
+        base.createdAt,
+        current.createdAt,
+        requested.createdAt
+      ),
+      updatedAt: mergeProfileField(
+        base.updatedAt,
+        current.updatedAt,
+        requested.updatedAt
+      ),
+      lastOpenedAt: mergeProfileField(
+        base.lastOpenedAt,
+        current.lastOpenedAt,
+        requested.lastOpenedAt
+      )
+    };
+  }
+
+  function mergeProfileField<T>(base: T, current: T, requested: T): T {
+    return documentValuesMatch(base, requested) ? current : requested;
+  }
+
+  function mergeQueuedSettings(
+    base: ProfileSettings,
+    current: ProfileSettings,
+    requested: ProfileSettings
+  ): ProfileSettings {
+    return {
+      browserPath: mergeProfileField(
+        base.browserPath,
+        current.browserPath,
+        requested.browserPath
+      ),
+      favoriteUrls: mergeOrderedStringList(
+        base.favoriteUrls,
+        current.favoriteUrls,
+        requested.favoriteUrls
+      ),
+      recentUrls: mergeOrderedStringList(
+        base.recentUrls,
+        current.recentUrls,
+        requested.recentUrls
+      ),
+      urlLibrary: mergeUrlLibraryItems(
+        base.urlLibrary,
+        current.urlLibrary,
+        requested.urlLibrary
+      ),
+      theme: mergeProfileField(base.theme, current.theme, requested.theme)
+    };
+  }
+
+  function mergeOrderedStringList(
+    base: string[],
+    current: string[],
+    requested: string[]
+  ): string[] {
+    if (documentValuesMatch(base, requested)) {
+      return current;
+    }
+    const baseSet = new Set(base);
+    const currentSet = new Set(current);
+    const merged: string[] = [];
+    for (const value of requested) {
+      if (!baseSet.has(value) || currentSet.has(value)) {
+        merged.push(value);
+      }
+    }
+    for (const value of current) {
+      if (!baseSet.has(value) && !merged.includes(value)) {
+        insertBeforeNextCurrentAnchor(merged, current, value);
+      }
+    }
+    return merged;
+  }
+
+  function insertBeforeNextCurrentAnchor<T>(
+    merged: T[],
+    current: T[],
+    value: T,
+    getKey: (item: T) => string = (item) => String(item)
+  ) {
+    const currentIndex = current.findIndex((item) => getKey(item) === getKey(value));
+    const nextAnchor = current
+      .slice(currentIndex + 1)
+      .find((item) =>
+        merged.some((mergedItem) => getKey(mergedItem) === getKey(item))
+      );
+    if (!nextAnchor) {
+      merged.push(value);
+      return;
+    }
+    const anchorIndex = merged.findIndex(
+      (item) => getKey(item) === getKey(nextAnchor)
+    );
+    merged.splice(anchorIndex, 0, value);
+  }
+
+  function mergeUrlLibraryItems(
+    baseItems: UrlLibraryItem[],
+    currentItems: UrlLibraryItem[],
+    requestedItems: UrlLibraryItem[]
+  ): UrlLibraryItem[] {
+    const baseById = new Map(baseItems.map((item) => [item.id, item]));
+    const currentById = new Map(currentItems.map((item) => [item.id, item]));
+    const requestedById = new Map(requestedItems.map((item) => [item.id, item]));
+    if (documentValuesMatch(baseItems, requestedItems)) {
+      return currentItems;
+    }
+    const consumedIds = new Set<string>();
+    const merged: UrlLibraryItem[] = [];
+    for (const item of requestedItems) {
+      const base = baseById.get(item.id);
+      const current = currentById.get(item.id);
+      if (!base) {
+        if (!current) {
+          merged.push(item);
+          consumedIds.add(item.id);
+        } else if (!documentValuesMatch(current, item)) {
+          const remapped = {
+            ...item,
+            id: nextSequentialId("url-", [...merged, ...currentItems, ...requestedItems])
+          };
+          merged.push(remapped);
+          consumedIds.add(remapped.id);
+        }
+        continue;
+      }
+      const requested = requestedById.get(item.id);
+      if (!requested) {
+        continue;
+      }
+      if (!current) {
+        continue;
+      }
+      merged.push(
+        documentValuesMatch(base, requested)
+          ? current
+          : mergeUrlLibraryItemFields(base, current, requested)
+      );
+      consumedIds.add(item.id);
+    }
+    for (const item of currentItems) {
+      if (!baseById.has(item.id) && !consumedIds.has(item.id)) {
+        insertBeforeNextCurrentAnchor(merged, currentItems, item, (entry) => entry.id);
+      }
+    }
+    return merged;
+  }
+
+  function mergeUrlLibraryItemFields(
+    base: UrlLibraryItem,
+    current: UrlLibraryItem,
+    requested: UrlLibraryItem
+  ): UrlLibraryItem {
+    return {
+      ...current,
+      name: mergeProfileField(base.name, current.name, requested.name),
+      url: mergeProfileField(base.url, current.url, requested.url),
+      tags: mergeProfileField(base.tags, current.tags, requested.tags),
+      notes: mergeProfileField(base.notes, current.notes, requested.notes),
+      createdAt: mergeProfileField(
+        base.createdAt,
+        current.createdAt,
+        requested.createdAt
+      ),
+      updatedAt: mergeProfileField(
+        base.updatedAt,
+        current.updatedAt,
+        requested.updatedAt
+      )
+    };
+  }
+
+  function mergeQueuedProjects(
+    baseProjects: AirdropProject[],
+    currentProjects: AirdropProject[],
+    requestedProjects: AirdropProject[]
+  ): AirdropProject[] {
+    const baseById = new Map(baseProjects.map((project) => [project.id, project]));
+    const currentById = new Map(
+      currentProjects.map((project) => [project.id, project])
+    );
+    const requestedById = new Map(
+      requestedProjects.map((project) => [project.id, project])
+    );
+    if (documentValuesMatch(baseProjects, requestedProjects)) {
+      return currentProjects;
+    }
+    const consumedIds = new Set<string>();
+    const merged: AirdropProject[] = [];
+    for (const project of requestedProjects) {
+      const base = baseById.get(project.id);
+      const current = currentById.get(project.id);
+      if (!base) {
+        if (!current) {
+          merged.push(project);
+          consumedIds.add(project.id);
+        } else if (!documentValuesMatch(current, project)) {
+          const remapped = {
+            ...project,
+            id: nextSequentialId("project-", [
+              ...merged,
+              ...currentProjects,
+              ...requestedProjects
+            ])
+          };
+          merged.push(remapped);
+          consumedIds.add(remapped.id);
+        }
+        continue;
+      }
+      const requested = requestedById.get(project.id);
+      if (!requested) {
+        continue;
+      }
+      if (!current) {
+        continue;
+      }
+      merged.push(
+        documentValuesMatch(base, requested)
+          ? current
+          : mergeProjectFields(base, current, requested)
+      );
+      consumedIds.add(project.id);
+    }
+    for (const project of currentProjects) {
+      if (!baseById.has(project.id) && !consumedIds.has(project.id)) {
+        insertBeforeNextCurrentAnchor(
+          merged,
+          currentProjects,
+          project,
+          (entry) => entry.id
+        );
+      }
+    }
+    return merged;
+  }
+
+  function mergeProjectFields(
+    base: AirdropProject,
+    current: AirdropProject,
+    requested: AirdropProject
+  ): AirdropProject {
+    return {
+      ...current,
+      name: mergeProfileField(base.name, current.name, requested.name),
+      url: mergeProfileField(base.url, current.url, requested.url),
+      urls: mergeProfileField(base.urls, current.urls, requested.urls),
+      notes: mergeProfileField(base.notes, current.notes, requested.notes),
+      profileIds: mergeProfileField(
+        base.profileIds,
+        current.profileIds,
+        requested.profileIds
+      ),
+      intervalSeconds: mergeProfileField(
+        base.intervalSeconds,
+        current.intervalSeconds,
+        requested.intervalSeconds
+      ),
+      createdAt: mergeProfileField(
+        base.createdAt,
+        current.createdAt,
+        requested.createdAt
+      ),
+      updatedAt: mergeProfileField(
+        base.updatedAt,
+        current.updatedAt,
+        requested.updatedAt
+      ),
+      lastOpenedAt: mergeProfileField(
+        base.lastOpenedAt,
+        current.lastOpenedAt,
+        requested.lastOpenedAt
+      )
+    };
+  }
+
+  async function rollbackCreatedProfiles(
+    targetRootPath: string,
+    createdProfiles: ChromeProfile[]
+  ): Promise<string[]> {
+    const failures: string[] = [];
+    for (const profile of createdProfiles) {
+      try {
+        await profileApi.deleteProfileData(targetRootPath, profile.id);
+      } catch {
+        failures.push(profile.id);
+      }
+    }
+    return failures;
+  }
+
+  async function rollbackCancelledImport(
+    targetRootPath: string,
+    createdProfiles: ChromeProfile[],
+    shouldNotify: () => boolean
+  ) {
+    const failures = await rollbackCreatedProfiles(
+      targetRootPath,
+      createdProfiles
+    );
+    if (failures.length > 0 && shouldNotify()) {
+      setMessage(`导入已取消，但回滚失败账号：${failures.join("、")}`);
+    }
+  }
+
   function restoreDataSafetyDocument({
-    document,
-    settings: restoredSettings,
-    rootStatus: status,
-    chromeStatus: chrome,
-    message: nextMessage
-  }: {
-    document: ProfileDocument;
-    settings: ProfileSettings;
-    rootStatus: RootStatus;
-    chromeStatus: ChromeStatus;
-    message: string;
-  }) {
-    setProfiles(document.profiles);
-    setProjects(document.projects);
-    setSettings(restoredSettings);
-    syncRestoredRoot(status, restoredSettings, chrome);
-    setEditingId(null);
-    setEditingProfileDraft(null);
-    setEditingProjectId(null);
-    setEditingProjectDraft(null);
-    setNewProfileDraft(null);
-    setNewProjectDraft(null);
-    setPendingProjectDeleteId(null);
-    setPendingDelete(null);
-    setSelectedIds([]);
-    setBulkTag("");
-    setBulkUrl("");
-    setProjectQuery("");
-    setOpeningProjectId(null);
-    setProfileSizes({});
-    launchingProfileIdsRef.current.clear();
-    projectOpenCancelledRef.current = false;
-    setMessage(nextMessage);
+    targetRootPath,
+    restore
+  }: RestoreDataSafetyDocumentInput): Promise<boolean> {
+    return enqueueDocumentMutation(async () => {
+      if (rootPathRef.current !== targetRootPath) {
+        return false;
+      }
+      const {
+        document,
+        settings: restoredSettings,
+        rootStatus: status,
+        chromeStatus: chrome,
+        message: nextMessage
+      } = await restore();
+      if (rootPathRef.current !== targetRootPath) {
+        return false;
+      }
+      documentGenerationRef.current += 1;
+      profilesRef.current = document.profiles;
+      projectsRef.current = document.projects;
+      settingsRef.current = restoredSettings;
+      setProfiles(document.profiles);
+      setProjects(document.projects);
+      setSettings(restoredSettings);
+      syncRestoredRoot(status, restoredSettings, chrome);
+      setEditingId(null);
+      setEditingProfileDraft(null);
+      setEditingProjectId(null);
+      setEditingProjectDraft(null);
+      setNewProfileDraft(null);
+      setNewProjectDraft(null);
+      setPendingProjectDeleteId(null);
+      setPendingDelete(null);
+      setSelectedIds([]);
+      setBulkTag("");
+      setBulkUrl("");
+      setProjectQuery("");
+      setOpeningProjectId(null);
+      setProfileSizes({});
+      launchingProfileIdsRef.current.clear();
+      projectOpenCancelledRef.current = false;
+      setMessage(nextMessage);
+      return true;
+    });
   }
 
   async function createNewProfile() {
@@ -1203,118 +1826,6 @@ function App() {
       await refreshSelectedSize(duplicated);
     } catch (error) {
       setMessage(errorMessage(error));
-    }
-  }
-
-  async function scanImportCandidates() {
-    const sourcePath = importPath.trim();
-    if (!sourcePath) {
-      setMessage("请先填写要扫描的来源目录");
-      return;
-    }
-
-    setImportScanning(true);
-    setImportCandidates([]);
-    setSelectedImportPaths([]);
-    try {
-      const candidates = await profileApi.scanProfileImportCandidates(rootPath, sourcePath);
-      setImportCandidates(candidates);
-      setSelectedImportPaths(
-        candidates
-          .filter((candidate) => candidate.confidence === "ready" && !candidate.duplicateProfileId)
-          .map((candidate) => candidate.path)
-      );
-      const readyCount = candidates.filter(
-        (candidate) => candidate.confidence === "ready" && !candidate.duplicateProfileId
-      ).length;
-      const suspiciousCount = candidates.filter(
-        (candidate) => candidate.confidence === "suspicious" && !candidate.duplicateProfileId
-      ).length;
-      const duplicateCount = candidates.filter((candidate) => candidate.duplicateProfileId).length;
-      setMessage(`可导入 ${readyCount} · 可疑 ${suspiciousCount} · 已导入 ${duplicateCount}`);
-    } catch (error) {
-      setMessage(errorMessage(error));
-    } finally {
-      setImportScanning(false);
-    }
-  }
-
-  function toggleImportCandidate(path: string) {
-    setSelectedImportPaths((current) =>
-      current.includes(path)
-        ? current.filter((selectedPath) => selectedPath !== path)
-        : [...current, path]
-    );
-  }
-
-  async function importSelectedCandidates() {
-    const selectedCandidates = importCandidates.filter(
-      (candidate) =>
-        isImportCandidateSelectable(candidate) && selectedImportPaths.includes(candidate.path)
-    );
-    if (selectedCandidates.length === 0) {
-      setMessage("请先选择要导入的候选目录");
-      return;
-    }
-
-    const now = new Date().toISOString();
-    const createdProfiles: ChromeProfile[] = [];
-    setImportingProfiles(true);
-    try {
-      for (const candidate of selectedCandidates) {
-        const profileUid = createProfileUid();
-        const profile = createProfile(
-          {
-            name: candidate.suggestedName,
-            tags: candidate.suggestedTags,
-            notes: candidate.suggestedNotes.trim() || `来源：${candidate.path}`,
-            importSource: {
-              profileUid,
-              sourcePath: candidate.path,
-              sourceFolderName: candidate.folderName,
-              importedAt: now
-            }
-          },
-          [...profiles, ...createdProfiles],
-          now
-        );
-        const marker: ProfileMarker = {
-          schemaVersion: 1,
-          app: "MultiChrome",
-          profileUid,
-          profileId: profile.id,
-          name: profile.name,
-          sourcePath: candidate.path,
-          sourceFolderName: candidate.folderName,
-          importedAt: now
-        };
-        await profileApi.importProfileData(rootPath, candidate.path, profile.id, marker);
-        createdProfiles.push(profile);
-      }
-
-      await persist(
-        [...profiles, ...createdProfiles],
-        `已批量导入 ${createdProfiles.length} 个账号`
-      );
-      setImportPath("");
-      setImportCandidates([]);
-      setSelectedImportPaths([]);
-      setShowImport(false);
-      if (createdProfiles[0]) {
-        setEditingId(createdProfiles[0].id);
-        setEditingProfileDraft(cloneProfileForDraft(createdProfiles[0]));
-      }
-    } catch (error) {
-      for (const profile of createdProfiles) {
-        try {
-          await profileApi.deleteProfileData(rootPath, profile.id);
-        } catch {
-          // 回滚失败不覆盖原始导入错误，避免用户看不到真正原因。
-        }
-      }
-      setMessage(errorMessage(error));
-    } finally {
-      setImportingProfiles(false);
     }
   }
 
@@ -2539,7 +3050,7 @@ function App() {
             <button
               className="secondary-button"
               type="button"
-              onClick={() => setShowImport((current) => !current)}
+              onClick={toggleImportPanel}
             >
               <Download size={16} />
               导入
@@ -2624,11 +3135,7 @@ function App() {
                 aria-label="导入来源目录"
                 placeholder="粘贴旧 MultiChrome 根目录、profiles 目录或整理好的来源目录"
                 value={importPath}
-                onChange={(event) => {
-                  setImportPath(event.target.value);
-                  setImportCandidates([]);
-                  setSelectedImportPaths([]);
-                }}
+                onChange={(event) => onImportPathChange(event.target.value)}
               />
             </div>
             <button
@@ -2690,10 +3197,7 @@ function App() {
                     className="secondary-button"
                     type="button"
                     disabled={importingProfiles}
-                    onClick={() => {
-                      setImportCandidates([]);
-                      setSelectedImportPaths([]);
-                    }}
+                    onClick={clearImportPreview}
                   >
                     清空预览
                   </button>
@@ -2980,21 +3484,17 @@ function Sidebar({ activeView, onNavigate, onOpenSettings }: SidebarProps) {
   );
 }
 
-function isImportCandidateSelectable(candidate: ProfileImportCandidate): boolean {
-  return candidate.confidence !== "skipped" && !candidate.duplicateProfileId;
-}
-
-function importCandidateStatusText(candidate: ProfileImportCandidate): string {
-  if (candidate.duplicateProfileName) {
-    return `已导入：${candidate.duplicateProfileName}`;
+export function nextSequentialId(
+  prefix: string,
+  entities: Array<{ id: string }>
+): string {
+  const usedIds = new Set(entities.map((entity) => entity.id));
+  for (let index = 1; ; index += 1) {
+    const id = `${prefix}${String(index).padStart(3, "0")}`;
+    if (!usedIds.has(id)) {
+      return id;
+    }
   }
-  if (candidate.confidence === "ready") {
-    return "可导入";
-  }
-  if (candidate.confidence === "suspicious") {
-    return "可疑";
-  }
-  return candidate.skippedReason || "跳过";
 }
 
 function createProfileUid(): string {

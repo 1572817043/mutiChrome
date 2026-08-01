@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { normalizeSettings, profileApi, type ChromeStatus, type RootStatus } from "../api";
 import { defaultAccentColor } from "../domain/profileModel";
 import { errorMessage } from "../shared/windowAutomationErrors";
@@ -21,7 +21,7 @@ import type {
   SettingsDialogLightBackupProps
 } from "./SettingsDialog";
 
-interface RestoreDocumentInput {
+interface RestoredDocumentResult {
   document: ProfileDocument;
   settings: ProfileSettings;
   rootStatus: RootStatus;
@@ -29,12 +29,17 @@ interface RestoreDocumentInput {
   message: string;
 }
 
+interface RestoreDocumentInput {
+  targetRootPath: string;
+  restore: () => Promise<RestoredDocumentResult>;
+}
+
 interface UseDataSafetySettingsOptions {
   rootPath: string;
   profiles: ChromeProfile[];
   selectedProfileIds: string[];
   onPersistProfiles: (nextProfiles: ChromeProfile[], message: string) => Promise<void>;
-  onRestoreDocument: (input: RestoreDocumentInput) => void;
+  onRestoreDocument: (input: RestoreDocumentInput) => Promise<boolean>;
   onMessage: (message: string) => void;
 }
 
@@ -63,6 +68,7 @@ export function useDataSafetySettings({
     useState<FullProfileRestorePreview | null>(null);
   const [fullBackupWorking, setFullBackupWorking] = useState<FullBackupWorking | null>(null);
   const [fullRestoreConfirmOpen, setFullRestoreConfirmOpen] = useState(false);
+  const restoreInFlightRef = useRef(false);
 
   function resetDataSafetyState() {
     setHealthReport(null);
@@ -95,6 +101,50 @@ export function useDataSafetySettings({
     setRepairResult(null);
     setFullRestorePreview(null);
     setFullRestoreConfirmOpen(false);
+  }
+
+  function beginRestoreOperation() {
+    if (restoreInFlightRef.current) {
+      onMessage("恢复正在进行，请稍候");
+      return false;
+    }
+    restoreInFlightRef.current = true;
+    return true;
+  }
+
+  function finishRestoreOperation() {
+    restoreInFlightRef.current = false;
+  }
+
+  async function readRestoredEnvironment(
+    targetRootPath: string,
+    settings: ProfileSettings,
+    profileCount: number,
+    successMessage: string
+  ) {
+    let message = successMessage;
+    let rootStatus: RootStatus = {
+      rootExists: true,
+      writable: false,
+      profileCount
+    };
+    let chromeStatus: ChromeStatus = {
+      available: false,
+      appPath: null
+    };
+
+    try {
+      rootStatus = await profileApi.initProfileRoot(targetRootPath);
+    } catch (error) {
+      message = `${message}；${errorMessage(error)}`;
+    }
+    try {
+      chromeStatus = await profileApi.detectChrome(settings.browserPath);
+    } catch (error) {
+      message = `${message}；${errorMessage(error)}`;
+    }
+
+    return { rootStatus, chromeStatus, message };
   }
 
   async function runRootHealthCheck() {
@@ -213,25 +263,38 @@ export function useDataSafetySettings({
   }
 
   async function restoreBackup() {
+    if (!beginRestoreOperation()) {
+      return;
+    }
     const backupPath = backupPathDraft.trim();
     setBackupWorking("restore");
     try {
-      const document = await profileApi.restoreProfilesBackup(rootPath, backupPath);
-      const settings = normalizeSettings(document.settings);
-      const rootStatus = await profileApi.initProfileRoot(rootPath);
-      const chromeStatus = await profileApi.detectChrome(settings.browserPath);
-      onRestoreDocument({
-        document,
-        settings,
-        rootStatus,
-        chromeStatus,
-        message: `已从备份恢复 ${document.profiles.length} 个账号`
+      const restored = await onRestoreDocument({
+        targetRootPath: rootPath,
+        restore: async () => {
+          const document = await profileApi.restoreProfilesBackup(rootPath, backupPath);
+          const settings = normalizeSettings(document.settings);
+          const environment = await readRestoredEnvironment(
+            rootPath,
+            settings,
+            document.profiles.length,
+            `已从备份恢复 ${document.profiles.length} 个账号`
+          );
+          return {
+            document,
+            settings,
+            ...environment
+          };
+        }
       });
-      clearLightBackupRestoreState();
+      if (restored) {
+        clearLightBackupRestoreState();
+      }
     } catch (error) {
       onMessage(errorMessage(error));
     } finally {
       setBackupWorking(null);
+      finishRestoreOperation();
     }
   }
 
@@ -333,29 +396,43 @@ export function useDataSafetySettings({
     if (!fullRestorePreview) {
       return;
     }
+    if (!beginRestoreOperation()) {
+      return;
+    }
 
     setFullBackupWorking("restore");
     try {
-      const document = await profileApi.restoreFullProfileBackup(
-        rootPath,
-        fullRestorePreview.path,
-        true
-      );
-      const settings = normalizeSettings(document.settings);
-      const rootStatus = await profileApi.initProfileRoot(rootPath);
-      const chromeStatus = await profileApi.detectChrome(settings.browserPath);
-      onRestoreDocument({
-        document,
-        settings,
-        rootStatus,
-        chromeStatus,
-        message: `完整备份已恢复：${document.profiles.length} 个账号`
+      const restorePath = fullRestorePreview.path;
+      const restored = await onRestoreDocument({
+        targetRootPath: rootPath,
+        restore: async () => {
+          const document = await profileApi.restoreFullProfileBackup(
+            rootPath,
+            restorePath,
+            true
+          );
+          const settings = normalizeSettings(document.settings);
+          const environment = await readRestoredEnvironment(
+            rootPath,
+            settings,
+            document.profiles.length,
+            `完整备份已恢复：${document.profiles.length} 个账号`
+          );
+          return {
+            document,
+            settings,
+            ...environment
+          };
+        }
       });
-      clearFullBackupRestoreState();
+      if (restored) {
+        clearFullBackupRestoreState();
+      }
     } catch (error) {
       onMessage(errorMessage(error));
     } finally {
       setFullBackupWorking(null);
+      finishRestoreOperation();
     }
   }
 
