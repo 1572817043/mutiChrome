@@ -77,7 +77,7 @@ import {
   isReplacementCreatedAt,
   nextSequentialId
 } from "./domain/profileDocumentMutationModel";
-import { useProfileDocumentMutations } from "./domain/useProfileDocumentMutations";
+import { useProfileDocumentStore } from "./domain/useProfileDocumentStore";
 import { BatchCreateProfilesDialog } from "./profiles/BatchCreateProfilesDialog";
 import {
   DeleteConfirmDialog,
@@ -186,16 +186,6 @@ interface RestoreDataSafetyDocumentInput {
 }
 
 function App() {
-  const [rootPath, setRootPath] = useState("");
-  const [settings, setSettings] = useState<ProfileSettings>({
-    browserPath: DEFAULT_BROWSER_PATH,
-    favoriteUrls: [],
-    recentUrls: [],
-    urlLibrary: [],
-    theme: "light"
-  });
-  const [profiles, setProfiles] = useState<ChromeProfile[]>([]);
-  const [projects, setProjects] = useState<AirdropProject[]>([]);
   const [activeView, setActiveView] = useState<ActiveView>("accounts");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingProfileDraft, setEditingProfileDraft] = useState<ChromeProfile | null>(null);
@@ -247,23 +237,31 @@ function App() {
   const [openingProjectId, setOpeningProjectId] = useState<string | null>(null);
   const [message, setMessage] = useState("正在初始化...");
   const {
+    rootPath,
+    settings,
+    profiles,
+    projects,
+    setRootPath,
+    setSettings,
+    setProfiles,
+    setProjects,
     enqueueDocumentMutation,
     persistDocument,
     commitProfileDocumentState,
     replaceProfileDocumentState,
     getProfileDocumentSnapshot
-  } = useProfileDocumentMutations({
-    rootPath,
-    profiles,
-    settings,
-    projects,
+  } = useProfileDocumentStore({
+    initialSettings: {
+      browserPath: DEFAULT_BROWSER_PATH,
+      favoriteUrls: [],
+      recentUrls: [],
+      urlLibrary: [],
+      theme: "light"
+    },
     saveDocument: (targetRootPath, document) =>
       profileApi.saveProfiles(targetRootPath, document),
     normalizeDocumentSettings: normalizeSettings,
-    onCommitDocumentState: (documentState, nextMessage) => {
-      setProfiles(documentState.profiles);
-      setProjects(documentState.projects);
-      setSettings(documentState.settings);
+    onDocumentCommitted: (documentState, nextMessage) => {
       syncPersistedSettings(documentState.settings, documentState.profiles.length);
       setSelectedIds((current) =>
         current.filter((id) =>
