@@ -2431,6 +2431,62 @@ describe("App launcher layout", () => {
     saveProfilesSpy.mockRestore();
   });
 
+  test("复用同 ID 的新账号不会被旧账号启动完成回写", async () => {
+    const user = userEvent.setup();
+    const staleOpen = deferred<string>();
+    const openProfileSpy = vi
+      .spyOn(profileApi, "openProfile")
+      .mockReturnValue(staleOpen.promise);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "打开 抽奖号" }));
+    await waitFor(() => {
+      expect(openProfileSpy).toHaveBeenCalledTimes(1);
+    });
+
+    await user.click(screen.getByRole("button", { name: "编辑 抽奖号" }));
+    const editDialog = await screen.findByRole("dialog", { name: "编辑 抽奖号" });
+    await user.click(within(editDialog).getByRole("button", { name: "只删除记录" }));
+    const confirmDialog = await screen.findByRole("dialog", {
+      name: "确认只删除账号记录"
+    });
+    await user.click(within(confirmDialog).getByRole("button", { name: "确认删除" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "选择 抽奖号" })).toBeNull();
+    });
+
+    await user.click(screen.getByRole("button", { name: "新建账号" }));
+    const newProfileDialog = await screen.findByRole("dialog", { name: "新建账号" });
+    await user.clear(within(newProfileDialog).getByLabelText("名称"));
+    await user.type(within(newProfileDialog).getByLabelText("名称"), "复用新号");
+    await user.click(within(newProfileDialog).getByRole("button", { name: "保存账号" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "选择 复用新号" })).toBeTruthy();
+    });
+
+    const replacementBeforeStaleOpen = savedDocument().profiles.find(
+      (item) => item.id === "account-002"
+    );
+    expect(replacementBeforeStaleOpen?.name).toBe("复用新号");
+    expect(replacementBeforeStaleOpen?.lastOpenedAt).toBeNull();
+
+    await act(async () => {
+      staleOpen.resolve("/tmp/account-002");
+      await staleOpen.promise;
+    });
+
+    await flushPromises();
+    const replacementAfterStaleOpen = savedDocument().profiles.find(
+      (item) => item.id === "account-002"
+    );
+    expect(replacementAfterStaleOpen?.name).toBe("复用新号");
+    expect(replacementAfterStaleOpen?.createdAt).toBe(
+      replacementBeforeStaleOpen?.createdAt
+    );
+    expect(replacementAfterStaleOpen?.lastOpenedAt).toBeNull();
+    openProfileSpy.mockRestore();
+  });
+
   test("导入占用新 ID 时并发新建账号不会覆盖导入记录", async () => {
     const user = userEvent.setup();
     const importCopy = deferred<void>();
@@ -4154,6 +4210,79 @@ describe("App launcher layout", () => {
     openProfileSpy.mockRestore();
   });
 
+  test("复用同 ID 的新网址不会被旧网址编辑草稿覆盖", async () => {
+    const user = userEvent.setup();
+    const document = savedDocument();
+    document.settings.urlLibrary = [
+      {
+        id: "url-001",
+        name: "旧网址",
+        url: "https://old.example",
+        tags: ["旧"],
+        notes: "旧备注",
+        createdAt: "2026-07-15T00:00:00.000Z",
+        updatedAt: "2026-07-15T00:00:00.000Z"
+      } as any
+    ];
+    localStorage.setItem("multichrome.profileDocument", JSON.stringify(document));
+    const restoredDocument = documentWith(document.profiles, document.projects);
+    restoredDocument.settings.urlLibrary = [
+      {
+        id: "url-001",
+        name: "复用新网址",
+        url: "https://fresh.example",
+        tags: ["新"],
+        notes: "新备注",
+        createdAt: "2026-07-16T00:00:00.000Z",
+        updatedAt: "2026-07-16T00:00:00.000Z"
+      } as any
+    ];
+    const restoreBackupSpy = vi
+      .spyOn(profileApi, "restoreProfilesBackup")
+      .mockImplementation(async () => {
+        localStorage.setItem(
+          "multichrome.profileDocument",
+          JSON.stringify(restoredDocument)
+        );
+        return restoredDocument;
+      });
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "网址库" }));
+    await user.click(screen.getByRole("button", { name: "编辑网址 旧网址" }));
+    const urlDialog = await screen.findByRole("dialog", { name: "编辑网址" });
+    await user.clear(within(urlDialog).getByLabelText("网址名称"));
+    await user.type(within(urlDialog).getByLabelText("网址名称"), "旧草稿覆盖");
+    await user.clear(within(urlDialog).getByLabelText("网址 URL"));
+    await user.type(within(urlDialog).getByLabelText("网址 URL"), "stale.example");
+
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    const settingsDialog = await screen.findByRole("dialog", { name: "设置" });
+    fireEvent.change(within(settingsDialog).getByLabelText("备份文件路径"), {
+      target: { value: "/tmp/replacement-backup.json" }
+    });
+    await user.click(within(settingsDialog).getByRole("button", { name: "从备份恢复" }));
+    expect(await within(settingsDialog).findByText("确认从备份恢复")).toBeTruthy();
+    await user.click(within(settingsDialog).getByRole("button", { name: "确认恢复" }));
+    await waitFor(() => {
+      expect(savedDocument().settings.urlLibrary[0]?.name).toBe("复用新网址");
+    });
+    await user.click(within(settingsDialog).getByRole("button", { name: "关闭设置" }));
+
+    await user.click(within(urlDialog).getByRole("button", { name: "保存网址" }));
+    await flushPromises();
+
+    expect(savedDocument().settings.urlLibrary).toEqual([
+      expect.objectContaining({
+        id: "url-001",
+        name: "复用新网址",
+        url: "https://fresh.example",
+        createdAt: "2026-07-16T00:00:00.000Z"
+      })
+    ]);
+    restoreBackupSpy.mockRestore();
+  });
+
   test("项目可以保存多个网址并在卡片显示网址数量", async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -4437,6 +4566,86 @@ describe("App launcher layout", () => {
     expect(within(operationList).getByText("成功")).toBeTruthy();
     expect(within(operationList).getByText("2 / 2")).toBeTruthy();
     expect(within(operationList).getByText("Galxe 每日")).toBeTruthy();
+    openProfileSpy.mockRestore();
+  });
+
+  test("复用同 ID 的新项目不会被旧项目打开完成回写", async () => {
+    const user = userEvent.setup();
+    const delayedOpen = deferred<string>();
+    localStorage.setItem(
+      "multichrome.profileDocument",
+      JSON.stringify(
+        documentWith(
+          [profile({ id: "account-001", name: "主号" })],
+          [
+            project({
+              id: "project-001",
+              name: "旧项目",
+              url: "https://old-project.example",
+              profileIds: ["account-001"]
+            })
+          ]
+        )
+      )
+    );
+    const openProfileSpy = vi
+      .spyOn(profileApi, "openProfile")
+      .mockReturnValue(delayedOpen.promise);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "项目" }));
+    await user.click(screen.getByRole("button", { name: "打开项目 旧项目" }));
+    await waitFor(() => {
+      expect(openProfileSpy).toHaveBeenCalledTimes(1);
+    });
+
+    await user.click(screen.getByRole("button", { name: "编辑项目 旧项目" }));
+    const editDialog = await screen.findByRole("dialog", { name: "编辑项目 旧项目" });
+    await user.click(within(editDialog).getByRole("button", { name: "删除项目" }));
+    await user.click(within(editDialog).getByRole("button", { name: "确认删除项目" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "打开项目 旧项目" })).toBeNull();
+    });
+
+    await user.click(screen.getByRole("button", { name: "新建项目" }));
+    const newProjectDialog = await screen.findByRole("dialog", { name: "新建项目" });
+    await user.clear(within(newProjectDialog).getByLabelText("项目名称"));
+    await user.type(within(newProjectDialog).getByLabelText("项目名称"), "复用新项目");
+    await user.clear(within(newProjectDialog).getByLabelText("项目网址"));
+    await user.type(
+      within(newProjectDialog).getByLabelText("项目网址"),
+      "fresh-project.example"
+    );
+    await user.click(
+      within(newProjectDialog).getByRole("button", {
+        name: "绑定账号 主号 account-001"
+      })
+    );
+    await user.click(within(newProjectDialog).getByRole("button", { name: "保存项目" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "打开项目 复用新项目" })).toBeTruthy();
+    });
+
+    const replacementBeforeStaleOpen = savedDocument().projects.find(
+      (item) => item.id === "project-001"
+    );
+    expect(replacementBeforeStaleOpen?.name).toBe("复用新项目");
+    expect(replacementBeforeStaleOpen?.lastOpenedAt).toBeNull();
+
+    await act(async () => {
+      delayedOpen.resolve("/tmp/account-001");
+      await delayedOpen.promise;
+    });
+
+    await flushPromises();
+    const replacementAfterStaleOpen = savedDocument().projects.find(
+      (item) => item.id === "project-001"
+    );
+    expect(replacementAfterStaleOpen?.name).toBe("复用新项目");
+    expect(replacementAfterStaleOpen?.createdAt).toBe(
+      replacementBeforeStaleOpen?.createdAt
+    );
+    expect(replacementAfterStaleOpen?.lastOpenedAt).toBeNull();
     openProfileSpy.mockRestore();
   });
 
