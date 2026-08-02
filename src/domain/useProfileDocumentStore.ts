@@ -35,6 +35,7 @@ export function useProfileDocumentStore(options: UseProfileDocumentStoreOptions)
   const [profiles, setProfilesState] = useState(options.initialProfiles ?? []);
   const [projects, setProjectsState] = useState(options.initialProjects ?? []);
   const documentStateRef = useRef({ rootPath, settings, profiles, projects });
+  const documentLifecycleRef = useRef(0);
   documentStateRef.current = { rootPath, settings, profiles, projects };
   const renderedDocumentState = { rootPath, settings, profiles, projects };
 
@@ -63,6 +64,9 @@ export function useProfileDocumentStore(options: UseProfileDocumentStoreOptions)
     settings: ProfileSettings;
     projects: AirdropProject[];
   }, bumpGeneration: boolean) {
+    if (bumpGeneration) {
+      documentLifecycleRef.current += 1;
+    }
     documentStateRef.current = nextState;
     mutations.replaceProfileDocumentState({ ...nextState, bumpGeneration });
     setRootPathState(nextState.rootPath);
@@ -186,12 +190,19 @@ export function useProfileDocumentStore(options: UseProfileDocumentStoreOptions)
     targetRootPath: string;
     restore: () => Promise<T>;
   }): Promise<T | null> {
+    const restoreLifecycle = documentLifecycleRef.current;
     return mutations.enqueueDocumentMutation(async () => {
-      if (documentStateRef.current.rootPath !== targetRootPath) {
+      if (
+        documentStateRef.current.rootPath !== targetRootPath ||
+        documentLifecycleRef.current !== restoreLifecycle
+      ) {
         return null;
       }
       const restored = await restore();
-      if (documentStateRef.current.rootPath !== targetRootPath) {
+      if (
+        documentStateRef.current.rootPath !== targetRootPath ||
+        documentLifecycleRef.current !== restoreLifecycle
+      ) {
         return null;
       }
       replaceProfileDocumentState({
