@@ -242,7 +242,7 @@ function App() {
     profiles,
     projects,
     enqueueDocumentMutation,
-    persistDocument,
+    persistProfileDocument: persist,
     commitProfileDocumentState,
     replaceProfileDocumentState,
     getProfileDocumentSnapshot
@@ -663,29 +663,6 @@ function App() {
         .map((snapshot) => snapshot.profileId)
     );
     return selectedProfiles.filter((profile) => runningIds.has(profile.id));
-  }
-
-  async function persist(
-    nextProfiles: ChromeProfile[],
-    nextMessage: string,
-    nextSettings = settings,
-    nextProjects = projects,
-    targetRootPath = rootPath,
-    shouldCommit?: () => boolean
-  ): Promise<boolean> {
-    return persistDocument({
-      profiles: nextProfiles,
-      message: nextMessage,
-      settings: nextSettings,
-      projects: nextProjects,
-      baseDocument: {
-        profiles,
-        settings,
-        projects
-      },
-      targetRootPath,
-      shouldCommit
-    });
   }
 
   async function importCandidatesInQueue(

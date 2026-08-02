@@ -36,6 +36,7 @@ export function useProfileDocumentStore(options: UseProfileDocumentStoreOptions)
   const [projects, setProjectsState] = useState(options.initialProjects ?? []);
   const documentStateRef = useRef({ rootPath, settings, profiles, projects });
   documentStateRef.current = { rootPath, settings, profiles, projects };
+  const renderedDocumentState = { rootPath, settings, profiles, projects };
 
   const mutations = useProfileDocumentMutations({
     rootPath,
@@ -115,6 +116,29 @@ export function useProfileDocumentStore(options: UseProfileDocumentStoreOptions)
     );
   }
 
+  async function persistProfileDocument(
+    nextProfiles: ChromeProfile[],
+    nextMessage: string,
+    nextSettings = renderedDocumentState.settings,
+    nextProjects = renderedDocumentState.projects,
+    targetRootPath = renderedDocumentState.rootPath,
+    shouldCommit?: () => boolean
+  ): Promise<boolean> {
+    return mutations.persistDocument({
+      profiles: nextProfiles,
+      message: nextMessage,
+      settings: nextSettings,
+      projects: nextProjects,
+      baseDocument: {
+        profiles: renderedDocumentState.profiles,
+        settings: renderedDocumentState.settings,
+        projects: renderedDocumentState.projects
+      },
+      targetRootPath,
+      shouldCommit
+    });
+  }
+
   function replaceProfileDocumentState({
     rootPath: nextRootPath,
     profiles: nextProfiles,
@@ -144,6 +168,7 @@ export function useProfileDocumentStore(options: UseProfileDocumentStoreOptions)
     setProjects,
     enqueueDocumentMutation: mutations.enqueueDocumentMutation,
     persistDocument: mutations.persistDocument,
+    persistProfileDocument,
     commitProfileDocumentState,
     replaceProfileDocumentState,
     getProfileDocumentSnapshot: mutations.getProfileDocumentSnapshot
