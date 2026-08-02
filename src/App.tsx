@@ -95,6 +95,7 @@ import {
   isImportCandidateSelectable,
   useProfileImport
 } from "./profiles/useProfileImport";
+import { rollbackImportedProfiles } from "./profiles/profileImportRollback";
 import { FullRestoreConfirmDialog } from "./data-safety/FullRestoreConfirmDialog";
 import { EditProjectDialog } from "./projects/EditProjectDialog";
 import { ProjectsView } from "./projects/ProjectsView";
@@ -797,15 +798,11 @@ function App() {
     targetRootPath: string,
     createdProfiles: ChromeProfile[]
   ): Promise<string[]> {
-    const failures: string[] = [];
-    for (const profile of createdProfiles) {
-      try {
-        await profileApi.deleteProfileData(targetRootPath, profile.id);
-      } catch {
-        failures.push(profile.id);
-      }
-    }
-    return failures;
+    return rollbackImportedProfiles({
+      targetRootPath,
+      profiles: createdProfiles,
+      deleteProfileData: profileApi.deleteProfileData
+    });
   }
 
   async function rollbackCancelledImport(
