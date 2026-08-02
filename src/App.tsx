@@ -74,6 +74,7 @@ import {
   updateProfile
 } from "./domain/profileModel";
 import {
+  buildImportDocumentCommitPlan,
   isReplacementCreatedAt,
   nextSequentialId
 } from "./domain/profileDocumentMutationModel";
@@ -740,31 +741,21 @@ function App() {
           return "not-saved";
         }
 
-        const currentDocument = getProfileDocumentSnapshot();
-        const nextProfiles = [...currentDocument.profiles, ...createdProfiles];
-        const sanitizedSettings = normalizeSettings(currentDocument.settings);
-        const existingProfileIds = new Set(nextProfiles.map((profile) => profile.id));
-        const sanitizedProjects = currentDocument.projects.map((project) => ({
-          ...project,
-          profileIds: project.profileIds.filter((profileId) =>
-            existingProfileIds.has(profileId)
-          )
-        }));
-        await profileApi.saveProfiles(targetRootPath, {
-          version: 1,
-          settings: sanitizedSettings,
-          profiles: nextProfiles,
-          projects: sanitizedProjects
+        const importDocumentPlan = buildImportDocumentCommitPlan({
+          currentDocument: getProfileDocumentSnapshot(),
+          createdProfiles,
+          normalizeSettings
         });
+        await profileApi.saveProfiles(targetRootPath, importDocumentPlan.document);
 
         if (!shouldCommit()) {
           return "saved-stale";
         }
 
         commitProfileDocumentState(
-          nextProfiles,
-          sanitizedSettings,
-          sanitizedProjects,
+          importDocumentPlan.profiles,
+          importDocumentPlan.settings,
+          importDocumentPlan.projects,
           `已批量导入 ${createdProfiles.length} 个账号`
         );
         if (createdProfiles[0]) {

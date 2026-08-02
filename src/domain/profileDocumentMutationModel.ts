@@ -1,10 +1,39 @@
 import type {
   AirdropProject,
   ChromeProfile,
+  ProfileDocument,
   ProfileSettings,
   UrlLibraryItem
 } from "../types";
 import { nextProfileId } from "./profileModel";
+
+export function buildImportDocumentCommitPlan({
+  currentDocument,
+  createdProfiles,
+  normalizeSettings
+}: {
+  currentDocument: Pick<ProfileDocument, "settings" | "profiles" | "projects">;
+  createdProfiles: ChromeProfile[];
+  normalizeSettings: (settings: ProfileSettings) => ProfileSettings;
+}): {
+  document: ProfileDocument;
+  profiles: ChromeProfile[];
+  settings: ProfileSettings;
+  projects: AirdropProject[];
+} {
+  const profiles = [...currentDocument.profiles, ...createdProfiles];
+  const settings = normalizeSettings(currentDocument.settings);
+  const existingProfileIds = new Set(profiles.map((profile) => profile.id));
+  const projects = currentDocument.projects.map((project) => ({
+    ...project,
+    profileIds: project.profileIds.filter((profileId) =>
+      existingProfileIds.has(profileId)
+    )
+  }));
+  const document = { version: 1 as const, settings, profiles, projects };
+
+  return { document, profiles, settings, projects };
+}
 
 export function mergeQueuedProfiles(
   baseProfiles: ChromeProfile[],
