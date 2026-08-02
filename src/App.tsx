@@ -572,6 +572,10 @@ function App() {
     setLaunchEvents(loaded.launchEvents);
     setMessage(loaded.status.writable ? "根目录正常" : "根目录不可写");
     await refreshRunningProfiles(path, loaded.document.profiles);
+    resetUiForLoadedRoot();
+  }
+
+  function resetUiForLoadedRoot() {
     setEditingId(null);
     setEditingProfileDraft(null);
     setEditingProjectId(null);
@@ -849,25 +853,29 @@ function App() {
         projects: document.projects
       });
       syncRestoredRoot(status, restoredSettings, chrome);
-      setEditingId(null);
-      setEditingProfileDraft(null);
-      setEditingProjectId(null);
-      setEditingProjectDraft(null);
-      setNewProfileDraft(null);
-      setNewProjectDraft(null);
-      setPendingProjectDeleteId(null);
-      setPendingDelete(null);
-      setSelectedIds([]);
-      setBulkTag("");
-      setBulkUrl("");
-      setProjectQuery("");
-      setOpeningProjectId(null);
-      setProfileSizes({});
-      launchingProfileIdsRef.current.clear();
-      projectOpenCancelledRef.current = false;
+      resetUiForRestoredDocument();
       setMessage(nextMessage);
       return true;
     });
+  }
+
+  function resetUiForRestoredDocument() {
+    setEditingId(null);
+    setEditingProfileDraft(null);
+    setEditingProjectId(null);
+    setEditingProjectDraft(null);
+    setNewProfileDraft(null);
+    setNewProjectDraft(null);
+    setPendingProjectDeleteId(null);
+    setPendingDelete(null);
+    setSelectedIds([]);
+    setBulkTag("");
+    setBulkUrl("");
+    setProjectQuery("");
+    setOpeningProjectId(null);
+    setProfileSizes({});
+    launchingProfileIdsRef.current.clear();
+    projectOpenCancelledRef.current = false;
   }
 
   async function createNewProfile() {
