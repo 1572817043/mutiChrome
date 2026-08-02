@@ -1,11 +1,13 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import type {
   AirdropProject,
   ChromeProfile,
+  ProfileDocument,
   ProfileSettings,
   UrlLibraryItem
 } from "../types";
 import {
+  buildImportDocumentCommitPlan,
   mergeQueuedProfiles,
   mergeQueuedProjects,
   mergeQueuedSettings
@@ -139,6 +141,73 @@ describe("profile document mutation merge", () => {
   });
 });
 
+describe("import document commit plan", () => {
+  test("追加导入账号并使用 settings normalizer 生成 version 1 document", () => {
+    const currentDocument = document({
+      profiles: [profile({ id: "account-current" })]
+    });
+    const createdProfiles = [profile({ id: "account-imported" })];
+    const normalizedSettings = settingsWith([]);
+    const normalizeSettings = vi.fn(() => normalizedSettings);
+
+    const plan = buildImportDocumentCommitPlan({
+      currentDocument,
+      createdProfiles,
+      normalizeSettings
+    });
+
+    expect(normalizeSettings).toHaveBeenCalledWith(currentDocument.settings);
+    expect(plan.document).toEqual({
+      version: 1,
+      settings: normalizedSettings,
+      profiles: [currentDocument.profiles[0], createdProfiles[0]],
+      projects: currentDocument.projects
+    });
+    expect(plan.profiles).toEqual(plan.document.profiles);
+    expect(plan.settings).toBe(normalizedSettings);
+    expect(plan.projects).toBe(plan.document.projects);
+  });
+
+  test("只保留仍存在账号的项目 profileIds，并保持项目顺序和其它字段", () => {
+    const currentDocument = document({
+      profiles: [profile({ id: "account-current" })],
+      projects: [
+        project({
+          id: "project-first",
+          name: "第一个项目",
+          profileIds: ["missing", "account-current", "account-imported"]
+        }),
+        project({
+          id: "project-second",
+          name: "第二个项目",
+          profileIds: ["missing-too"]
+        })
+      ]
+    });
+
+    const plan = buildImportDocumentCommitPlan({
+      currentDocument,
+      createdProfiles: [profile({ id: "account-imported" })],
+      normalizeSettings: (settings) => settings
+    });
+
+    expect(plan.projects).toEqual([
+      {
+        ...currentDocument.projects[0],
+        id: "project-first",
+        name: "第一个项目",
+        profileIds: ["account-current", "account-imported"]
+      },
+      {
+        ...currentDocument.projects[1],
+        id: "project-second",
+        name: "第二个项目",
+        profileIds: []
+      }
+    ]);
+  });
+});
+
 function settingsWith(urlLibrary: UrlLibraryItem[]): ProfileSettings {
   return {
     browserPath: "/Applications/Google Chrome.app",
@@ -146,6 +215,16 @@ function settingsWith(urlLibrary: UrlLibraryItem[]): ProfileSettings {
     recentUrls: [],
     urlLibrary,
     theme: "light"
+  };
+}
+
+function document(overrides: Partial<ProfileDocument> = {}): ProfileDocument {
+  return {
+    version: 1,
+    settings: settingsWith([]),
+    profiles: [],
+    projects: [],
+    ...overrides
   };
 }
 
