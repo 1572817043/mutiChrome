@@ -31,6 +31,136 @@ describe("useProfileDocumentStore", () => {
     expect(result.current.projects).toBe(projects);
   });
 
+  test("restoreProfileDocument 成功时更新 document state 并返回 restore 结果", async () => {
+    const restoredSettings = profileSettings({ theme: "dark" });
+    const restoredProfiles = [profile({ id: "account-restored" })];
+    const restoredProjects = [project({ id: "project-restored" })];
+    const restored: {
+      document: ProfileDocument;
+      settings: ProfileSettings;
+      extra: string;
+    } = {
+      document: {
+        version: 1,
+        settings: restoredSettings,
+        profiles: restoredProfiles,
+        projects: restoredProjects
+      },
+      settings: restoredSettings,
+      extra: "restore-result"
+    };
+    const restore = vi.fn(async () => restored);
+    const { result } = renderHook(() =>
+      useProfileDocumentStore({
+        initialRootPath: "/profiles",
+        initialSettings: settings,
+        initialProfiles: profiles,
+        initialProjects: projects,
+        saveDocument: vi.fn(),
+        onDocumentCommitted: vi.fn()
+      })
+    );
+
+    let restoredResult: typeof restored | null = null;
+    await act(async () => {
+      restoredResult = await result.current.restoreProfileDocument({
+        targetRootPath: "/profiles",
+        restore
+      });
+    });
+
+    expect(restoredResult).toBe(restored);
+    expect(restore).toHaveBeenCalledTimes(1);
+    expect(result.current.profiles).toEqual(restoredProfiles);
+    expect(result.current.settings).toEqual(restoredSettings);
+    expect(result.current.projects).toEqual(restoredProjects);
+  });
+
+  test("restoreProfileDocument 在 target root 不匹配时不调用 restore 且不更新 state", async () => {
+    const restore = vi.fn(async (): Promise<{
+      document: ProfileDocument;
+      settings: ProfileSettings;
+    }> => ({
+      document: {
+        version: 1,
+        settings,
+        profiles: [profile({ id: "account-restored" })],
+        projects: []
+      },
+      settings
+    }));
+    const { result } = renderHook(() =>
+      useProfileDocumentStore({
+        initialRootPath: "/current-root",
+        initialSettings: settings,
+        initialProfiles: profiles,
+        initialProjects: projects,
+        saveDocument: vi.fn(),
+        onDocumentCommitted: vi.fn()
+      })
+    );
+
+    let restoredResult: Awaited<ReturnType<typeof result.current.restoreProfileDocument>> = null;
+    await act(async () => {
+      restoredResult = await result.current.restoreProfileDocument({
+        targetRootPath: "/stale-root",
+        restore
+      });
+    });
+
+    expect(restoredResult).toBeNull();
+    expect(restore).not.toHaveBeenCalled();
+    expect(result.current.profiles).toEqual(profiles);
+    expect(result.current.settings).toEqual(settings);
+    expect(result.current.projects).toEqual(projects);
+  });
+
+  test("restoreProfileDocument 等待期间 root 切换时返回 null 且不提交结果", async () => {
+    const restoreGate = deferred<{
+      document: ProfileDocument;
+      settings: ProfileSettings;
+    }>();
+    const restoredProfiles = [profile({ id: "account-restored" })];
+    const restore = vi.fn(() => restoreGate.promise);
+    const { result } = renderHook(() =>
+      useProfileDocumentStore({
+        initialRootPath: "/profiles",
+        initialSettings: settings,
+        initialProfiles: profiles,
+        initialProjects: projects,
+        saveDocument: vi.fn(),
+        onDocumentCommitted: vi.fn()
+      })
+    );
+
+    let restoredResult: Awaited<ReturnType<typeof result.current.restoreProfileDocument>> = null;
+    await act(async () => {
+      const restorePromise = result.current.restoreProfileDocument({
+        targetRootPath: "/profiles",
+        restore
+      });
+      await Promise.resolve();
+      result.current.setRootPath("/other-root");
+      restoreGate.resolve({
+        document: {
+          version: 1,
+          settings,
+          profiles: restoredProfiles,
+          projects: []
+        },
+        settings
+      });
+      restoredResult = await restorePromise;
+    });
+
+    expect(restoredResult).toBeNull();
+    expect(restore).toHaveBeenCalledTimes(1);
+    expect(result.current.rootPath).toBe("/other-root");
+    expect(result.current.profiles).toEqual(profiles);
+    expect(result.current.settings).toEqual(settings);
+    expect(result.current.projects).toEqual(projects);
+  });
+
   test("commitProfileDocumentState 更新 state 并通知外部回调", () => {
     const onDocumentCommitted = vi.fn();
     const nextSettings = profileSettings({ theme: "dark" });
