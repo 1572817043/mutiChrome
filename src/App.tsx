@@ -76,6 +76,7 @@ import {
 import {
   buildImportedProfilePlan,
   buildImportDocumentCommitPlan,
+  buildImportSelectionPlan,
   formatImportCancelledMessage,
   formatImportCancelledRollbackFailureMessage,
   formatImportRollbackFailureMessage,
@@ -743,9 +744,13 @@ function App() {
           importDocumentPlan.projects,
           `已批量导入 ${createdProfiles.length} 个账号`
         );
-        if (createdProfiles[0]) {
-          setEditingId(createdProfiles[0].id);
-          setEditingProfileDraft(cloneProfileForDraft(createdProfiles[0]));
+        const importSelectionPlan = buildImportSelectionPlan({
+          createdProfiles,
+          cloneProfileForDraft
+        });
+        if (importSelectionPlan.editingId) {
+          setEditingId(importSelectionPlan.editingId);
+          setEditingProfileDraft(importSelectionPlan.editingProfileDraft);
         }
         return "saved-committed";
       } catch (error) {

@@ -49,6 +49,27 @@ export function buildImportedProfilePlan({
   return { profile, marker };
 }
 
+export function buildImportSelectionPlan({
+  createdProfiles,
+  cloneProfileForDraft
+}: {
+  createdProfiles: ChromeProfile[];
+  cloneProfileForDraft: (profile: ChromeProfile) => ChromeProfile;
+}): {
+  editingId: string | null;
+  editingProfileDraft: ChromeProfile | null;
+} {
+  const firstProfile = createdProfiles[0];
+  if (!firstProfile) {
+    return { editingId: null, editingProfileDraft: null };
+  }
+
+  return {
+    editingId: firstProfile.id,
+    editingProfileDraft: cloneProfileForDraft(firstProfile)
+  };
+}
+
 export function formatImportRollbackFailureMessage(
   errorMessage: string,
   failures: string[]
