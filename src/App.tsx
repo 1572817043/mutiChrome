@@ -244,7 +244,7 @@ function App() {
     enqueueDocumentMutation,
     persistProfileDocument: persist,
     commitProfileDocumentState,
-    replaceProfileDocumentState,
+    loadProfileDocument,
     restoreProfileDocument,
     getProfileDocumentSnapshot
   } = useProfileDocumentStore({
@@ -562,7 +562,7 @@ function App() {
     clearLaunchConfirmationRefresh();
     dataSafetySettings.resetDataSafetyState();
     resetForLoadedRoot();
-    replaceProfileDocumentState({
+    loadProfileDocument({
       rootPath: path,
       profiles: loaded.document.profiles,
       settings: loaded.settings,

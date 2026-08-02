@@ -375,6 +375,80 @@ describe("useProfileDocumentStore", () => {
     expect(onDocumentCommitted).not.toHaveBeenCalled();
   });
 
+  test("loadProfileDocument 更新完整 document state 和 snapshot", () => {
+    const nextSettings = profileSettings({ theme: "dark" });
+    const nextProfiles = [profile({ id: "account-loaded" })];
+    const nextProjects = [project({ id: "project-loaded", profileIds: ["account-loaded"] })];
+    const { result } = renderHook(() =>
+      useProfileDocumentStore({
+        initialRootPath: "/old-root",
+        initialSettings: settings,
+        initialProfiles: profiles,
+        initialProjects: projects,
+        saveDocument: vi.fn(),
+        onDocumentCommitted: vi.fn()
+      })
+    );
+
+    act(() => {
+      result.current.loadProfileDocument({
+        rootPath: "/loaded-root",
+        profiles: nextProfiles,
+        settings: nextSettings,
+        projects: nextProjects
+      });
+    });
+
+    expect(result.current.rootPath).toBe("/loaded-root");
+    expect(result.current.profiles).toEqual(nextProfiles);
+    expect(result.current.settings).toEqual(nextSettings);
+    expect(result.current.projects).toEqual(nextProjects);
+    expect(result.current.getProfileDocumentSnapshot()).toEqual({
+      rootPath: "/loaded-root",
+      profiles: nextProfiles,
+      settings: nextSettings,
+      projects: nextProjects
+    });
+  });
+
+  test("loadProfileDocument 后旧 persist 不会保存或提交", async () => {
+    const saveDocument = vi.fn<
+      (rootPath: string, document: ProfileDocument) => Promise<void>
+    >(async () => undefined);
+    const onDocumentCommitted = vi.fn();
+    const { result } = renderHook(() =>
+      useProfileDocumentStore({
+        initialRootPath: "/old-root",
+        initialSettings: settings,
+        initialProfiles: profiles,
+        initialProjects: projects,
+        saveDocument,
+        onDocumentCommitted
+      })
+    );
+
+    await act(async () => {
+      const blocking = result.current.enqueueDocumentMutation(() => new Promise<void>((resolve) => {
+        setTimeout(resolve, 0);
+      }));
+      const stalePersist = result.current.persistDocument({
+        profiles: [profile({ id: "account-001", notes: "过期修改" })],
+        message: "不应提交"
+      });
+      result.current.loadProfileDocument({
+        rootPath: "/loaded-root",
+        profiles: [profile({ id: "account-loaded" })],
+        settings,
+        projects: []
+      });
+      await blocking;
+      await expect(stalePersist).resolves.toBe(false);
+    });
+
+    expect(saveDocument).not.toHaveBeenCalled();
+    expect(onDocumentCommitted).not.toHaveBeenCalled();
+  });
+
   test("setRootPath 往返 old -> new -> old 后旧 persist 不会保存或提交", async () => {
     const saveDocument = vi.fn<(rootPath: string, document: ProfileDocument) => Promise<void>>(
       async () => undefined
