@@ -7,6 +7,30 @@ import type {
 } from "../types";
 import { nextProfileId } from "./profileModel";
 
+export function formatImportRollbackFailureMessage(
+  errorMessage: string,
+  failures: string[]
+): string {
+  return `${errorMessage}${formatImportRollbackFailureSuffix(failures)}`;
+}
+
+export function formatImportCancelledMessage(
+  errorMessage: string,
+  failures: string[]
+): string {
+  return `导入已取消：${errorMessage}${formatImportRollbackFailureSuffix(failures)}`;
+}
+
+export function formatImportCancelledRollbackFailureMessage(
+  failures: string[]
+): string {
+  return `导入已取消，但回滚失败账号：${failures.join("、")}`;
+}
+
+function formatImportRollbackFailureSuffix(failures: string[]): string {
+  return failures.length > 0 ? `；回滚失败账号：${failures.join("、")}` : "";
+}
+
 export function buildImportDocumentCommitPlan({
   currentDocument,
   createdProfiles,
