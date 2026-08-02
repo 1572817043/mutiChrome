@@ -157,6 +157,25 @@ export function useProfileDocumentStore(options: UseProfileDocumentStoreOptions)
     );
   }
 
+  function loadProfileDocument({
+    rootPath: nextRootPath,
+    profiles: nextProfiles,
+    settings: nextSettings,
+    projects: nextProjects
+  }: {
+    rootPath: string;
+    profiles: ChromeProfile[];
+    settings: ProfileSettings;
+    projects: AirdropProject[];
+  }) {
+    replaceProfileDocumentState({
+      rootPath: nextRootPath,
+      profiles: nextProfiles,
+      settings: nextSettings,
+      projects: nextProjects
+    });
+  }
+
   function restoreProfileDocument<T extends {
     document: ProfileDocument;
     settings: ProfileSettings;
@@ -198,6 +217,7 @@ export function useProfileDocumentStore(options: UseProfileDocumentStoreOptions)
     persistProfileDocument,
     commitProfileDocumentState,
     replaceProfileDocumentState,
+    loadProfileDocument,
     restoreProfileDocument,
     getProfileDocumentSnapshot: mutations.getProfileDocumentSnapshot
   };
