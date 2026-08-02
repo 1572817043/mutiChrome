@@ -10,6 +10,7 @@ import type {
 import {
   buildImportedProfilePlan,
   buildImportDocumentCommitPlan,
+  buildImportSelectionPlan,
   formatImportCancelledMessage,
   formatImportCancelledRollbackFailureMessage,
   formatImportRollbackFailureMessage,
@@ -17,6 +18,40 @@ import {
   mergeQueuedProjects,
   mergeQueuedSettings
 } from "./profileDocumentMutationModel";
+
+describe("import selection plan", () => {
+  test("有导入 profile 时选择首个 profile 并生成编辑 draft", () => {
+    const firstProfile = profile({ id: "account-imported-001" });
+    const secondProfile = profile({ id: "account-imported-002" });
+    const cloneProfileForDraft = vi.fn((item: ChromeProfile) => ({ ...item }));
+
+    const plan = buildImportSelectionPlan({
+      createdProfiles: [firstProfile, secondProfile],
+      cloneProfileForDraft
+    });
+
+    expect(plan).toEqual({
+      editingId: firstProfile.id,
+      editingProfileDraft: firstProfile
+    });
+    expect(cloneProfileForDraft).toHaveBeenCalledWith(firstProfile);
+  });
+
+  test("没有导入 profile 时不选择任何 profile", () => {
+    const cloneProfileForDraft = vi.fn((item: ChromeProfile) => ({ ...item }));
+
+    const plan = buildImportSelectionPlan({
+      createdProfiles: [],
+      cloneProfileForDraft
+    });
+
+    expect(plan).toEqual({
+      editingId: null,
+      editingProfileDraft: null
+    });
+    expect(cloneProfileForDraft).not.toHaveBeenCalled();
+  });
+});
 
 describe("imported profile plan", () => {
   test("根据候选目录创建 profile 和对应 marker", () => {
