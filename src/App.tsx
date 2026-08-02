@@ -74,6 +74,7 @@ import {
   updateProfile
 } from "./domain/profileModel";
 import {
+  buildImportedProfilePlan,
   buildImportDocumentCommitPlan,
   formatImportCancelledMessage,
   formatImportCancelledRollbackFailureMessage,
@@ -144,7 +145,6 @@ import type {
   AirdropProject,
   ChromeProfile,
   ProfileImportCandidate,
-  ProfileMarker,
   ProfileDocument,
   ProjectUrl,
   ProfileSettings,
@@ -702,31 +702,12 @@ function App() {
 
           const profileUid = createProfileUid();
           const currentDocument = getProfileDocumentSnapshot();
-          const profile = createProfile(
-            {
-              name: candidate.suggestedName,
-              tags: candidate.suggestedTags,
-              notes: candidate.suggestedNotes.trim() || `来源：${candidate.path}`,
-              importSource: {
-                profileUid,
-                sourcePath: candidate.path,
-                sourceFolderName: candidate.folderName,
-                importedAt: now
-              }
-            },
-            [...currentDocument.profiles, ...createdProfiles],
-            now
-          );
-          const marker: ProfileMarker = {
-            schemaVersion: 1,
-            app: "MultiChrome",
+          const { profile, marker } = buildImportedProfilePlan({
+            candidate,
+            existingProfiles: [...currentDocument.profiles, ...createdProfiles],
             profileUid,
-            profileId: profile.id,
-            name: profile.name,
-            sourcePath: candidate.path,
-            sourceFolderName: candidate.folderName,
             importedAt: now
-          };
+          });
           await profileApi.importProfileData(
             targetRootPath,
             candidate.path,
