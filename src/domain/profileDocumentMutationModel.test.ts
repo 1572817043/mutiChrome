@@ -8,10 +8,39 @@ import type {
 } from "../types";
 import {
   buildImportDocumentCommitPlan,
+  formatImportCancelledMessage,
+  formatImportCancelledRollbackFailureMessage,
+  formatImportRollbackFailureMessage,
   mergeQueuedProfiles,
   mergeQueuedProjects,
   mergeQueuedSettings
 } from "./profileDocumentMutationModel";
+
+describe("import rollback messages", () => {
+  test("无 rollback failures 时取消异常消息只包含错误", () => {
+    expect(formatImportCancelledMessage("磁盘不可用", [])).toBe(
+      "导入已取消：磁盘不可用"
+    );
+  });
+
+  test("有 rollback failures 时取消异常消息追加失败账号", () => {
+    expect(formatImportCancelledMessage("磁盘不可用", ["id1", "id2"])).toBe(
+      "导入已取消：磁盘不可用；回滚失败账号：id1、id2"
+    );
+  });
+
+  test("主动取消 rollback 失败消息包含失败账号", () => {
+    expect(formatImportCancelledRollbackFailureMessage(["id1", "id2"])).toBe(
+      "导入已取消，但回滚失败账号：id1、id2"
+    );
+  });
+
+  test("普通异常 rollback 失败消息追加失败账号", () => {
+    expect(formatImportRollbackFailureMessage("磁盘不可用", ["id1", "id2"])).toBe(
+      "磁盘不可用；回滚失败账号：id1、id2"
+    );
+  });
+});
 
 describe("profile document mutation merge", () => {
   test("空 createdAt 的旧账号不会更新复用同 ID 的新账号", () => {

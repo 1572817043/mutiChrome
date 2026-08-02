@@ -75,6 +75,9 @@ import {
 } from "./domain/profileModel";
 import {
   buildImportDocumentCommitPlan,
+  formatImportCancelledMessage,
+  formatImportCancelledRollbackFailureMessage,
+  formatImportRollbackFailureMessage,
   isReplacementCreatedAt,
   nextSequentialId
 } from "./domain/profileDocumentMutationModel";
@@ -770,11 +773,9 @@ function App() {
             createdProfiles
           );
           if (shouldNotifyRollback()) {
-            const rollbackMessage =
-              rollbackFailures.length > 0
-                ? `；回滚失败账号：${rollbackFailures.join("、")}`
-                : "";
-            setMessage(`导入已取消：${errorMessage(error)}${rollbackMessage}`);
+            setMessage(
+              formatImportCancelledMessage(errorMessage(error), rollbackFailures)
+            );
           }
           return "not-saved";
         }
@@ -786,7 +787,7 @@ function App() {
           throw error;
         }
         throw new Error(
-          `${errorMessage(error)}；回滚失败账号：${rollbackFailures.join("、")}`
+          formatImportRollbackFailureMessage(errorMessage(error), rollbackFailures)
         );
       }
     });
@@ -817,7 +818,7 @@ function App() {
       createdProfiles
     );
     if (failures.length > 0 && shouldNotify()) {
-      setMessage(`导入已取消，但回滚失败账号：${failures.join("、")}`);
+      setMessage(formatImportCancelledRollbackFailureMessage(failures));
     }
   }
 
