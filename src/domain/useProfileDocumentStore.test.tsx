@@ -64,6 +64,147 @@ describe("useProfileDocumentStore", () => {
     );
   });
 
+  test("两个排队 persist 分别修改不同账号时最终都保留", async () => {
+    const initialProfiles = [
+      profile({ id: "account-001", name: "主号" }),
+      profile({ id: "account-002", name: "副号" })
+    ];
+    const savedDocuments: ProfileDocument[] = [];
+    const gate = deferred<void>();
+    const { result } = renderHook(() =>
+      useProfileDocumentStore({
+        initialSettings: settings,
+        initialProfiles,
+        saveDocument: async (_rootPath, document) => {
+          savedDocuments.push(document);
+        },
+        onDocumentCommitted: vi.fn()
+      })
+    );
+    const firstProfiles = initialProfiles.map((profile) =>
+      profile.id === "account-001"
+        ? { ...profile, notes: "第一笔修改" }
+        : profile
+    );
+    const secondProfiles = initialProfiles.map((profile) =>
+      profile.id === "account-002"
+        ? { ...profile, tags: ["queue"] }
+        : profile
+    );
+
+    await act(async () => {
+      const blocking = result.current.enqueueDocumentMutation(() => gate.promise);
+      const firstPersist = result.current.persistProfileDocument(
+        firstProfiles,
+        "第一笔已保存"
+      );
+      result.current.setProfiles(secondProfiles);
+      const secondPersist = result.current.persistProfileDocument(
+        secondProfiles,
+        "第二笔已保存"
+      );
+      gate.resolve();
+      await blocking;
+      await Promise.all([firstPersist, secondPersist]);
+    });
+
+    expect(savedDocuments[savedDocuments.length - 1]?.profiles).toEqual([
+      expect.objectContaining({ id: "account-001", notes: "第一笔修改" }),
+      expect.objectContaining({ id: "account-002", tags: ["queue"] })
+    ]);
+  });
+
+  test("setter 更新 settings 和 projects 后 persist 默认使用最新 state", async () => {
+    const saveDocument = vi.fn<
+      (rootPath: string, document: ProfileDocument) => Promise<void>
+    >(async () => undefined);
+    const nextSettings = profileSettings({ theme: "dark" });
+    const nextProjects = [project({ id: "project-002" })];
+    const { result } = renderHook(() =>
+      useProfileDocumentStore({
+        initialSettings: settings,
+        initialProfiles: profiles,
+        initialProjects: projects,
+        saveDocument,
+        onDocumentCommitted: vi.fn()
+      })
+    );
+
+    await act(async () => {
+      result.current.setSettings(nextSettings);
+      result.current.setProjects(nextProjects);
+      await result.current.persistProfileDocument(profiles, "已保存");
+    });
+
+    expect(saveDocument).toHaveBeenCalledWith("", {
+      version: 1,
+      settings: nextSettings,
+      profiles,
+      projects: nextProjects
+    });
+  });
+
+  test("root 切换后旧 persist 不会绑定新 root", async () => {
+    const saveDocument = vi.fn<
+      (rootPath: string, document: ProfileDocument) => Promise<void>
+    >(async () => undefined);
+    const onDocumentCommitted = vi.fn();
+    const { result } = renderHook(() =>
+      useProfileDocumentStore({
+        initialRootPath: "/old-root",
+        initialSettings: settings,
+        initialProfiles: profiles,
+        saveDocument,
+        onDocumentCommitted
+      })
+    );
+    const oldPersistProfileDocument = result.current.persistProfileDocument;
+
+    act(() => {
+      result.current.setRootPath("/new-root");
+    });
+
+    await act(async () => {
+      await expect(
+        oldPersistProfileDocument(profiles, "旧 root 不应保存")
+      ).resolves.toBe(false);
+    });
+
+    expect(saveDocument).not.toHaveBeenCalled();
+    expect(onDocumentCommitted).not.toHaveBeenCalled();
+  });
+
+  test("shouldCommit 返回 false 时 persist 不保存不提交", async () => {
+    const saveDocument = vi.fn<
+      (rootPath: string, document: ProfileDocument) => Promise<void>
+    >(async () => undefined);
+    const onDocumentCommitted = vi.fn();
+    const { result } = renderHook(() =>
+      useProfileDocumentStore({
+        initialSettings: settings,
+        initialProfiles: profiles,
+        saveDocument,
+        onDocumentCommitted
+      })
+    );
+
+    let persisted = true;
+    await act(async () => {
+      persisted = await result.current.persistProfileDocument(
+        profiles,
+        "不应保存",
+        undefined,
+        undefined,
+        undefined,
+        () => false
+      );
+    });
+
+    expect(persisted).toBe(false);
+    expect(saveDocument).not.toHaveBeenCalled();
+    expect(onDocumentCommitted).not.toHaveBeenCalled();
+  });
+
   test("replace 后旧 persist 不会保存或提交", async () => {
     const saveDocument = vi.fn<(rootPath: string, document: ProfileDocument) => Promise<void>>(
       async () => undefined
