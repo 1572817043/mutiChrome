@@ -161,6 +161,112 @@ describe("useProfileDocumentStore", () => {
     expect(result.current.projects).toEqual(projects);
   });
 
+  test("restoreProfileDocument 等待期间 root 往返切换时返回 null 且不提交或保存结果", async () => {
+    const restoreGate = deferred<{
+      document: ProfileDocument;
+      settings: ProfileSettings;
+    }>();
+    const saveDocument = vi.fn<
+      (rootPath: string, document: ProfileDocument) => Promise<void>
+    >(async () => undefined);
+    const onDocumentCommitted = vi.fn();
+    const restoredProfiles = [profile({ id: "account-restored" })];
+    const restore = vi.fn(() => restoreGate.promise);
+    const { result } = renderHook(() =>
+      useProfileDocumentStore({
+        initialRootPath: "/old-root",
+        initialSettings: settings,
+        initialProfiles: profiles,
+        initialProjects: projects,
+        saveDocument,
+        onDocumentCommitted
+      })
+    );
+
+    let restoredResult: Awaited<ReturnType<typeof result.current.restoreProfileDocument>> = null;
+    await act(async () => {
+      const restorePromise = result.current.restoreProfileDocument({
+        targetRootPath: "/old-root",
+        restore
+      });
+      await Promise.resolve();
+      result.current.setRootPath("/other-root");
+      result.current.setRootPath("/old-root");
+      restoreGate.resolve({
+        document: {
+          version: 1,
+          settings,
+          profiles: restoredProfiles,
+          projects: []
+        },
+        settings
+      });
+      restoredResult = await restorePromise;
+    });
+
+    expect(restoredResult).toBeNull();
+    expect(restore).toHaveBeenCalledTimes(1);
+    expect(result.current.rootPath).toBe("/old-root");
+    expect(result.current.profiles).toEqual(profiles);
+    expect(result.current.settings).toEqual(settings);
+    expect(result.current.projects).toEqual(projects);
+    expect(onDocumentCommitted).not.toHaveBeenCalled();
+    expect(saveDocument).not.toHaveBeenCalled();
+  });
+
+  test("restoreProfileDocument 排队期间 root 往返切换时不调用 restore", async () => {
+    const gate = deferred<void>();
+    const saveDocument = vi.fn<
+      (rootPath: string, document: ProfileDocument) => Promise<void>
+    >(async () => undefined);
+    const onDocumentCommitted = vi.fn();
+    const restore = vi.fn(async (): Promise<{
+      document: ProfileDocument;
+      settings: ProfileSettings;
+    }> => ({
+      document: {
+        version: 1,
+        settings,
+        profiles: [profile({ id: "account-restored" })],
+        projects: []
+      },
+      settings
+    }));
+    const { result } = renderHook(() =>
+      useProfileDocumentStore({
+        initialRootPath: "/old-root",
+        initialSettings: settings,
+        initialProfiles: profiles,
+        initialProjects: projects,
+        saveDocument,
+        onDocumentCommitted
+      })
+    );
+
+    let restoredResult: Awaited<ReturnType<typeof result.current.restoreProfileDocument>> = null;
+    await act(async () => {
+      const blocking = result.current.enqueueDocumentMutation(() => gate.promise);
+      const restorePromise = result.current.restoreProfileDocument({
+        targetRootPath: "/old-root",
+        restore
+      });
+      result.current.setRootPath("/other-root");
+      result.current.setRootPath("/old-root");
+      gate.resolve();
+      await blocking;
+      restoredResult = await restorePromise;
+    });
+
+    expect(restoredResult).toBeNull();
+    expect(restore).not.toHaveBeenCalled();
+    expect(result.current.rootPath).toBe("/old-root");
+    expect(result.current.profiles).toEqual(profiles);
+    expect(result.current.settings).toEqual(settings);
+    expect(result.current.projects).toEqual(projects);
+    expect(onDocumentCommitted).not.toHaveBeenCalled();
+    expect(saveDocument).not.toHaveBeenCalled();
+  });
+
   test("commitProfileDocumentState 更新 state 并通知外部回调", () => {
     const onDocumentCommitted = vi.fn();
     const nextSettings = profileSettings({ theme: "dark" });
