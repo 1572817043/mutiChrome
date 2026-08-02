@@ -2,10 +2,52 @@ import type {
   AirdropProject,
   ChromeProfile,
   ProfileDocument,
+  ProfileImportCandidate,
+  ProfileMarker,
   ProfileSettings,
   UrlLibraryItem
 } from "../types";
-import { nextProfileId } from "./profileModel";
+import { createProfile, nextProfileId } from "./profileModel";
+
+export function buildImportedProfilePlan({
+  candidate,
+  existingProfiles,
+  profileUid,
+  importedAt
+}: {
+  candidate: ProfileImportCandidate;
+  existingProfiles: ChromeProfile[];
+  profileUid: string;
+  importedAt: string;
+}): { profile: ChromeProfile; marker: ProfileMarker } {
+  const profile = createProfile(
+    {
+      name: candidate.suggestedName,
+      tags: candidate.suggestedTags,
+      notes: candidate.suggestedNotes.trim() || `来源：${candidate.path}`,
+      importSource: {
+        profileUid,
+        sourcePath: candidate.path,
+        sourceFolderName: candidate.folderName,
+        importedAt
+      }
+    },
+    existingProfiles,
+    importedAt
+  );
+  const marker: ProfileMarker = {
+    schemaVersion: 1,
+    app: "MultiChrome",
+    profileUid,
+    profileId: profile.id,
+    name: profile.name,
+    sourcePath: candidate.path,
+    sourceFolderName: candidate.folderName,
+    importedAt
+  };
+
+  return { profile, marker };
+}
 
 export function formatImportRollbackFailureMessage(
   errorMessage: string,

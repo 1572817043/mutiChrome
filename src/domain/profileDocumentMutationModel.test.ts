@@ -3,10 +3,12 @@ import type {
   AirdropProject,
   ChromeProfile,
   ProfileDocument,
+  ProfileImportCandidate,
   ProfileSettings,
   UrlLibraryItem
 } from "../types";
 import {
+  buildImportedProfilePlan,
   buildImportDocumentCommitPlan,
   formatImportCancelledMessage,
   formatImportCancelledRollbackFailureMessage,
@@ -15,6 +17,70 @@ import {
   mergeQueuedProjects,
   mergeQueuedSettings
 } from "./profileDocumentMutationModel";
+
+describe("imported profile plan", () => {
+  test("根据候选目录创建 profile 和对应 marker", () => {
+    const candidate = importCandidate({
+      path: "/Users/test/Default",
+      folderName: "Default",
+      suggestedName: "  主账号  ",
+      suggestedTags: ["工作"],
+      suggestedNotes: "  从 Chrome 导入  "
+    });
+
+    const { profile, marker } = buildImportedProfilePlan({
+      candidate,
+      existingProfiles: [profileFactory({ id: "account-001" })],
+      profileUid: "profile-uid-1",
+      importedAt: "2026-08-02T00:00:00.000Z"
+    });
+
+    expect(profile).toEqual(
+      expect.objectContaining({
+        id: "account-002",
+        name: "主账号",
+        tags: ["工作"],
+        notes: "从 Chrome 导入",
+        importSource: {
+          profileUid: "profile-uid-1",
+          sourcePath: candidate.path,
+          sourceFolderName: candidate.folderName,
+          importedAt: "2026-08-02T00:00:00.000Z"
+        }
+      })
+    );
+    expect(marker).toEqual({
+      schemaVersion: 1,
+      app: "MultiChrome",
+      profileUid: "profile-uid-1",
+      profileId: profile.id,
+      name: profile.name,
+      sourcePath: candidate.path,
+      sourceFolderName: candidate.folderName,
+      importedAt: "2026-08-02T00:00:00.000Z"
+    });
+  });
+
+  test("候选备注为空白时使用来源路径作为 profile notes", () => {
+    const candidate = importCandidate({
+      path: "/Users/test/Profile 1",
+      suggestedNotes: "  \n"
+    });
+
+    const { profile } = buildImportedProfilePlan({
+      candidate,
+      existingProfiles: [
+        profileFactory({ id: "account-001" }),
+        profileFactory({ id: "account-002" })
+      ],
+      profileUid: "profile-uid-2",
+      importedAt: "2026-08-02T00:00:00.000Z"
+    });
+
+    expect(profile.id).toBe("account-003");
+    expect(profile.notes).toBe("来源：/Users/test/Profile 1");
+  });
+});
 
 describe("import rollback messages", () => {
   test("无 rollback failures 时取消异常消息只包含错误", () => {
@@ -257,7 +323,7 @@ function document(overrides: Partial<ProfileDocument> = {}): ProfileDocument {
   };
 }
 
-function profile(overrides: Partial<ChromeProfile> = {}): ChromeProfile {
+function profileFactory(overrides: Partial<ChromeProfile> = {}): ChromeProfile {
   return {
     id: "account-001",
     name: "账号",
@@ -268,6 +334,31 @@ function profile(overrides: Partial<ChromeProfile> = {}): ChromeProfile {
     createdAt: "2026-07-15T00:00:00.000Z",
     updatedAt: "2026-07-15T00:00:00.000Z",
     lastOpenedAt: null,
+    ...overrides
+  };
+}
+
+function profile(overrides: Partial<ChromeProfile> = {}): ChromeProfile {
+  return profileFactory(overrides);
+}
+
+function importCandidate(
+  overrides: Partial<ProfileImportCandidate> = {}
+): ProfileImportCandidate {
+  return {
+    path: "/Users/test/Default",
+    folderName: "Default",
+    suggestedName: "账号",
+    suggestedTags: [],
+    suggestedNotes: "",
+    sizeBytes: 0,
+    confidence: "ready",
+    evidence: [],
+    skippedReason: null,
+    profileUid: null,
+    duplicateProfileId: null,
+    duplicateProfileName: null,
+    duplicateReason: null,
     ...overrides
   };
 }
