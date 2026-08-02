@@ -157,6 +157,33 @@ export function useProfileDocumentStore(options: UseProfileDocumentStoreOptions)
     );
   }
 
+  function restoreProfileDocument<T extends {
+    document: ProfileDocument;
+    settings: ProfileSettings;
+  }>({
+    targetRootPath,
+    restore
+  }: {
+    targetRootPath: string;
+    restore: () => Promise<T>;
+  }): Promise<T | null> {
+    return mutations.enqueueDocumentMutation(async () => {
+      if (documentStateRef.current.rootPath !== targetRootPath) {
+        return null;
+      }
+      const restored = await restore();
+      if (documentStateRef.current.rootPath !== targetRootPath) {
+        return null;
+      }
+      replaceProfileDocumentState({
+        profiles: restored.document.profiles,
+        settings: restored.settings,
+        projects: restored.document.projects
+      });
+      return restored;
+    });
+  }
+
   return {
     rootPath,
     settings,
@@ -171,6 +198,7 @@ export function useProfileDocumentStore(options: UseProfileDocumentStoreOptions)
     persistProfileDocument,
     commitProfileDocumentState,
     replaceProfileDocumentState,
+    restoreProfileDocument,
     getProfileDocumentSnapshot: mutations.getProfileDocumentSnapshot
   };
 }

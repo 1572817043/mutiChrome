@@ -245,6 +245,7 @@ function App() {
     persistProfileDocument: persist,
     commitProfileDocumentState,
     replaceProfileDocumentState,
+    restoreProfileDocument,
     getProfileDocumentSnapshot
   } = useProfileDocumentStore({
     initialSettings: {
@@ -833,28 +834,13 @@ function App() {
     targetRootPath,
     restore
   }: RestoreDataSafetyDocumentInput): Promise<boolean> {
-    return enqueueDocumentMutation(async () => {
-      if (getProfileDocumentSnapshot().rootPath !== targetRootPath) {
+    return restoreProfileDocument({ targetRootPath, restore }).then((restored) => {
+      if (!restored) {
         return false;
       }
-      const {
-        document,
-        settings: restoredSettings,
-        rootStatus: status,
-        chromeStatus: chrome,
-        message: nextMessage
-      } = await restore();
-      if (getProfileDocumentSnapshot().rootPath !== targetRootPath) {
-        return false;
-      }
-      replaceProfileDocumentState({
-        profiles: document.profiles,
-        settings: restoredSettings,
-        projects: document.projects
-      });
-      syncRestoredRoot(status, restoredSettings, chrome);
+      syncRestoredRoot(restored.rootStatus, restored.settings, restored.chromeStatus);
       resetUiForRestoredDocument();
-      setMessage(nextMessage);
+      setMessage(restored.message);
       return true;
     });
   }
