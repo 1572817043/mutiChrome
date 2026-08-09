@@ -50,6 +50,7 @@ interface BulkActionWindowProps {
   windowSyncing: boolean;
   windowFocusing: boolean;
   windowQuitting: boolean;
+  windowRestarting: boolean;
   runningProfileIds: string[];
   layoutSourceProfileId: string;
   onLayoutSourceProfileChange: (value: string) => void;
@@ -58,6 +59,7 @@ interface BulkActionWindowProps {
   onSyncLayout: () => void;
   onFocusWindows: () => void;
   onQuitWindows: () => void;
+  onRestartWindows: () => void;
 }
 
 interface BulkActionActivityProps {
@@ -95,6 +97,7 @@ export function BulkActionBar({
     windowSyncing,
     windowFocusing,
     windowQuitting,
+    windowRestarting,
     runningProfileIds,
     layoutSourceProfileId,
     onLayoutSourceProfileChange,
@@ -102,7 +105,8 @@ export function BulkActionBar({
     onTileWindows,
     onSyncLayout,
     onFocusWindows,
-    onQuitWindows
+    onQuitWindows,
+    onRestartWindows
   } = windowActions;
   const { browserOperations, launchEvents } = activity;
   const [expanded, setExpanded] = useState(false);
@@ -118,8 +122,11 @@ export function BulkActionBar({
     windowTiling ||
     windowSyncing ||
     windowFocusing ||
-    windowQuitting;
+    windowQuitting ||
+    windowRestarting;
   const quitWindowDisabled =
+    runningSelectedProfiles.length === 0 || windowActionDisabled;
+  const restartWindowDisabled =
     runningSelectedProfiles.length === 0 || windowActionDisabled;
   const selectedActionDisabled = selectedCount === 0 || bulkOpenRunning;
   const openButtonLabel = bulkOpenRunning
@@ -326,6 +333,14 @@ export function BulkActionBar({
               onClick={onQuitWindows}
             >
               {windowQuitting ? "关闭中" : "关闭运行账号"}
+            </button>
+            <button
+              className="secondary-button compact"
+              type="button"
+              disabled={restartWindowDisabled}
+              onClick={onRestartWindows}
+            >
+              {windowRestarting ? "重启中" : "重启运行账号"}
             </button>
           </div>
           <OperationList operations={browserOperations} />

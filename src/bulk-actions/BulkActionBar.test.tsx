@@ -40,6 +40,7 @@ function createBulkActionBarProps(overrides: BulkActionBarOverrides = {}) {
     onSyncLayout: vi.fn(),
     onFocusWindows: vi.fn(),
     onQuitWindows: vi.fn(),
+    onRestartWindows: vi.fn(),
     onStopOpenQueue: vi.fn(),
     onRequestDelete: vi.fn(),
     onClear: vi.fn()
@@ -83,6 +84,7 @@ function createBulkActionBarProps(overrides: BulkActionBarOverrides = {}) {
         windowSyncing: false,
         windowFocusing: false,
         windowQuitting: false,
+        windowRestarting: false,
         runningProfileIds: [],
         layoutSourceProfileId: "",
         onLayoutSourceProfileChange: handlers.onLayoutSourceProfileChange,
@@ -91,6 +93,7 @@ function createBulkActionBarProps(overrides: BulkActionBarOverrides = {}) {
         onSyncLayout: handlers.onSyncLayout,
         onFocusWindows: handlers.onFocusWindows,
         onQuitWindows: handlers.onQuitWindows,
+        onRestartWindows: handlers.onRestartWindows,
         ...overrides.windowActions
       },
       activity: {
@@ -192,6 +195,39 @@ test("批量栏只允许关闭选中的运行账号", () => {
   fireEvent.click(screen.getAllByRole("button", { name: "更多操作" })[1]);
   expect(
     (screen.getAllByRole("button", { name: "关闭运行账号" })[1] as HTMLButtonElement).disabled
+  ).toBe(true);
+});
+
+test("批量栏只允许重启选中的运行账号，并在窗口动作冲突时禁用", () => {
+  const { handlers, props } = createBulkActionBarProps({
+    selection: {
+      selectedCount: 2,
+      selectedProfiles: [profile("account-001", "主号"), profile("account-002", "小号")]
+    },
+    windowActions: {
+      runningProfileIds: ["account-001"]
+    }
+  });
+
+  render(<BulkActionBar {...props} />);
+  fireEvent.click(screen.getByRole("button", { name: "更多操作" }));
+
+  const restartButton = screen.getByRole("button", { name: "重启运行账号" });
+  expect((restartButton as HTMLButtonElement).disabled).toBe(false);
+  fireEvent.click(restartButton);
+  expect(handlers.onRestartWindows).toHaveBeenCalledTimes(1);
+
+  const { props: conflictProps } = createBulkActionBarProps({
+    selection: props.selection,
+    windowActions: {
+      runningProfileIds: ["account-001"],
+      windowQuitting: true
+    }
+  });
+  const { rerender } = render(<BulkActionBar {...conflictProps} />);
+  fireEvent.click(screen.getAllByRole("button", { name: "更多操作" })[1]);
+  expect(
+    (screen.getAllByRole("button", { name: "重启运行账号" })[1] as HTMLButtonElement).disabled
   ).toBe(true);
 });
 

@@ -242,6 +242,7 @@ function App() {
   const [windowSyncing, setWindowSyncing] = useState(false);
   const [windowFocusing, setWindowFocusing] = useState(false);
   const [windowQuitting, setWindowQuitting] = useState(false);
+  const [windowRestarting, setWindowRestarting] = useState(false);
   const [layoutSourceProfileId, setLayoutSourceProfileId] = useState("");
   const [openingProjectId, setOpeningProjectId] = useState<string | null>(null);
   const [message, setMessage] = useState("正在初始化...");
@@ -336,6 +337,7 @@ function App() {
     closeDataSafetyDialogs
   } = dataSafetySettings;
   const launchingProfileIdsRef = useRef(new Set<string>());
+  const windowActionLockRef = useRef<string | null>(null);
   const bulkOpenCancelledRef = useRef(false);
   const projectOpenCancelledRef = useRef(false);
   const bulkOpenDelayResolveRef = useRef<(() => void) | null>(null);
@@ -684,6 +686,21 @@ function App() {
         .map((snapshot) => snapshot.profileId)
     );
     return selectedProfiles.filter((profile) => runningIds.has(profile.id));
+  }
+
+  async function withWindowActionLock(action: string, run: () => Promise<void>): Promise<void> {
+    const activeAction = windowActionLockRef.current;
+    if (activeAction) {
+      setMessage(`窗口操作“${activeAction}”正在进行，请稍候`);
+      return;
+    }
+
+    windowActionLockRef.current = action;
+    try {
+      await run();
+    } finally {
+      windowActionLockRef.current = null;
+    }
   }
 
   async function importCandidatesInQueue(
@@ -1916,46 +1933,48 @@ function App() {
   }
 
   async function inspectWindowsForSelectedProfiles() {
-    const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
+    await withWindowActionLock("检查窗口", async () => {
+      const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
 
-    if (freshRunningSelectedProfiles.length === 0) {
-      setMessage("选中的账号没有运行窗口");
-      return;
-    }
-    if (!canStartBrowserOperationForProfiles(freshRunningSelectedProfiles)) {
-      return;
-    }
-
-    const operation = startWindowOperation("检查窗口", freshRunningSelectedProfiles);
-    setWindowInspecting(true);
-    try {
-      const summaries: string[] = [];
-      for (const profile of freshRunningSelectedProfiles) {
-        const windows = await listProfileWindowsWithTimeout(profile, "检查窗口");
-        summaries.push(formatWindowInspectionSummary(profile.name, windows));
+      if (freshRunningSelectedProfiles.length === 0) {
+        setMessage("选中的账号没有运行窗口");
+        return;
       }
-      setMessage(`窗口检查：${summaries.join("；")}`);
-      finishWindowOperation(operation, "succeeded", buildInspectWindowOperationSummary({
-        profileCount: freshRunningSelectedProfiles.length,
-        inspectedCount: summaries.length
-      }));
-      await refreshRunningProfiles();
-    } catch (error) {
-      setMessage(windowAutomationErrorMessage(error));
-      finishWindowOperation(
-        operation,
-        "failed",
-        buildInspectWindowOperationSummary({
+      if (!canStartBrowserOperationForProfiles(freshRunningSelectedProfiles)) {
+        return;
+      }
+
+      const operation = startWindowOperation("检查窗口", freshRunningSelectedProfiles);
+      setWindowInspecting(true);
+      try {
+        const summaries: string[] = [];
+        for (const profile of freshRunningSelectedProfiles) {
+          const windows = await listProfileWindowsWithTimeout(profile, "检查窗口");
+          summaries.push(formatWindowInspectionSummary(profile.name, windows));
+        }
+        setMessage(`窗口检查：${summaries.join("；")}`);
+        finishWindowOperation(operation, "succeeded", buildInspectWindowOperationSummary({
           profileCount: freshRunningSelectedProfiles.length,
-          inspectedCount: 0,
-          failedCount: freshRunningSelectedProfiles.length,
-          reason: "inspect-failed"
-        })
-      );
-      await refreshRunningProfiles();
-    } finally {
-      setWindowInspecting(false);
-    }
+          inspectedCount: summaries.length
+        }));
+        await refreshRunningProfiles();
+      } catch (error) {
+        setMessage(windowAutomationErrorMessage(error));
+        finishWindowOperation(
+          operation,
+          "failed",
+          buildInspectWindowOperationSummary({
+            profileCount: freshRunningSelectedProfiles.length,
+            inspectedCount: 0,
+            failedCount: freshRunningSelectedProfiles.length,
+            reason: "inspect-failed"
+          })
+        );
+        await refreshRunningProfiles();
+      } finally {
+        setWindowInspecting(false);
+      }
+    });
   }
 
   async function focusProfileWindowsInOrder(profilesToFocus: ChromeProfile[]) {
@@ -1977,243 +1996,25 @@ function App() {
   }
 
   async function focusWindowsForSelectedProfiles() {
-    const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
+    await withWindowActionLock("前置窗口", async () => {
+      const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
 
-    if (freshRunningSelectedProfiles.length === 0) {
-      setMessage("选中的账号没有运行窗口");
-      return;
-    }
-    if (!canStartBrowserOperationForProfiles(freshRunningSelectedProfiles)) {
-      return;
-    }
-
-    const operation = startWindowOperation("前置窗口", freshRunningSelectedProfiles);
-    setWindowFocusing(true);
-    try {
-      const { focusedCount, failedCount, firstFailedError } =
-        await focusProfileWindowsInOrder(freshRunningSelectedProfiles);
-
-      if (focusedCount > 0) {
-        const messageParts = [`已前置 ${focusedCount} 个窗口`];
-        if (failedCount > 0) {
-          messageParts.push(`${failedCount} 个失败`);
-        }
-        setMessage(messageParts.join("，"));
-      } else {
-        setMessage(
-          firstFailedError
-            ? windowAutomationErrorMessage(firstFailedError)
-            : "选中的账号没有可前置窗口"
-        );
+      if (freshRunningSelectedProfiles.length === 0) {
+        setMessage("选中的账号没有运行窗口");
+        return;
       }
-      finishWindowOperation(
-        operation,
-        focusedCount > 0 && failedCount === 0 ? "succeeded" : "failed",
-        {
-          profileCount: freshRunningSelectedProfiles.length,
-          focusedCount,
-          failedCount
-        }
-      );
-      await refreshRunningProfiles();
-    } finally {
-      setWindowFocusing(false);
-    }
-  }
-
-  async function quitBrowsersForSelectedProfiles() {
-    const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
-    if (freshRunningSelectedProfiles.length === 0) {
-      setMessage("没有选中的运行账号");
-      return;
-    }
-    if (!canStartBrowserOperationForProfiles(freshRunningSelectedProfiles)) {
-      return;
-    }
-
-    const operation = startWindowOperation("关闭运行账号", freshRunningSelectedProfiles);
-    setWindowQuitting(true);
-    try {
-      let closedCount = 0;
-      let failedCount = 0;
-      for (const profile of freshRunningSelectedProfiles) {
-        try {
-          await quitProfileBrowserWithTimeout(profile);
-          closedCount += 1;
-        } catch {
-          failedCount += 1;
-        }
-      }
-      const messageParts = [`已关闭 ${closedCount} 个运行账号`];
-      if (failedCount > 0) {
-        messageParts.push(`${failedCount} 个失败`);
-      }
-      setMessage(messageParts.join("，"));
-      finishWindowOperation(
-        operation,
-        failedCount === 0 ? "succeeded" : "failed",
-        {
-          profileCount: freshRunningSelectedProfiles.length,
-          closedCount,
-          failedCount
-        }
-      );
-      await refreshRunningProfiles();
-    } finally {
-      setWindowQuitting(false);
-    }
-  }
-
-  async function tileWindowsForSelectedProfiles() {
-    const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
-
-    if (freshRunningSelectedProfiles.length === 0) {
-      setMessage("选中的账号没有运行窗口");
-      return;
-    }
-    if (!canStartBrowserOperationForProfiles(freshRunningSelectedProfiles)) {
-      return;
-    }
-
-    const operation = startWindowOperation("平铺窗口", freshRunningSelectedProfiles);
-    setWindowTiling(true);
-    try {
-      const registryInputs: BrowserWindowRegistryInput[] = [];
-      let failedCount = 0;
-      let firstFailedError: unknown = null;
-
-      for (const profile of freshRunningSelectedProfiles) {
-        try {
-          const windows = await listProfileWindowsWithTimeout(profile, "检查平铺窗口");
-          registryInputs.push({
-            profileId: profile.id,
-            profileName: profile.name,
-            windows
-          });
-        } catch (error) {
-          failedCount += 1;
-          firstFailedError ??= error;
-          registryInputs.push({
-            profileId: profile.id,
-            profileName: profile.name,
-            windows: [],
-            windowError: errorMessage(error)
-          });
-        }
-      }
-
-      const windowRegistry = buildPrimaryWindowRegistry(registryInputs);
-      const layoutPlan = buildGridWindowLayoutPlan(windowRegistry, {
-        x: availableScreenLeft(),
-        y: availableScreenTop(),
-        width: availableScreenWidth(),
-        height: availableScreenHeight()
-      });
-      const profileById = new Map(
-        freshRunningSelectedProfiles.map((profile) => [profile.id, profile])
-      );
-      const noWindowCount = layoutPlan.skipped.filter(
-        (entry) => entry.reason === "missing-window"
-      ).length;
-      const multiWindowProfileCount = layoutPlan.multiWindowProfileCount;
-
-      if (layoutPlan.tileableCount === 0) {
-        setMessage(
-          firstFailedError
-            ? windowAutomationErrorMessage(firstFailedError)
-            : "选中的运行账号没有可平铺窗口"
-        );
-        finishWindowOperation(
-          operation,
-          "failed",
-          buildTileWindowOperationSummary({
-            profileCount: freshRunningSelectedProfiles.length,
-            tileableCount: 0,
-            noWindowCount,
-            failedCount
-          })
-        );
-        await refreshRunningProfiles();
+      if (!canStartBrowserOperationForProfiles(freshRunningSelectedProfiles)) {
         return;
       }
 
-      if (layoutPlan.capacityExceeded) {
-        setMessage(
-          `当前屏幕最多适合平铺 ${layoutPlan.capacity} 个窗口；已选运行窗口 ${layoutPlan.tileableCount} 个，请减少选择或分批平铺`
-        );
-        finishWindowOperation(
-          operation,
-          "failed",
-          buildTileWindowOperationSummary({
-            profileCount: freshRunningSelectedProfiles.length,
-            tileableCount: layoutPlan.tileableCount,
-            noWindowCount,
-            capacity: layoutPlan.capacity,
-            capacityExceeded: true
-          })
-        );
-        await refreshRunningProfiles();
-        return;
-      }
+      const operation = startWindowOperation("前置窗口", freshRunningSelectedProfiles);
+      setWindowFocusing(true);
+      try {
+        const { focusedCount, failedCount, firstFailedError } =
+          await focusProfileWindowsInOrder(freshRunningSelectedProfiles);
 
-      let tiledCount = 0;
-      let unchangedCount = 0;
-      let focusFailedCount = 0;
-      const tiledProfiles: ChromeProfile[] = [];
-
-      for (const placement of layoutPlan.placements) {
-        const profile = profileById.get(placement.profileId);
-        if (!profile) {
-          continue;
-        }
-
-        try {
-          const targetBounds = placement.bounds;
-          await setProfileWindowBoundsWithTimeout(profile, targetBounds, "平铺窗口");
-          const updatedWindows = await listProfileWindowsWithTimeout(
-            profile,
-            "确认平铺窗口"
-          );
-          if (
-            !updatedWindows[0] ||
-            !windowMatchesBounds(updatedWindows[0], targetBounds)
-          ) {
-            unchangedCount += 1;
-            continue;
-          }
-          tiledCount += 1;
-          tiledProfiles.push(profile);
-        } catch (error) {
-          failedCount += 1;
-          firstFailedError ??= error;
-        }
-      }
-
-      if (tiledCount > 0) {
-        const messageParts = [`已平铺 ${tiledCount} 个窗口`];
-        if (noWindowCount > 0) {
-          messageParts.push(`${noWindowCount} 个没有可平铺窗口`);
-        }
-        if (multiWindowProfileCount > 0) {
-          messageParts.push(
-            `${multiWindowProfileCount} 个账号存在多个窗口，仅平铺首个窗口`
-          );
-        }
-        if (unchangedCount > 0) {
-          messageParts.push(`${unchangedCount} 个未生效`);
-        }
-        if (failedCount > 0) {
-          messageParts.push(`${failedCount} 个失败`);
-        }
-        const focusResult = await focusProfileWindowsInOrder(tiledProfiles);
-        if (focusResult.failedCount > 0) {
-          focusFailedCount = focusResult.failedCount;
-          messageParts.push(`${focusResult.failedCount} 个未能前置`);
-        }
-        setMessage(messageParts.join("，"));
-      } else {
-        if (unchangedCount > 0) {
-          const messageParts = [`平铺窗口未生效：${unchangedCount} 个未生效`];
+        if (focusedCount > 0) {
+          const messageParts = [`已前置 ${focusedCount} 个窗口`];
           if (failedCount > 0) {
             messageParts.push(`${failedCount} 个失败`);
           }
@@ -2222,272 +2023,585 @@ function App() {
           setMessage(
             firstFailedError
               ? windowAutomationErrorMessage(firstFailedError)
-              : `平铺窗口失败：${failedCount} 个账号未处理`
+              : "选中的账号没有可前置窗口"
           );
         }
+        finishWindowOperation(
+          operation,
+          focusedCount > 0 && failedCount === 0 ? "succeeded" : "failed",
+          {
+            profileCount: freshRunningSelectedProfiles.length,
+            focusedCount,
+            failedCount
+          }
+        );
+        await refreshRunningProfiles();
+      } finally {
+        setWindowFocusing(false);
       }
-      finishWindowOperation(
-        operation,
-        tiledCount > 0 &&
-          unchangedCount === 0 &&
-          failedCount === 0 &&
-          focusFailedCount === 0
-          ? "succeeded"
-          : "failed",
-        buildTileWindowOperationSummary({
-          profileCount: freshRunningSelectedProfiles.length,
-          tileableCount: layoutPlan.tileableCount,
-          tiledCount,
-          unchangedCount,
-          noWindowCount,
-          multiWindowProfileCount,
-          failedCount,
-          focusFailedCount
-        })
-      );
-      await refreshRunningProfiles();
-    } finally {
-      setWindowTiling(false);
-    }
+    });
+  }
+
+  async function quitBrowsersForSelectedProfiles() {
+    await withWindowActionLock("关闭运行账号", async () => {
+      const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
+      if (freshRunningSelectedProfiles.length === 0) {
+        setMessage("没有选中的运行账号");
+        return;
+      }
+      if (!canStartBrowserOperationForProfiles(freshRunningSelectedProfiles)) {
+        return;
+      }
+
+      const operation = startWindowOperation("关闭运行账号", freshRunningSelectedProfiles);
+      setWindowQuitting(true);
+      try {
+        let closedCount = 0;
+        let failedCount = 0;
+        for (const profile of freshRunningSelectedProfiles) {
+          try {
+            await quitProfileBrowserWithTimeout(profile);
+            closedCount += 1;
+          } catch {
+            failedCount += 1;
+          }
+        }
+        const messageParts = [`已关闭 ${closedCount} 个运行账号`];
+        if (failedCount > 0) {
+          messageParts.push(`${failedCount} 个失败`);
+        }
+        setMessage(messageParts.join("，"));
+        finishWindowOperation(
+          operation,
+          failedCount === 0 ? "succeeded" : "failed",
+          {
+            profileCount: freshRunningSelectedProfiles.length,
+            closedCount,
+            failedCount
+          }
+        );
+        await refreshRunningProfiles();
+      } finally {
+        setWindowQuitting(false);
+      }
+    });
+  }
+
+  async function restartBrowsersForSelectedProfiles() {
+    await withWindowActionLock("重启运行账号", async () => {
+      const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
+      if (freshRunningSelectedProfiles.length === 0) {
+        setMessage("没有选中的运行账号");
+        return;
+      }
+      if (!canStartBrowserOperationForProfiles(freshRunningSelectedProfiles)) {
+        return;
+      }
+
+      const operation = startWindowOperation("重启运行账号", freshRunningSelectedProfiles);
+      setWindowRestarting(true);
+      try {
+        let restartedCount = 0;
+        let failedCount = 0;
+        const restartedIds = new Set<string>();
+        const profileById = new Map(
+          freshRunningSelectedProfiles.map((profile) => [profile.id, profile])
+        );
+        const launchResults: BrowserLaunchResult[] = [];
+
+        for (const profile of freshRunningSelectedProfiles) {
+          try {
+            await quitProfileBrowserWithTimeout(profile);
+            await new Promise((resolve) => setTimeout(resolve, 300));
+            const result = await launchChromeProfile(profile, DEFAULT_PROFILE_LAUNCH_URL);
+            launchResults.push(result);
+            if (result.ok) {
+              restartedCount += 1;
+              restartedIds.add(profile.id);
+            } else {
+              failedCount += 1;
+            }
+          } catch {
+            failedCount += 1;
+          }
+        }
+
+        recordLaunchResults(
+          launchResults,
+          profileById,
+          "重启运行账号",
+          DEFAULT_PROFILE_LAUNCH_URL
+        );
+        const messageParts = [`已重启 ${restartedCount} 个运行账号`];
+        if (failedCount > 0) {
+          messageParts.push(`${failedCount} 个失败`);
+        }
+        const finalMessage = messageParts.join("，");
+        let saveError: unknown = null;
+        if (restartedIds.size > 0) {
+          const now = new Date().toISOString();
+          const nextProfiles = profiles.map((profile) =>
+            restartedIds.has(profile.id)
+              ? updateProfile(profile, { lastOpenedAt: now }, now)
+              : profile
+          );
+          try {
+            await persist(nextProfiles, finalMessage);
+          } catch (error) {
+            saveError = error;
+          }
+        } else {
+          setMessage(finalMessage);
+        }
+        finishWindowOperation(
+          operation,
+          failedCount === 0 && saveError === null ? "succeeded" : "failed",
+          {
+            profileCount: freshRunningSelectedProfiles.length,
+            restartedCount,
+            failedCount
+          }
+        );
+        if (saveError) {
+          setMessage(
+            `${finalMessage}；保存打开时间失败：${errorMessage(saveError)}`
+          );
+        }
+        await refreshRunningProfiles();
+      } finally {
+        setWindowRestarting(false);
+      }
+    });
+  }
+
+  async function tileWindowsForSelectedProfiles() {
+    await withWindowActionLock("平铺窗口", async () => {
+      const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
+
+      if (freshRunningSelectedProfiles.length === 0) {
+        setMessage("选中的账号没有运行窗口");
+        return;
+      }
+      if (!canStartBrowserOperationForProfiles(freshRunningSelectedProfiles)) {
+        return;
+      }
+
+      const operation = startWindowOperation("平铺窗口", freshRunningSelectedProfiles);
+      setWindowTiling(true);
+      try {
+        const registryInputs: BrowserWindowRegistryInput[] = [];
+        let failedCount = 0;
+        let firstFailedError: unknown = null;
+
+        for (const profile of freshRunningSelectedProfiles) {
+          try {
+            const windows = await listProfileWindowsWithTimeout(profile, "检查平铺窗口");
+            registryInputs.push({
+              profileId: profile.id,
+              profileName: profile.name,
+              windows
+            });
+          } catch (error) {
+            failedCount += 1;
+            firstFailedError ??= error;
+            registryInputs.push({
+              profileId: profile.id,
+              profileName: profile.name,
+              windows: [],
+              windowError: errorMessage(error)
+            });
+          }
+        }
+
+        const windowRegistry = buildPrimaryWindowRegistry(registryInputs);
+        const layoutPlan = buildGridWindowLayoutPlan(windowRegistry, {
+          x: availableScreenLeft(),
+          y: availableScreenTop(),
+          width: availableScreenWidth(),
+          height: availableScreenHeight()
+        });
+        const profileById = new Map(
+          freshRunningSelectedProfiles.map((profile) => [profile.id, profile])
+        );
+        const noWindowCount = layoutPlan.skipped.filter(
+          (entry) => entry.reason === "missing-window"
+        ).length;
+        const multiWindowProfileCount = layoutPlan.multiWindowProfileCount;
+
+        if (layoutPlan.tileableCount === 0) {
+          setMessage(
+            firstFailedError
+              ? windowAutomationErrorMessage(firstFailedError)
+              : "选中的运行账号没有可平铺窗口"
+          );
+          finishWindowOperation(
+            operation,
+            "failed",
+            buildTileWindowOperationSummary({
+              profileCount: freshRunningSelectedProfiles.length,
+              tileableCount: 0,
+              noWindowCount,
+              failedCount
+            })
+          );
+          await refreshRunningProfiles();
+          return;
+        }
+
+        if (layoutPlan.capacityExceeded) {
+          setMessage(
+            `当前屏幕最多适合平铺 ${layoutPlan.capacity} 个窗口；已选运行窗口 ${layoutPlan.tileableCount} 个，请减少选择或分批平铺`
+          );
+          finishWindowOperation(
+            operation,
+            "failed",
+            buildTileWindowOperationSummary({
+              profileCount: freshRunningSelectedProfiles.length,
+              tileableCount: layoutPlan.tileableCount,
+              noWindowCount,
+              capacity: layoutPlan.capacity,
+              capacityExceeded: true
+            })
+          );
+          await refreshRunningProfiles();
+          return;
+        }
+
+        let tiledCount = 0;
+        let unchangedCount = 0;
+        let focusFailedCount = 0;
+        const tiledProfiles: ChromeProfile[] = [];
+
+        for (const placement of layoutPlan.placements) {
+          const profile = profileById.get(placement.profileId);
+          if (!profile) {
+            continue;
+          }
+
+          try {
+            const targetBounds = placement.bounds;
+            await setProfileWindowBoundsWithTimeout(profile, targetBounds, "平铺窗口");
+            const updatedWindows = await listProfileWindowsWithTimeout(
+              profile,
+              "确认平铺窗口"
+            );
+            if (
+              !updatedWindows[0] ||
+              !windowMatchesBounds(updatedWindows[0], targetBounds)
+            ) {
+              unchangedCount += 1;
+              continue;
+            }
+            tiledCount += 1;
+            tiledProfiles.push(profile);
+          } catch (error) {
+            failedCount += 1;
+            firstFailedError ??= error;
+          }
+        }
+
+        if (tiledCount > 0) {
+          const messageParts = [`已平铺 ${tiledCount} 个窗口`];
+          if (noWindowCount > 0) {
+            messageParts.push(`${noWindowCount} 个没有可平铺窗口`);
+          }
+          if (multiWindowProfileCount > 0) {
+            messageParts.push(
+              `${multiWindowProfileCount} 个账号存在多个窗口，仅平铺首个窗口`
+            );
+          }
+          if (unchangedCount > 0) {
+            messageParts.push(`${unchangedCount} 个未生效`);
+          }
+          if (failedCount > 0) {
+            messageParts.push(`${failedCount} 个失败`);
+          }
+          const focusResult = await focusProfileWindowsInOrder(tiledProfiles);
+          if (focusResult.failedCount > 0) {
+            focusFailedCount = focusResult.failedCount;
+            messageParts.push(`${focusResult.failedCount} 个未能前置`);
+          }
+          setMessage(messageParts.join("，"));
+        } else {
+          if (unchangedCount > 0) {
+            const messageParts = [`平铺窗口未生效：${unchangedCount} 个未生效`];
+            if (failedCount > 0) {
+              messageParts.push(`${failedCount} 个失败`);
+            }
+            setMessage(messageParts.join("，"));
+          } else {
+            setMessage(
+              firstFailedError
+                ? windowAutomationErrorMessage(firstFailedError)
+                : `平铺窗口失败：${failedCount} 个账号未处理`
+            );
+          }
+        }
+        finishWindowOperation(
+          operation,
+          tiledCount > 0 &&
+            unchangedCount === 0 &&
+            failedCount === 0 &&
+            focusFailedCount === 0
+            ? "succeeded"
+            : "failed",
+          buildTileWindowOperationSummary({
+            profileCount: freshRunningSelectedProfiles.length,
+            tileableCount: layoutPlan.tileableCount,
+            tiledCount,
+            unchangedCount,
+            noWindowCount,
+            multiWindowProfileCount,
+            failedCount,
+            focusFailedCount
+          })
+        );
+        await refreshRunningProfiles();
+      } finally {
+        setWindowTiling(false);
+      }
+    });
   }
 
   async function syncLayoutForSelectedProfiles() {
-    const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
+    await withWindowActionLock("同步布局", async () => {
+      const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
 
-    if (freshRunningSelectedProfiles.length < 2) {
-      setMessage("至少选择 2 个运行账号才能同步布局");
-      return;
-    }
+      if (freshRunningSelectedProfiles.length < 2) {
+        setMessage("至少选择 2 个运行账号才能同步布局");
+        return;
+      }
 
-    const sourceProfile =
-      freshRunningSelectedProfiles.find(
-        (profile) => profile.id === resolvedLayoutSourceProfileId
-      ) ?? freshRunningSelectedProfiles[0];
+      const sourceProfile =
+        freshRunningSelectedProfiles.find(
+          (profile) => profile.id === resolvedLayoutSourceProfileId
+        ) ?? freshRunningSelectedProfiles[0];
 
-    if (!sourceProfile) {
-      setMessage("请选择一个运行账号作为主账号");
-      return;
-    }
-    if (!canStartBrowserOperationForProfiles(freshRunningSelectedProfiles)) {
-      return;
-    }
+      if (!sourceProfile) {
+        setMessage("请选择一个运行账号作为主账号");
+        return;
+      }
+      if (!canStartBrowserOperationForProfiles(freshRunningSelectedProfiles)) {
+        return;
+      }
 
-    const operation = startWindowOperation("同步布局", freshRunningSelectedProfiles);
-    setWindowSyncing(true);
-    try {
-      const registryInputs: BrowserWindowRegistryInput[] = [];
-      let firstFailedError: unknown = null;
-
+      const operation = startWindowOperation("同步布局", freshRunningSelectedProfiles);
+      setWindowSyncing(true);
       try {
-        const sourceWindows = await listProfileWindowsWithTimeout(
-          sourceProfile,
-          "读取主窗口"
-        );
-        registryInputs.push({
-          profileId: sourceProfile.id,
-          profileName: sourceProfile.name,
-          windows: sourceWindows
-        });
-      } catch (error) {
-        registryInputs.push({
-          profileId: sourceProfile.id,
-          profileName: sourceProfile.name,
-          windows: [],
-          windowError: errorMessage(error)
-        });
-      }
-
-      let windowRegistry = buildPrimaryWindowRegistry(registryInputs);
-      let syncPlan = buildWindowLayoutSyncPlan(windowRegistry, sourceProfile.id);
-      if (syncPlan.sourceStatus === "missing-window") {
-        setMessage("主账号没有可同步窗口");
-        finishWindowOperation(
-          operation,
-          "failed",
-          buildSyncLayoutWindowOperationSummary({
-            profileCount: freshRunningSelectedProfiles.length,
-            sourceProfileId: sourceProfile.id,
-            reason: "missing-source-window"
-          })
-        );
-        await refreshRunningProfiles();
-        return;
-      }
-      if (syncPlan.sourceStatus === "minimized-window") {
-        setMessage("主账号窗口已最小化，请先恢复窗口再同步布局");
-        finishWindowOperation(
-          operation,
-          "failed",
-          buildSyncLayoutWindowOperationSummary({
-            profileCount: freshRunningSelectedProfiles.length,
-            sourceProfileId: sourceProfile.id,
-            reason: "minimized-source-window"
-          })
-        );
-        await refreshRunningProfiles();
-        return;
-      }
-      if (syncPlan.sourceStatus === "window-error") {
-        setMessage(windowAutomationErrorMessage(syncPlan.sourceWindowError));
-        finishWindowOperation(
-          operation,
-          "failed",
-          buildSyncLayoutWindowOperationSummary({
-            profileCount: freshRunningSelectedProfiles.length,
-            sourceProfileId: sourceProfile.id,
-            reason: "source-window-error"
-          })
-        );
-        await refreshRunningProfiles();
-        return;
-      }
-
-      for (const profile of freshRunningSelectedProfiles) {
-        if (profile.id === sourceProfile.id) {
-          continue;
-        }
+        const registryInputs: BrowserWindowRegistryInput[] = [];
+        let firstFailedError: unknown = null;
 
         try {
-          const windows = await listProfileWindowsWithTimeout(
-            profile,
-            "检查同步窗口"
+          const sourceWindows = await listProfileWindowsWithTimeout(
+            sourceProfile,
+            "读取主窗口"
           );
           registryInputs.push({
-            profileId: profile.id,
-            profileName: profile.name,
-            windows
+            profileId: sourceProfile.id,
+            profileName: sourceProfile.name,
+            windows: sourceWindows
           });
         } catch (error) {
-          firstFailedError ??= error;
           registryInputs.push({
-            profileId: profile.id,
-            profileName: profile.name,
+            profileId: sourceProfile.id,
+            profileName: sourceProfile.name,
             windows: [],
             windowError: errorMessage(error)
           });
         }
-      }
 
-      windowRegistry = buildPrimaryWindowRegistry(registryInputs);
-      syncPlan = buildWindowLayoutSyncPlan(windowRegistry, sourceProfile.id);
-
-      let syncedCount = 0;
-      const noWindowCount = syncPlan.noWindowCount;
-      const minimizedCount = syncPlan.minimizedCount;
-      let unchangedCount = 0;
-      let failedCount = syncPlan.failedCount;
-      let focusFailedCount = 0;
-      const syncedProfiles: ChromeProfile[] = [];
-      const profileById = new Map(
-        freshRunningSelectedProfiles.map((profile) => [profile.id, profile])
-      );
-
-      for (const placement of syncPlan.placements) {
-        const profile = profileById.get(placement.profileId);
-        if (!profile) {
-          continue;
+        let windowRegistry = buildPrimaryWindowRegistry(registryInputs);
+        let syncPlan = buildWindowLayoutSyncPlan(windowRegistry, sourceProfile.id);
+        if (syncPlan.sourceStatus === "missing-window") {
+          setMessage("主账号没有可同步窗口");
+          finishWindowOperation(
+            operation,
+            "failed",
+            buildSyncLayoutWindowOperationSummary({
+              profileCount: freshRunningSelectedProfiles.length,
+              sourceProfileId: sourceProfile.id,
+              reason: "missing-source-window"
+            })
+          );
+          await refreshRunningProfiles();
+          return;
+        }
+        if (syncPlan.sourceStatus === "minimized-window") {
+          setMessage("主账号窗口已最小化，请先恢复窗口再同步布局");
+          finishWindowOperation(
+            operation,
+            "failed",
+            buildSyncLayoutWindowOperationSummary({
+              profileCount: freshRunningSelectedProfiles.length,
+              sourceProfileId: sourceProfile.id,
+              reason: "minimized-source-window"
+            })
+          );
+          await refreshRunningProfiles();
+          return;
+        }
+        if (syncPlan.sourceStatus === "window-error") {
+          setMessage(windowAutomationErrorMessage(syncPlan.sourceWindowError));
+          finishWindowOperation(
+            operation,
+            "failed",
+            buildSyncLayoutWindowOperationSummary({
+              profileCount: freshRunningSelectedProfiles.length,
+              sourceProfileId: sourceProfile.id,
+              reason: "source-window-error"
+            })
+          );
+          await refreshRunningProfiles();
+          return;
         }
 
-        try {
-          await setProfileWindowBoundsWithTimeout(
-            profile,
-            placement.bounds,
-            "同步布局"
-          );
-          const updatedWindows = await listProfileWindowsWithTimeout(
-            profile,
-            "确认同步布局"
-          );
-          if (
-            !updatedWindows[0] ||
-            !windowMatchesBounds(updatedWindows[0], placement.bounds)
-          ) {
-            unchangedCount += 1;
+        for (const profile of freshRunningSelectedProfiles) {
+          if (profile.id === sourceProfile.id) {
             continue;
           }
-          syncedCount += 1;
-          syncedProfiles.push(profile);
-        } catch (error) {
-          failedCount += 1;
-          firstFailedError ??= error;
-        }
-      }
 
-      if (syncedCount > 0) {
-        const messageParts = [`已同步布局到 ${syncedCount} 个账号`];
-        if (noWindowCount > 0) {
-          messageParts.push(`${noWindowCount} 个没有可同步窗口`);
+          try {
+            const windows = await listProfileWindowsWithTimeout(
+              profile,
+              "检查同步窗口"
+            );
+            registryInputs.push({
+              profileId: profile.id,
+              profileName: profile.name,
+              windows
+            });
+          } catch (error) {
+            firstFailedError ??= error;
+            registryInputs.push({
+              profileId: profile.id,
+              profileName: profile.name,
+              windows: [],
+              windowError: errorMessage(error)
+            });
+          }
         }
-        if (minimizedCount > 0) {
-          messageParts.push(`${minimizedCount} 个窗口已最小化`);
+
+        windowRegistry = buildPrimaryWindowRegistry(registryInputs);
+        syncPlan = buildWindowLayoutSyncPlan(windowRegistry, sourceProfile.id);
+
+        let syncedCount = 0;
+        const noWindowCount = syncPlan.noWindowCount;
+        const minimizedCount = syncPlan.minimizedCount;
+        let unchangedCount = 0;
+        let failedCount = syncPlan.failedCount;
+        let focusFailedCount = 0;
+        const syncedProfiles: ChromeProfile[] = [];
+        const profileById = new Map(
+          freshRunningSelectedProfiles.map((profile) => [profile.id, profile])
+        );
+
+        for (const placement of syncPlan.placements) {
+          const profile = profileById.get(placement.profileId);
+          if (!profile) {
+            continue;
+          }
+
+          try {
+            await setProfileWindowBoundsWithTimeout(
+              profile,
+              placement.bounds,
+              "同步布局"
+            );
+            const updatedWindows = await listProfileWindowsWithTimeout(
+              profile,
+              "确认同步布局"
+            );
+            if (
+              !updatedWindows[0] ||
+              !windowMatchesBounds(updatedWindows[0], placement.bounds)
+            ) {
+              unchangedCount += 1;
+              continue;
+            }
+            syncedCount += 1;
+            syncedProfiles.push(profile);
+          } catch (error) {
+            failedCount += 1;
+            firstFailedError ??= error;
+          }
         }
-        if (unchangedCount > 0) {
-          messageParts.push(`${unchangedCount} 个未生效`);
+
+        if (syncedCount > 0) {
+          const messageParts = [`已同步布局到 ${syncedCount} 个账号`];
+          if (noWindowCount > 0) {
+            messageParts.push(`${noWindowCount} 个没有可同步窗口`);
+          }
+          if (minimizedCount > 0) {
+            messageParts.push(`${minimizedCount} 个窗口已最小化`);
+          }
+          if (unchangedCount > 0) {
+            messageParts.push(`${unchangedCount} 个未生效`);
+          }
+          if (failedCount > 0) {
+            messageParts.push(`${failedCount} 个失败`);
+          }
+          const focusResult = await focusProfileWindowsInOrder([
+            ...syncedProfiles,
+            sourceProfile
+          ]);
+          if (focusResult.failedCount > 0) {
+            focusFailedCount = focusResult.failedCount;
+            messageParts.push(`${focusResult.failedCount} 个未能前置`);
+          }
+          setMessage(messageParts.join("，"));
+        } else if (firstFailedError) {
+          setMessage(windowAutomationErrorMessage(firstFailedError));
+        } else {
+          const messageParts = [
+            unchangedCount > 0 ? "没有窗口实际同步" : "没有可同步的目标窗口"
+          ];
+          if (noWindowCount > 0) {
+            messageParts.push(`${noWindowCount} 个没有可同步窗口`);
+          }
+          if (minimizedCount > 0) {
+            messageParts.push(`${minimizedCount} 个窗口已最小化`);
+          }
+          if (unchangedCount > 0) {
+            messageParts.push(`${unchangedCount} 个未生效`);
+          }
+          setMessage(messageParts.join("，"));
         }
-        if (failedCount > 0) {
-          messageParts.push(`${failedCount} 个失败`);
-        }
-        const focusResult = await focusProfileWindowsInOrder([
-          ...syncedProfiles,
-          sourceProfile
-        ]);
-        if (focusResult.failedCount > 0) {
-          focusFailedCount = focusResult.failedCount;
-          messageParts.push(`${focusResult.failedCount} 个未能前置`);
-        }
-        setMessage(messageParts.join("，"));
-      } else if (firstFailedError) {
-        setMessage(windowAutomationErrorMessage(firstFailedError));
-      } else {
-        const messageParts = [
-          unchangedCount > 0 ? "没有窗口实际同步" : "没有可同步的目标窗口"
-        ];
-        if (noWindowCount > 0) {
-          messageParts.push(`${noWindowCount} 个没有可同步窗口`);
-        }
-        if (minimizedCount > 0) {
-          messageParts.push(`${minimizedCount} 个窗口已最小化`);
-        }
-        if (unchangedCount > 0) {
-          messageParts.push(`${unchangedCount} 个未生效`);
-        }
-        setMessage(messageParts.join("，"));
+        finishWindowOperation(
+          operation,
+          syncedCount > 0 &&
+            unchangedCount === 0 &&
+            failedCount === 0 &&
+            focusFailedCount === 0
+            ? "succeeded"
+            : "failed",
+          buildSyncLayoutWindowOperationSummary({
+            profileCount: freshRunningSelectedProfiles.length,
+            sourceProfileId: sourceProfile.id,
+            syncedCount,
+            noWindowCount,
+            minimizedCount,
+            unchangedCount,
+            failedCount,
+            focusFailedCount
+          })
+        );
+        await refreshRunningProfiles();
+      } catch (error) {
+        setMessage(windowAutomationErrorMessage(error));
+        finishWindowOperation(
+          operation,
+          "failed",
+          buildSyncLayoutWindowOperationSummary({
+            profileCount: freshRunningSelectedProfiles.length,
+            sourceProfileId: sourceProfile.id,
+            reason: "sync-layout-error"
+          })
+        );
+        await refreshRunningProfiles();
+      } finally {
+        setWindowSyncing(false);
       }
-      finishWindowOperation(
-        operation,
-        syncedCount > 0 &&
-          unchangedCount === 0 &&
-          failedCount === 0 &&
-          focusFailedCount === 0
-          ? "succeeded"
-          : "failed",
-        buildSyncLayoutWindowOperationSummary({
-          profileCount: freshRunningSelectedProfiles.length,
-          sourceProfileId: sourceProfile.id,
-          syncedCount,
-          noWindowCount,
-          minimizedCount,
-          unchangedCount,
-          failedCount,
-          focusFailedCount
-        })
-      );
-      await refreshRunningProfiles();
-    } catch (error) {
-      setMessage(windowAutomationErrorMessage(error));
-      finishWindowOperation(
-        operation,
-        "failed",
-        buildSyncLayoutWindowOperationSummary({
-          profileCount: freshRunningSelectedProfiles.length,
-          sourceProfileId: sourceProfile.id,
-          reason: "sync-layout-error"
-        })
-      );
-      await refreshRunningProfiles();
-    } finally {
-      setWindowSyncing(false);
-    }
+    });
   }
 
   function stopBulkOpenQueue() {
@@ -2780,6 +2894,7 @@ function App() {
             windowSyncing,
             windowFocusing,
             windowQuitting,
+            windowRestarting,
             runningProfileIds,
             layoutSourceProfileId: resolvedLayoutSourceProfileId,
             onLayoutSourceProfileChange: setLayoutSourceProfileId,
@@ -2787,7 +2902,8 @@ function App() {
             onTileWindows: () => void tileWindowsForSelectedProfiles(),
             onSyncLayout: () => void syncLayoutForSelectedProfiles(),
             onFocusWindows: () => void focusWindowsForSelectedProfiles(),
-            onQuitWindows: () => void quitBrowsersForSelectedProfiles()
+            onQuitWindows: () => void quitBrowsersForSelectedProfiles(),
+            onRestartWindows: () => void restartBrowsersForSelectedProfiles()
           }}
           activity={{
             browserOperations,
