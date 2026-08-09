@@ -4,9 +4,13 @@ import type { BrowserLaunchEvent } from "../browserSessionLaunch";
 import type { BrowserOperation } from "../browserOperations";
 import { LaunchEventList } from "../browser/launch/LaunchEventList";
 import { OperationList } from "../browser/operations/OperationList";
+import { WindowRegistryPanel } from "../browser/windows/WindowRegistryPanel";
 import { UrlShortcutGroup } from "../url-library/UrlShortcutGroup";
 import type { ChromeProfile } from "../types";
-import type { WindowLayoutPreset } from "../browserWindows";
+import type {
+  BrowserWindowRegistryEntry,
+  WindowLayoutPreset
+} from "../browserWindows";
 
 interface BulkActionBarProps {
   selection: BulkActionSelectionProps;
@@ -68,6 +72,8 @@ interface BulkActionWindowProps {
 interface BulkActionActivityProps {
   browserOperations: BrowserOperation[];
   launchEvents: BrowserLaunchEvent[];
+  windowRegistryEntries?: BrowserWindowRegistryEntry[];
+  windowRegistryCheckedAt?: string | null;
 }
 
 export function BulkActionBar({
@@ -113,7 +119,12 @@ export function BulkActionBar({
     onQuitWindows,
     onRestartWindows
   } = windowActions;
-  const { browserOperations, launchEvents } = activity;
+  const {
+    browserOperations,
+    launchEvents,
+    windowRegistryEntries = [],
+    windowRegistryCheckedAt = null
+  } = activity;
   const [expanded, setExpanded] = useState(false);
   const visibleRecentUrls = recentUrls.filter((url) => !favoriteUrls.includes(url));
   const hasBulkUrl = bulkUrl.trim().length > 0;
@@ -365,6 +376,10 @@ export function BulkActionBar({
           </div>
           <OperationList operations={browserOperations} />
           <LaunchEventList events={launchEvents.slice(0, 6)} />
+          <WindowRegistryPanel
+            entries={windowRegistryEntries}
+            checkedAt={windowRegistryCheckedAt}
+          />
           <div className="bulk-more-row">
             <button
               className="secondary-button compact"
