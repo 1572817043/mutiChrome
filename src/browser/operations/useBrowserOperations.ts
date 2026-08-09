@@ -217,6 +217,15 @@ export function useBrowserOperations({
     [rootPath, runBrowserCommandWithTimeout]
   );
 
+  const quitProfileBrowserWithTimeout = useCallback(
+    (profile: ChromeProfile) =>
+      runBrowserCommandWithTimeout(
+        profileApi.quitProfileBrowser(rootPath, profile.id),
+        `${profile.name} 关闭运行账号`
+      ),
+    [rootPath, runBrowserCommandWithTimeout]
+  );
+
   const setProfileWindowBoundsWithTimeout = useCallback(
     (profile: ChromeProfile, bounds: WindowBounds, actionLabel: string) => {
       return runBrowserCommandWithTimeout(
@@ -256,6 +265,7 @@ export function useBrowserOperations({
     runBrowserCommandWithTimeout,
     listProfileWindowsWithTimeout,
     focusProfileWindowWithTimeout,
+    quitProfileBrowserWithTimeout,
     setProfileWindowBoundsWithTimeout,
     canStartBrowserOperationForProfiles
   };

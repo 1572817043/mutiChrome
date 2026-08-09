@@ -49,6 +49,7 @@ interface BulkActionWindowProps {
   windowTiling: boolean;
   windowSyncing: boolean;
   windowFocusing: boolean;
+  windowQuitting: boolean;
   runningProfileIds: string[];
   layoutSourceProfileId: string;
   onLayoutSourceProfileChange: (value: string) => void;
@@ -56,6 +57,7 @@ interface BulkActionWindowProps {
   onTileWindows: () => void;
   onSyncLayout: () => void;
   onFocusWindows: () => void;
+  onQuitWindows: () => void;
 }
 
 interface BulkActionActivityProps {
@@ -92,13 +94,15 @@ export function BulkActionBar({
     windowTiling,
     windowSyncing,
     windowFocusing,
+    windowQuitting,
     runningProfileIds,
     layoutSourceProfileId,
     onLayoutSourceProfileChange,
     onInspectWindows,
     onTileWindows,
     onSyncLayout,
-    onFocusWindows
+    onFocusWindows,
+    onQuitWindows
   } = windowActions;
   const { browserOperations, launchEvents } = activity;
   const [expanded, setExpanded] = useState(false);
@@ -113,7 +117,10 @@ export function BulkActionBar({
     windowInspecting ||
     windowTiling ||
     windowSyncing ||
-    windowFocusing;
+    windowFocusing ||
+    windowQuitting;
+  const quitWindowDisabled =
+    runningSelectedProfiles.length === 0 || windowActionDisabled;
   const selectedActionDisabled = selectedCount === 0 || bulkOpenRunning;
   const openButtonLabel = bulkOpenRunning
     ? "打开中"
@@ -311,6 +318,14 @@ export function BulkActionBar({
               onClick={onSyncLayout}
             >
               {windowSyncing ? "同步中" : "同步布局"}
+            </button>
+            <button
+              className="secondary-button compact danger"
+              type="button"
+              disabled={quitWindowDisabled}
+              onClick={onQuitWindows}
+            >
+              {windowQuitting ? "关闭中" : "关闭运行账号"}
             </button>
           </div>
           <OperationList operations={browserOperations} />

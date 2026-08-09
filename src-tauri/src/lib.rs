@@ -119,6 +119,7 @@ pub fn run() {
             list_runtime_tabs,
             navigate_runtime_tab,
             focus_profile_window,
+            quit_profile_browser,
             list_profile_windows,
             set_profile_window_bounds,
             delete_profile_data,
@@ -404,6 +405,32 @@ fn focus_profile_window(root_path: String, profile_id: String) -> Result<(), Str
 }
 
 #[tauri::command]
+fn quit_profile_browser(root_path: String, profile_id: String) -> Result<(), String> {
+    let root_path = PathBuf::from(root_path);
+    let process_lines = read_process_lines()?;
+    let process = strict_profile_process_for(
+        &root_path,
+        &profile_id,
+        process_lines.iter().map(String::as_str),
+    )?;
+    let command = quit_profile_process_plan_if_matches(
+        &root_path,
+        &profile_id,
+        process.pid,
+        read_process_lines()?.iter().map(String::as_str),
+    )?;
+    let status = Command::new(&command.program)
+        .args(&command.args)
+        .status()
+        .map_err(|error| error.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("退出账号浏览器失败：{}", profile_id))
+    }
+}
+
+#[tauri::command]
 fn list_profile_windows(
     root_path: String,
     profile_id: String,
@@ -439,14 +466,114 @@ fn running_profile_process_for(
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let Some(process) = running_profile_processes_from_processes(root_path, stdout.lines())
+    find_running_profile_process(root_path, profile_id, stdout.lines())
+}
+
+fn find_running_profile_process<'a, I>(
+    root_path: &Path,
+    profile_id: &str,
+    process_lines: I,
+) -> Result<RunningProfileProcess, String>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    running_profile_processes_from_processes(root_path, process_lines)
         .into_iter()
         .find(|process| process.profile_id == profile_id)
-    else {
-        return Err("没有找到这个账号的运行窗口，请先打开账号".to_string());
-    };
+        .ok_or_else(|| "没有找到这个账号的运行窗口，请先打开账号".to_string())
+}
 
-    Ok(process)
+fn quit_profile_process_plan(pid: u32) -> LaunchCommand {
+    LaunchCommand {
+        program: PathBuf::from("/bin/kill"),
+        args: vec!["-TERM".to_string(), pid.to_string()],
+    }
+}
+
+fn read_process_lines() -> Result<Vec<String>, String> {
+    let output = Command::new("ps")
+        .args(["-axo", "pid=,command="])
+        .output()
+        .map_err(|error| error.to_string())?;
+
+    if !output.status.success() {
+        return Err("读取 Chrome 运行状态失败".to_string());
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect())
+}
+
+fn strict_profile_process_for<'a, I>(
+    root_path: &Path,
+    profile_id: &str,
+    process_lines: I,
+) -> Result<RunningProfileProcess, String>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let expected_user_data_dir = clean_path_text(
+        &root_path
+            .join("profiles")
+            .join(profile_id)
+            .to_string_lossy(),
+    );
+
+    process_lines
+        .into_iter()
+        .filter_map(split_pid_and_command)
+        .find_map(|(pid, command)| {
+            if !is_strict_main_chrome_process_for_quit(command) {
+                return None;
+            }
+            let user_data_dir = extract_user_data_dir(command)?;
+            if clean_path_text(&user_data_dir) != expected_user_data_dir {
+                return None;
+            }
+            Some(RunningProfileProcess {
+                profile_id: profile_id.to_string(),
+                pid,
+                debug_port: extract_remote_debugging_port(command),
+            })
+        })
+        .ok_or_else(|| "没有找到这个账号的匹配运行进程，已取消退出".to_string())
+}
+
+fn quit_profile_process_plan_if_matches<'a, I>(
+    root_path: &Path,
+    profile_id: &str,
+    expected_pid: u32,
+    process_lines: I,
+) -> Result<LaunchCommand, String>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let process = strict_profile_process_for(root_path, profile_id, process_lines)?;
+    if process.pid != expected_pid {
+        return Err("没有找到这个账号的匹配运行进程，已取消退出".to_string());
+    }
+    Ok(quit_profile_process_plan(process.pid))
+}
+
+fn is_strict_main_chrome_process_for_quit(command: &str) -> bool {
+    if !command.contains("--user-data-dir")
+        || command.contains("Google Chrome Helper")
+        || command.contains("--type=")
+    {
+        return false;
+    }
+
+    let Some(command_prefix) = command.split("--user-data-dir").next() else {
+        return false;
+    };
+    let executable = command_prefix
+        .split(" --")
+        .next()
+        .unwrap_or(command_prefix)
+        .trim();
+    executable.contains("Google Chrome.app/Contents/MacOS/Google Chrome")
 }
 
 #[tauri::command]
@@ -1326,6 +1453,94 @@ mod tests {
                     debug_port: None
                 }
             ]
+        );
+    }
+
+    #[test]
+    fn quit_profile_process_plan_targets_only_matching_profile_pid() {
+        let root = Path::new("/Users/a0000/MultiChromeProfiles");
+        let lines = [
+            "  1201 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/Users/a0000/MultiChromeProfiles/profiles/account-001 --no-first-run",
+            "  1301 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/Users/a0000/MultiChromeProfiles/profiles/account-002 --no-first-run",
+        ];
+        let process = running_profile_processes_from_processes(root, lines)
+            .into_iter()
+            .find(|process| process.profile_id == "account-002")
+            .expect("matching profile process");
+
+        assert_eq!(quit_profile_process_plan(process.pid), LaunchCommand {
+            program: PathBuf::from("/bin/kill"),
+            args: vec!["-TERM".to_string(), "1301".to_string()]
+        });
+    }
+
+    #[test]
+    fn strict_quit_match_requires_exact_profile_user_data_dir() {
+        let root = Path::new("/root");
+        let lines = [
+            "  1201 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/root/profiles/account-001/nested --no-first-run",
+            "  1202 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/root/profiles/account-001-copy --no-first-run",
+            "  1203 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/root/profiles/account-001 --no-first-run",
+        ];
+
+        assert_eq!(
+            strict_profile_process_for(root, "account-001", lines).unwrap(),
+            RunningProfileProcess {
+                profile_id: "account-001".to_string(),
+                pid: 1203,
+                debug_port: None
+            }
+        );
+    }
+
+    #[test]
+    fn strict_quit_match_rejects_fake_command_with_exact_user_data_dir() {
+        let root = Path::new("/root");
+        let lines = [
+            "  1201 /usr/bin/python fake Google Chrome --user-data-dir=/root/profiles/account-001",
+            "  1202 /tmp/Fake.app/Contents/MacOS/FakeChrome --user-data-dir=/root/profiles/account-001",
+            "  1203 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/root/profiles/account-001 --no-first-run",
+        ];
+
+        assert_eq!(
+            strict_profile_process_for(root, "account-001", lines).unwrap().pid,
+            1203
+        );
+        assert!(!is_strict_main_chrome_process_for_quit(
+            lines[0].split_once(' ').unwrap().1
+        ));
+        assert!(!is_strict_main_chrome_process_for_quit(
+            lines[1].split_once(' ').unwrap().1
+        ));
+        assert!(is_strict_main_chrome_process_for_quit(
+            lines[2].split_once(' ').unwrap().1
+        ));
+    }
+
+    #[test]
+    fn quit_plan_rechecks_pid_and_strict_profile_before_term() {
+        let root = Path::new("/root");
+        let changed_lines = [
+            "  1203 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/root/profiles/other-account --no-first-run",
+        ];
+
+        assert_eq!(
+            quit_profile_process_plan_if_matches(root, "account-001", 1203, changed_lines)
+                .unwrap_err(),
+            "没有找到这个账号的匹配运行进程，已取消退出"
+        );
+    }
+
+    #[test]
+    fn find_running_profile_process_reports_missing_profile() {
+        let root = Path::new("/Users/a0000/MultiChromeProfiles");
+        let lines = [
+            "  1201 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/Users/a0000/MultiChromeProfiles/profiles/account-001 --no-first-run",
+        ];
+
+        assert_eq!(
+            find_running_profile_process(root, "account-999", lines).unwrap_err(),
+            "没有找到这个账号的运行窗口，请先打开账号"
         );
     }
 

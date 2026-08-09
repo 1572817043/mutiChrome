@@ -200,4 +200,30 @@ describe("OperationList", () => {
       within(recentList).getByText("结果：已同步 1 个，失败 1 个，无窗口 1 个")
     ).toBeTruthy();
   });
+
+  test("关闭运行账号展示已关闭和失败数量", () => {
+    render(
+      <OperationList
+        operations={[
+          {
+            ...operation("op-quit", "failed", {
+              kind: "window",
+              action: "关闭运行账号"
+            }),
+            type: "window-action",
+            summary: {
+              profileCount: 3,
+              closedCount: 2,
+              failedCount: 1
+            }
+          }
+        ]}
+      />
+    );
+
+    const recentList = screen.getByRole("list", { name: "最近操作记录" });
+    expect(
+      within(recentList).getByText("结果：已关闭 2 个，失败 1 个")
+    ).toBeTruthy();
+  });
 });

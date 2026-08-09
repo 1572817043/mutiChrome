@@ -39,6 +39,7 @@ function createBulkActionBarProps(overrides: BulkActionBarOverrides = {}) {
     onTileWindows: vi.fn(),
     onSyncLayout: vi.fn(),
     onFocusWindows: vi.fn(),
+    onQuitWindows: vi.fn(),
     onStopOpenQueue: vi.fn(),
     onRequestDelete: vi.fn(),
     onClear: vi.fn()
@@ -81,6 +82,7 @@ function createBulkActionBarProps(overrides: BulkActionBarOverrides = {}) {
         windowTiling: false,
         windowSyncing: false,
         windowFocusing: false,
+        windowQuitting: false,
         runningProfileIds: [],
         layoutSourceProfileId: "",
         onLayoutSourceProfileChange: handlers.onLayoutSourceProfileChange,
@@ -88,6 +90,7 @@ function createBulkActionBarProps(overrides: BulkActionBarOverrides = {}) {
         onTileWindows: handlers.onTileWindows,
         onSyncLayout: handlers.onSyncLayout,
         onFocusWindows: handlers.onFocusWindows,
+        onQuitWindows: handlers.onQuitWindows,
         ...overrides.windowActions
       },
       activity: {
@@ -158,6 +161,38 @@ test("批量栏保留打开、重试、停止和更多操作入口", () => {
   expect(handlers.onInspectWindows).toHaveBeenCalledTimes(1);
   expect(handlers.onTileWindows).toHaveBeenCalledTimes(1);
   expect(handlers.onRequestDelete).toHaveBeenCalledTimes(1);
+});
+
+test("批量栏只允许关闭选中的运行账号", () => {
+  const { handlers, props } = createBulkActionBarProps({
+    selection: {
+      selectedCount: 2,
+      selectedProfiles: [profile("account-001", "主号"), profile("account-002", "小号")]
+    },
+    windowActions: {
+      runningProfileIds: ["account-001"]
+    }
+  });
+
+  render(<BulkActionBar {...props} />);
+  fireEvent.click(screen.getByRole("button", { name: "更多操作" }));
+
+  const quitButton = screen.getByRole("button", { name: "关闭运行账号" });
+  expect((quitButton as HTMLButtonElement).disabled).toBe(false);
+  fireEvent.click(quitButton);
+  expect(handlers.onQuitWindows).toHaveBeenCalledTimes(1);
+
+  const noRunningProps = createBulkActionBarProps({
+    selection: props.selection,
+    windowActions: {
+      runningProfileIds: []
+    }
+  }).props;
+  const { rerender } = render(<BulkActionBar {...noRunningProps} />);
+  fireEvent.click(screen.getAllByRole("button", { name: "更多操作" })[1]);
+  expect(
+    (screen.getAllByRole("button", { name: "关闭运行账号" })[1] as HTMLButtonElement).disabled
+  ).toBe(true);
 });
 
 test("批量栏会说明未选择账号和空网址会打开新标签", () => {

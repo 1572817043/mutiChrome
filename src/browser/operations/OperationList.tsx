@@ -224,6 +224,7 @@ function operationWindowSummaryLabel(summary: unknown): string {
     windowSummaryCountLabel(candidate.focusedCount, "已前置"),
     windowSummaryCountLabel(candidate.tiledCount, "已平铺"),
     windowSummaryCountLabel(candidate.syncedCount, "已同步"),
+    windowSummaryCountLabel(candidate.closedCount, "已关闭"),
     windowSummaryCountLabel(candidate.failedCount, "失败"),
     windowSummaryCountLabel(candidate.noWindowCount, "无窗口"),
     windowSummaryCountLabel(candidate.minimizedCount, "最小化"),
