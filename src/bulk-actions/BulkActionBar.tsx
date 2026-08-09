@@ -6,6 +6,7 @@ import { LaunchEventList } from "../browser/launch/LaunchEventList";
 import { OperationList } from "../browser/operations/OperationList";
 import { UrlShortcutGroup } from "../url-library/UrlShortcutGroup";
 import type { ChromeProfile } from "../types";
+import type { WindowLayoutPreset } from "../browserWindows";
 
 interface BulkActionBarProps {
   selection: BulkActionSelectionProps;
@@ -52,7 +53,9 @@ interface BulkActionWindowProps {
   windowQuitting: boolean;
   windowRestarting: boolean;
   runningProfileIds: string[];
+  tileLayoutPreset: WindowLayoutPreset;
   layoutSourceProfileId: string;
+  onTileLayoutPresetChange: (value: WindowLayoutPreset) => void;
   onLayoutSourceProfileChange: (value: string) => void;
   onInspectWindows: () => void;
   onTileWindows: () => void;
@@ -99,7 +102,9 @@ export function BulkActionBar({
     windowQuitting,
     windowRestarting,
     runningProfileIds,
+    tileLayoutPreset,
     layoutSourceProfileId,
+    onTileLayoutPresetChange,
     onLayoutSourceProfileChange,
     onInspectWindows,
     onTileWindows,
@@ -299,6 +304,21 @@ export function BulkActionBar({
               <LayoutGrid size={15} />
               {windowTiling ? "平铺中" : "平铺窗口"}
             </button>
+            <label className="bulk-source-control">
+              <span>布局</span>
+              <select
+                aria-label="布局"
+                value={tileLayoutPreset}
+                disabled={windowActionDisabled}
+                onChange={(event) =>
+                  onTileLayoutPresetChange(event.target.value as WindowLayoutPreset)
+                }
+              >
+                <option value="grid">自动网格</option>
+                <option value="two-columns">双列</option>
+                <option value="left-main">左主右辅</option>
+              </select>
+            </label>
             <label className="bulk-source-control">
               <span>主账号</span>
               <select

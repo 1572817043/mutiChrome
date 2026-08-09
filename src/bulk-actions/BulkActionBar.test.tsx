@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { expect, test, vi } from "vitest";
 import type { ChromeProfile } from "../types";
+import type { WindowLayoutPreset } from "../browserWindows";
 import { BatchDeleteConfirmDialog } from "./BatchDeleteConfirmDialog";
 import { BulkActionBar } from "./BulkActionBar";
 
@@ -30,6 +31,7 @@ function createBulkActionBarProps(overrides: BulkActionBarOverrides = {}) {
     onBulkUrlChange: vi.fn(),
     onBulkOpenIntervalChange: vi.fn(),
     onLayoutSourceProfileChange: vi.fn(),
+    onTileLayoutPresetChange: vi.fn(),
     onAppendTags: vi.fn(),
     onAddFavoriteUrl: vi.fn(),
     onRemoveFavoriteUrl: vi.fn(),
@@ -87,7 +89,9 @@ function createBulkActionBarProps(overrides: BulkActionBarOverrides = {}) {
         windowRestarting: false,
         runningProfileIds: [],
         layoutSourceProfileId: "",
+        tileLayoutPreset: "grid" as WindowLayoutPreset,
         onLayoutSourceProfileChange: handlers.onLayoutSourceProfileChange,
+        onTileLayoutPresetChange: handlers.onTileLayoutPresetChange,
         onInspectWindows: handlers.onInspectWindows,
         onTileWindows: handlers.onTileWindows,
         onSyncLayout: handlers.onSyncLayout,
@@ -229,6 +233,35 @@ test("批量栏只允许重启选中的运行账号，并在窗口动作冲突�
   expect(
     (screen.getAllByRole("button", { name: "重启运行账号" })[1] as HTMLButtonElement).disabled
   ).toBe(true);
+});
+
+test("批量栏展示布局选择并在窗口动作冲突时禁用", () => {
+  const { handlers, props } = createBulkActionBarProps({
+    selection: {
+      selectedCount: 2,
+      selectedProfiles: [profile("account-001", "主号"), profile("account-002", "小号")]
+    },
+    windowActions: { runningProfileIds: ["account-001"] }
+  });
+
+  render(<BulkActionBar {...props} />);
+  fireEvent.click(screen.getByRole("button", { name: "更多操作" }));
+
+  const preset = screen.getByLabelText("布局") as HTMLSelectElement;
+  expect(preset.value).toBe("grid");
+  expect(screen.getByRole("option", { name: "自动网格" })).toBeTruthy();
+  expect(screen.getByRole("option", { name: "双列" })).toBeTruthy();
+  expect(screen.getByRole("option", { name: "左主右辅" })).toBeTruthy();
+  fireEvent.change(preset, { target: { value: "left-main" } });
+  expect(handlers.onTileLayoutPresetChange).toHaveBeenCalledWith("left-main");
+
+  const { props: conflictProps } = createBulkActionBarProps({
+    selection: props.selection,
+    windowActions: { runningProfileIds: ["account-001"], windowQuitting: true }
+  });
+  render(<BulkActionBar {...conflictProps} />);
+  fireEvent.click(screen.getAllByRole("button", { name: "更多操作" })[1]);
+  expect((screen.getAllByLabelText("布局")[1] as HTMLSelectElement).disabled).toBe(true);
 });
 
 test("批量栏会说明未选择账号和空网址会打开新标签", () => {
