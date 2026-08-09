@@ -69,6 +69,7 @@ import {
   type BrowserWindowRegistryInput,
   type WindowLayoutPreset
 } from "./browserWindows";
+import { executeWindowSyncPlan } from "./browser/windows/windowSyncController";
 import {
   cloneProfileForDraft,
   createProfile,
@@ -2550,48 +2551,46 @@ function App() {
 
         windowRegistry = buildPrimaryWindowRegistry(registryInputs);
         syncPlan = buildWindowLayoutSyncPlan(windowRegistry, sourceProfile.id);
-
-        let syncedCount = 0;
-        const noWindowCount = syncPlan.noWindowCount;
-        const minimizedCount = syncPlan.minimizedCount;
-        let unchangedCount = 0;
-        let failedCount = syncPlan.failedCount;
-        let focusFailedCount = 0;
-        const syncedProfiles: ChromeProfile[] = [];
         const profileById = new Map(
           freshRunningSelectedProfiles.map((profile) => [profile.id, profile])
         );
 
-        for (const placement of syncPlan.placements) {
-          const profile = profileById.get(placement.profileId);
-          if (!profile) {
-            continue;
-          }
-
-          try {
-            await setProfileWindowBoundsWithTimeout(
-              profile,
-              placement.bounds,
-              "同步布局"
-            );
-            const updatedWindows = await listProfileWindowsWithTimeout(
-              profile,
-              "确认同步布局"
-            );
-            if (
-              !updatedWindows[0] ||
-              !windowMatchesBounds(updatedWindows[0], placement.bounds)
-            ) {
-              unchangedCount += 1;
-              continue;
+        const syncResult = await executeWindowSyncPlan(
+          syncPlan,
+          {
+            setBounds: (profileId, bounds) => {
+              const profile = profileById.get(profileId);
+              if (!profile) {
+                return Promise.reject(
+                  new Error(`同步目标账号不存在：${profileId}`)
+                );
+              }
+              return setProfileWindowBoundsWithTimeout(profile, bounds, "同步布局");
+            },
+            readWindows: (profileId) => {
+              const profile = profileById.get(profileId);
+              if (!profile) {
+                return Promise.reject(
+                  new Error(`同步目标账号不存在：${profileId}`)
+                );
+              }
+              return listProfileWindowsWithTimeout(profile, "确认同步布局");
             }
-            syncedCount += 1;
-            syncedProfiles.push(profile);
-          } catch (error) {
-            failedCount += 1;
-            firstFailedError ??= error;
-          }
-        }
+          },
+          { firstFailedError }
+        );
+        const {
+          syncedCount,
+          noWindowCount,
+          minimizedCount,
+          unchangedCount,
+          failedCount,
+          firstFailedError: syncFirstFailedError
+        } = syncResult;
+        let focusFailedCount = 0;
+        const syncedProfiles = syncResult.syncedProfileIds
+          .map((profileId) => profileById.get(profileId))
+          .filter((profile): profile is ChromeProfile => Boolean(profile));
 
         if (syncedCount > 0) {
           const messageParts = [`已同步布局到 ${syncedCount} 个账号`];
@@ -2616,8 +2615,8 @@ function App() {
             messageParts.push(`${focusResult.failedCount} 个未能前置`);
           }
           setMessage(messageParts.join("，"));
-        } else if (firstFailedError) {
-          setMessage(windowAutomationErrorMessage(firstFailedError));
+        } else if (syncFirstFailedError) {
+          setMessage(windowAutomationErrorMessage(syncFirstFailedError));
         } else {
           const messageParts = [
             unchangedCount > 0 ? "没有窗口实际同步" : "没有可同步的目标窗口"
