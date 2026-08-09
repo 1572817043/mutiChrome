@@ -58,7 +58,7 @@ V4.1 已完成同步布局接入窗口注册表：PR #3 `https://github.com/1572
 
 V4.3 已完成窗口操作 summary 标准化：PR #4 `https://github.com/1572817043/mutiChrome/pull/4`，commit `ca17053feedf0abf3cd8cb1bdcdfb8811a1c2543`。本轮标准化检查窗口、平铺窗口、同步布局的 operation summary；新增 `WindowOperationSummary`、inspect/tile/sync-layout summary builder、formatter 和 type guard，标准 summary 带 `summaryType: "window-operation"`；`OperationList` 优先展示标准窗口 summary，旧 summary fallback 保留；`App.tsx` 仅替换三类窗口操作 summary 写入，未改 toast 文案、operation status、窗口执行流程或 Rust。Claude 改代码前反证审查有效；提交前 diff 红队审查有效，采纳“检查窗口失败”detail、容量超限 `skippedCount` 补算 `noWindowCount`、`isWindowOperationSummary` action/可选字段类型校验、reason/label 分支防御处理和 tile `unchangedCount` 测试。阶段验证执行 `rtk npm test -- --run src/browserOperations.test.ts`、`rtk npm test -- --run src/browser/operations/OperationList.test.tsx`、`rtk npm test -- --run src/App.test.tsx -t "检查窗口|平铺窗口|同步布局|布局同步"`、`rtk npm test`、`rtk npm run build`、`rtk cargo test --manifest-path src-tauri/Cargo.toml`、`rtk git diff --check`：全部通过。本轮未做 macOS 辅助功能实机验证，因为未改底层 AX/Rust 窗口 API、坐标换算、bounds 写入/读回或新增窗口入口；按窗口类 PR 验证规则，本轮实机验证可选。
 
-V4.2 路线决策：当前 main commit 为 `55b5561a02e5e6a5b3e7011f39c45c466da26dd8`；V4.1 已完成同步布局接入窗口注册表，V4.3 已完成窗口 operation summary 标准化。重新评估后，V4.2 布局预设暂缓，不实现。理由是当前 `grid` 已够 MVP 使用，2 窗口场景天然就是左右分屏，同步布局已经覆盖“手动摆出形状后复用”的真实需求；如果 V4.2 加 UI，会增加批量栏复杂度；如果只做纯模型，短期用户价值不足。后续只有真实使用证明 `grid` 不够时，再重新评估 V4.2；若未来要做，优先只做轻量“本次 preset”，不持久化、不做复杂 UI、不做多屏、比例或拖拽布局。
+V4.2 已重新评估并完成轻量布局预设第一刀：分支 `codex/window-layout-presets-v42`，PR `https://github.com/1572817043/mutiChrome/pull/46`，commit `4544c65`。本轮只做“本次平铺 preset”，不持久化、不做复杂预设管理 UI、不做多屏、比例拖拽、鼠标键盘同步、标签页同步或群控；未改 Rust/Tauri、macOS Accessibility、窗口 API 或真实执行器。`src/browserWindows.ts` 新增 `WindowLayoutPreset` 和 `buildWindowLayoutPlan`，保留旧 `buildGridWindowLayoutPlan` 作为 grid wrapper；支持 `grid` 自动网格、`two-columns` 双列多行、`left-main` 左主右辅三种布局，容量不足时不生成移动计划，并保留 origin、跳过原因和多窗口账号统计语义。批量栏“更多操作”新增紧凑“布局”select，App 默认 `grid`，平铺窗口消费所选 preset；同步布局不消费 preset。阶段验证通过：`rtk npm test` 为 393 passed，`rtk cargo test --manifest-path src-tauri/Cargo.toml` 为 91 passed，`rtk npm run build` 通过，`rtk npm run tauri:build` 通过，`rtk codesign --verify --deep --strict --verbose=2 src-tauri/target/release/bundle/macos/MultiChrome.app` 通过，`rtk git diff --check` 通过。只读规格审查 PASS；质量审查建议补强 App 测试，让左主右辅测试模拟读回成功并断言“已平铺 2 个窗口”和两次前置调用，已采纳并复审 Ready。`docs/project-manager-handoff.md` 仍是既有未跟踪文件，本轮未触碰。
 
 CDP 控制 spike 已完成：PR #8 `https://github.com/1572817043/mutiChrome/pull/8`，commit `b3cecdcf7e89389f33548814b75ffdc8fcb7167d`。本轮只新增实验目录 `experiments/cdp-control/`，未接入主应用，未修改 `src/`、`src-tauri/`，未新增第三方依赖，只使用 Node 内置 `fetch`、`WebSocket`、`node:test` 等能力。实验结果通过：3 个独立 Chrome profile 可同时绑定不同 `remote debugging port`；CDP 可 `list tabs`、读取 URL/title、navigate、click selector、type text；selector 缺失的 profile 会失败，但不会阻塞其它 profile。实验未访问 X/Galxe/Zealy 或其它真实平台，未处理密码、钱包、签名、私钥、助记词。架构结论：后续群控/自动化主路线可以优先 CDP；macOS Accessibility 继续作为窗口排列/前置能力，不作为网页动作同步主干；未来主应用若要支持 CDP，需要在启动 profile 时分配 `remote debugging port`；已普通方式启动且没有 `remote debugging port` 的 profile，通常不能无损接入 CDP，需要提示用户重新打开 profile；Windows 路线应优先复用 CDP 网页控制逻辑，只在 Chrome 启动路径和窗口管理上做平台适配。本 spike 明确不是产品化群控、不是自动化任务库，不做 X/Galxe/Zealy/真实网站自动化，不做实时鼠标键盘同步，不处理敏感凭据或钱包动作。
 
@@ -388,8 +388,8 @@ Settings PR #17 已完成设置根目录草稿测试整理并进入 PR：分支 
 
 ## 下一步
 
-- 下一步继续真实使用观察，重点看批量关闭/重启运行账号、窗口动作同步锁、最近操作收口和 `lastOpenedAt` 更新时间是否符合实际使用；只处理有复现或用户实测反馈的小问题。若继续 Browser Runtime 产品化，仍优先保持只读和小 PR，不进入导航、click/type、群控或真实平台自动化。
-- 后续窗口路线仍可回到 V4.2：轻量布局预设模型，先只做纯模型和现有按钮可消费的最小接线，不做复杂预设管理 UI。
+- 下一步继续真实使用观察，重点看批量关闭/重启运行账号、窗口动作同步锁、三种平铺布局 preset、最近操作收口和 `lastOpenedAt` 更新时间是否符合实际使用；只处理有复现或用户实测反馈的小问题。若继续 Browser Runtime 产品化，仍优先保持只读和小 PR，不进入导航、click/type、群控或真实平台自动化。
+- V4.2 已完成轻量布局 preset 第一刀；后续不继续扩展复杂预设管理，除非真实使用证明当前三种布局不够。
 - V4.4 再考虑轻量窗口面板，只显示选中账号窗口注册表状态，不做实时控制台。
 - V5 从同步控制器基础开始：先做 `sync-bounds`、dry-run 预览和结果详情；鼠标、键盘、滚动、标签页这类交互同步只作为技术预研，不能直接进入 MVP 主流程。
 - 目录大小/容量占用如果后续确实需要展示，优先做左侧独立统计模块或设置内统计，不回到账号卡片常驻展示。
