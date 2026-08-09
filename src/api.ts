@@ -403,6 +403,12 @@ export const profileApi = {
     return [];
   },
 
+  async quitProfileBrowser(rootPath: string, profileId: string): Promise<void> {
+    if (isTauriRuntime()) {
+      return invoke<void>("quit_profile_browser", { rootPath, profileId });
+    }
+  },
+
   async snapshotBrowserSessions(
     rootPath: string,
     profileIds: string[],

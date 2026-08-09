@@ -241,6 +241,7 @@ function App() {
   const [windowTiling, setWindowTiling] = useState(false);
   const [windowSyncing, setWindowSyncing] = useState(false);
   const [windowFocusing, setWindowFocusing] = useState(false);
+  const [windowQuitting, setWindowQuitting] = useState(false);
   const [layoutSourceProfileId, setLayoutSourceProfileId] = useState("");
   const [openingProjectId, setOpeningProjectId] = useState<string | null>(null);
   const [message, setMessage] = useState("正在初始化...");
@@ -364,6 +365,7 @@ function App() {
     runBrowserCommandWithTimeout,
     listProfileWindowsWithTimeout,
     focusProfileWindowWithTimeout,
+    quitProfileBrowserWithTimeout,
     setProfileWindowBoundsWithTimeout,
     canStartBrowserOperationForProfiles
   } = useBrowserOperations({
@@ -2019,6 +2021,49 @@ function App() {
     }
   }
 
+  async function quitBrowsersForSelectedProfiles() {
+    const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
+    if (freshRunningSelectedProfiles.length === 0) {
+      setMessage("没有选中的运行账号");
+      return;
+    }
+    if (!canStartBrowserOperationForProfiles(freshRunningSelectedProfiles)) {
+      return;
+    }
+
+    const operation = startWindowOperation("关闭运行账号", freshRunningSelectedProfiles);
+    setWindowQuitting(true);
+    try {
+      let closedCount = 0;
+      let failedCount = 0;
+      for (const profile of freshRunningSelectedProfiles) {
+        try {
+          await quitProfileBrowserWithTimeout(profile);
+          closedCount += 1;
+        } catch {
+          failedCount += 1;
+        }
+      }
+      const messageParts = [`已关闭 ${closedCount} 个运行账号`];
+      if (failedCount > 0) {
+        messageParts.push(`${failedCount} 个失败`);
+      }
+      setMessage(messageParts.join("，"));
+      finishWindowOperation(
+        operation,
+        failedCount === 0 ? "succeeded" : "failed",
+        {
+          profileCount: freshRunningSelectedProfiles.length,
+          closedCount,
+          failedCount
+        }
+      );
+      await refreshRunningProfiles();
+    } finally {
+      setWindowQuitting(false);
+    }
+  }
+
   async function tileWindowsForSelectedProfiles() {
     const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
 
@@ -2734,13 +2779,15 @@ function App() {
             windowTiling,
             windowSyncing,
             windowFocusing,
+            windowQuitting,
             runningProfileIds,
             layoutSourceProfileId: resolvedLayoutSourceProfileId,
             onLayoutSourceProfileChange: setLayoutSourceProfileId,
             onInspectWindows: () => void inspectWindowsForSelectedProfiles(),
             onTileWindows: () => void tileWindowsForSelectedProfiles(),
             onSyncLayout: () => void syncLayoutForSelectedProfiles(),
-            onFocusWindows: () => void focusWindowsForSelectedProfiles()
+            onFocusWindows: () => void focusWindowsForSelectedProfiles(),
+            onQuitWindows: () => void quitBrowsersForSelectedProfiles()
           }}
           activity={{
             browserOperations,

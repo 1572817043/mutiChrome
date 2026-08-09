@@ -508,6 +508,85 @@ describe("App launcher layout", () => {
     snapshotSpy.mockRestore();
   });
 
+  test("关闭运行账号只调用选中且运行中的账号并刷新会话", async () => {
+    const user = userEvent.setup();
+    const snapshotSpy = vi
+      .spyOn(profileApi, "snapshotBrowserSessions")
+      .mockResolvedValueOnce([
+        browserSessionSnapshot("account-001", true),
+        browserSessionSnapshot("account-002", false)
+      ])
+      .mockResolvedValueOnce([
+        browserSessionSnapshot("account-001", false),
+        browserSessionSnapshot("account-002", true)
+      ])
+      .mockResolvedValue([
+        browserSessionSnapshot("account-001", false),
+        browserSessionSnapshot("account-002", false)
+      ]);
+    const quitSpy = vi.spyOn(profileApi, "quitProfileBrowser").mockResolvedValue();
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "选择 抽奖号" }));
+    await user.click(screen.getByRole("button", { name: "更多操作" }));
+    await user.click(screen.getByRole("button", { name: "关闭运行账号" }));
+
+    await waitFor(() => {
+      expect(quitSpy).toHaveBeenCalledWith("~/MultiChromeProfiles", "account-002");
+    });
+    expect(quitSpy).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText("已关闭 1 个运行账号")).toBeTruthy();
+    expect(snapshotSpy.mock.calls.length).toBeGreaterThan(1);
+    quitSpy.mockRestore();
+    snapshotSpy.mockRestore();
+  });
+
+  test("关闭运行账号单个失败仍继续关闭其它账号并汇总刷新", async () => {
+    const user = userEvent.setup();
+    const snapshotSpy = vi
+      .spyOn(profileApi, "snapshotBrowserSessions")
+      .mockResolvedValueOnce([
+        browserSessionSnapshot("account-001", true),
+        browserSessionSnapshot("account-002", true)
+      ])
+      .mockResolvedValueOnce([
+        browserSessionSnapshot("account-001", true),
+        browserSessionSnapshot("account-002", true)
+      ])
+      .mockResolvedValue([
+        browserSessionSnapshot("account-001", false),
+        browserSessionSnapshot("account-002", false)
+      ]);
+    const quitSpy = vi
+      .spyOn(profileApi, "quitProfileBrowser")
+      .mockRejectedValueOnce(new Error("退出失败"))
+      .mockResolvedValueOnce();
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "选择 抽奖号" }));
+    await user.click(screen.getByRole("button", { name: "更多操作" }));
+    await user.click(screen.getByRole("button", { name: "关闭运行账号" }));
+
+    await waitFor(() => {
+      expect(quitSpy).toHaveBeenNthCalledWith(
+        1,
+        "~/MultiChromeProfiles",
+        "account-001"
+      );
+      expect(quitSpy).toHaveBeenNthCalledWith(
+        2,
+        "~/MultiChromeProfiles",
+        "account-002"
+      );
+    });
+    expect(await screen.findByText("已关闭 1 个运行账号，1 个失败")).toBeTruthy();
+    expect(snapshotSpy.mock.calls.length).toBeGreaterThan(2);
+    quitSpy.mockRestore();
+    snapshotSpy.mockRestore();
+  });
+
   test("运行状态会轻量动态刷新并移除已退出账号", async () => {
     vi.useFakeTimers();
     const listRunningSpy = vi

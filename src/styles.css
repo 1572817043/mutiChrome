@@ -70,9 +70,14 @@ p {
 }
 
 .sidebar {
+  position: sticky;
+  top: 0;
   display: flex;
-  min-height: 100vh;
+  height: 100vh;
+  max-height: 100vh;
+  min-height: 0;
   flex-direction: column;
+  overflow: auto;
   padding: 20px 16px;
   border-right: 1px solid #d9e5dc;
   background: #edf5ef;
