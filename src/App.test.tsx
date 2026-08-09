@@ -932,6 +932,31 @@ describe("App launcher layout", () => {
     focusSpy.mockRestore();
   });
 
+  test("账号卡片切换到主号会清空窗口状态面板", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(profileApi, "listRunningProfiles").mockResolvedValue(["account-001"]);
+    vi.spyOn(profileApi, "snapshotBrowserSessions").mockResolvedValue([
+      browserSessionSnapshot("account-001", true),
+      browserSessionSnapshot("account-002", false)
+    ]);
+    vi.spyOn(profileApi, "listProfileWindows").mockResolvedValue([
+      { index: 1, title: "Chrome", x: 12, y: 34, width: 1280, height: 720 }
+    ]);
+    const focusSpy = vi.spyOn(profileApi, "focusProfileWindow").mockResolvedValue();
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await openBulkMore(user);
+    await user.click(screen.getByRole("button", { name: "检查窗口" }));
+    expect(await screen.findByText("1280x720 @ 12,34")).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "切换到 主号" }));
+    expect(focusSpy).toHaveBeenCalledWith("~/MultiChromeProfiles", "account-001");
+    expect(await screen.findByText("已切换到 主号")).toBeTruthy();
+    expect(screen.queryByText("1280x720 @ 12,34")).toBeNull();
+    expect(screen.getByText("点击检查窗口读取选中运行账号的窗口状态")).toBeTruthy();
+  });
+
   test("切换窗口失败时会提示 macOS 辅助功能权限", async () => {
     const user = userEvent.setup();
     vi.spyOn(profileApi, "listRunningProfiles").mockResolvedValue(["account-001"]);
@@ -1001,8 +1026,135 @@ describe("App launcher layout", () => {
     expect(listWindowsSpy).toHaveBeenCalledTimes(1);
     expect(listWindowsSpy).toHaveBeenCalledWith("~/MultiChromeProfiles", "account-001");
     expect(await screen.findByText("窗口检查：主号 1 个窗口（1280x720 @ 12,34）")).toBeTruthy();
+    expect(await screen.findByRole("region", { name: "窗口状态" })).toBeTruthy();
+    expect(screen.getByText("可读窗口")).toBeTruthy();
+    expect(screen.getByText("1280x720 @ 12,34")).toBeTruthy();
     vi.mocked(profileApi.listRunningProfiles).mockRestore();
     listWindowsSpy.mockRestore();
+  });
+
+  test("切换选择后会清空窗口状态面板", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(profileApi, "listRunningProfiles").mockResolvedValue(["account-001"]);
+    const listWindowsSpy = vi
+      .spyOn(profileApi, "listProfileWindows")
+      .mockResolvedValue([{ index: 1, title: "Chrome", x: 12, y: 34, width: 1280, height: 720 }]);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await openBulkMore(user);
+    await user.click(screen.getByRole("button", { name: "检查窗口" }));
+    expect(await screen.findByText("1280x720 @ 12,34")).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "选择 抽奖号" }));
+    expect(screen.queryByText("1280x720 @ 12,34")).toBeNull();
+    expect(screen.getByText("点击检查窗口读取选中运行账号的窗口状态")).toBeTruthy();
+    vi.mocked(profileApi.listRunningProfiles).mockRestore();
+    listWindowsSpy.mockRestore();
+  });
+
+  test("检查失败会清空已有窗口状态面板", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(profileApi, "listRunningProfiles").mockResolvedValue(["account-001"]);
+    const listWindowsSpy = vi
+      .spyOn(profileApi, "listProfileWindows")
+      .mockResolvedValueOnce([
+        { index: 1, title: "Chrome", x: 12, y: 34, width: 1280, height: 720 }
+      ])
+      .mockRejectedValueOnce(new Error("检查窗口失败：读取失败"));
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await openBulkMore(user);
+    await user.click(screen.getByRole("button", { name: "检查窗口" }));
+    expect(await screen.findByText("1280x720 @ 12,34")).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "检查窗口" }));
+    expect(await screen.findByText(/窗口操作失败/)).toBeTruthy();
+    expect(screen.queryByText("1280x720 @ 12,34")).toBeNull();
+    expect(screen.getByText("点击检查窗口读取选中运行账号的窗口状态")).toBeTruthy();
+    vi.mocked(profileApi.listRunningProfiles).mockRestore();
+    listWindowsSpy.mockRestore();
+  });
+
+  test("检查时发现没有运行账号会清空已有窗口状态面板", async () => {
+    const user = userEvent.setup();
+    const snapshotSpy = vi
+      .spyOn(profileApi, "snapshotBrowserSessions")
+      .mockResolvedValue([browserSessionSnapshot("account-001", true)]);
+    const listWindowsSpy = vi
+      .spyOn(profileApi, "listProfileWindows")
+      .mockResolvedValue([
+        { index: 1, title: "Chrome", x: 12, y: 34, width: 1280, height: 720 }
+      ]);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await openBulkMore(user);
+    await user.click(screen.getByRole("button", { name: "检查窗口" }));
+    expect(await screen.findByText("1280x720 @ 12,34")).toBeTruthy();
+
+    snapshotSpy.mockResolvedValue([browserSessionSnapshot("account-001", false)]);
+    await user.click(screen.getByRole("button", { name: "检查窗口" }));
+    expect(await screen.findByText("选中的账号没有运行窗口")).toBeTruthy();
+    expect(screen.queryByText("1280x720 @ 12,34")).toBeNull();
+    expect(screen.getByText("点击检查窗口读取选中运行账号的窗口状态")).toBeTruthy();
+    snapshotSpy.mockRestore();
+    listWindowsSpy.mockRestore();
+  });
+
+  test("检查期间切换选择后不会写回旧窗口状态", async () => {
+    const user = userEvent.setup();
+    const pendingWindows = deferred<Awaited<ReturnType<typeof profileApi.listProfileWindows>>>();
+    const snapshotSpy = vi
+      .spyOn(profileApi, "snapshotBrowserSessions")
+      .mockResolvedValue([
+        browserSessionSnapshot("account-001", true),
+        browserSessionSnapshot("account-002", false)
+      ]);
+    const listWindowsSpy = vi
+      .spyOn(profileApi, "listProfileWindows")
+      .mockReturnValueOnce(pendingWindows.promise);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await openBulkMore(user);
+    await user.click(screen.getByRole("button", { name: "检查窗口" }));
+    await waitFor(() => expect(listWindowsSpy).toHaveBeenCalledTimes(1));
+
+    await user.click(screen.getByRole("button", { name: "选择 抽奖号" }));
+    pendingWindows.resolve([
+      { index: 1, title: "Chrome", x: 12, y: 34, width: 1280, height: 720 }
+    ]);
+    await flushPromises();
+
+    expect(screen.queryByText("1280x720 @ 12,34")).toBeNull();
+    expect(screen.getByText("点击检查窗口读取选中运行账号的窗口状态")).toBeTruthy();
+    snapshotSpy.mockRestore();
+    listWindowsSpy.mockRestore();
+  });
+
+  test("窗口动作开始后会使旧窗口状态面板失效", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(profileApi, "listRunningProfiles").mockResolvedValue(["account-001"]);
+    vi.spyOn(profileApi, "snapshotBrowserSessions").mockResolvedValue([
+      browserSessionSnapshot("account-001", true)
+    ]);
+    vi.spyOn(profileApi, "listProfileWindows").mockResolvedValue([
+      { index: 1, title: "Chrome", x: 12, y: 34, width: 1280, height: 720 }
+    ]);
+    vi.spyOn(profileApi, "setProfileWindowBounds").mockResolvedValue();
+    vi.spyOn(profileApi, "focusProfileWindow").mockResolvedValue();
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await openBulkMore(user);
+    await user.click(screen.getByRole("button", { name: "检查窗口" }));
+    expect(await screen.findByText("1280x720 @ 12,34")).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "平铺窗口" }));
+    expect(screen.queryByText("1280x720 @ 12,34")).toBeNull();
+    expect(screen.getByText("点击检查窗口读取选中运行账号的窗口状态")).toBeTruthy();
   });
 
   test("检查窗口完成后会登记窗口操作", async () => {

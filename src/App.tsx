@@ -11,7 +11,7 @@ import {
   Tags,
   UserPlus
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   DEFAULT_BROWSER_PATH,
   formatBytes,
@@ -65,6 +65,7 @@ import {
   buildPrimaryWindowRegistry,
   buildWindowLayoutSyncPlan,
   windowMatchesBounds,
+  type BrowserWindowRegistryEntry,
   type BrowserWindowRegistryInput,
   type WindowLayoutPreset
 } from "./browserWindows";
@@ -244,6 +245,9 @@ function App() {
   const [windowFocusing, setWindowFocusing] = useState(false);
   const [windowQuitting, setWindowQuitting] = useState(false);
   const [windowRestarting, setWindowRestarting] = useState(false);
+  const [windowRegistryEntries, setWindowRegistryEntries] = useState<BrowserWindowRegistryEntry[]>([]);
+  const [windowRegistryCheckedAt, setWindowRegistryCheckedAt] = useState<string | null>(null);
+  const windowRegistryGenerationRef = useRef(0);
   const [layoutSourceProfileId, setLayoutSourceProfileId] = useState("");
   const [tileLayoutPreset, setTileLayoutPreset] = useState<WindowLayoutPreset>("grid");
   const [openingProjectId, setOpeningProjectId] = useState<string | null>(null);
@@ -280,6 +284,10 @@ function App() {
       setMessage(nextMessage);
     }
   });
+  const windowRegistryContextRef = useRef<{
+    rootPath: string | null;
+    selectedIds: string[];
+  }>({ rootPath: null, selectedIds: [] });
   const {
     importPath,
     importCandidates,
@@ -410,6 +418,22 @@ function App() {
     () => profiles.filter((profile) => selectedIds.includes(profile.id)),
     [profiles, selectedIds]
   );
+  useLayoutEffect(() => {
+    const previous = windowRegistryContextRef.current;
+    const changed =
+      previous.rootPath !== rootPath ||
+      previous.selectedIds.length !== selectedIds.length ||
+      previous.selectedIds.some((id, index) => id !== selectedIds[index]);
+    windowRegistryContextRef.current = {
+      rootPath,
+      selectedIds: [...selectedIds]
+    };
+    if (changed) {
+      windowRegistryGenerationRef.current += 1;
+      setWindowRegistryEntries([]);
+      setWindowRegistryCheckedAt(null);
+    }
+  }, [rootPath, selectedIds]);
   const runtimeDiagnosticsProfile = useMemo(() => {
     if (selectedIds.length !== 1) {
       return null;
@@ -688,6 +712,25 @@ function App() {
         .map((snapshot) => snapshot.profileId)
     );
     return selectedProfiles.filter((profile) => runningIds.has(profile.id));
+  }
+
+  function invalidateWindowRegistry() {
+    windowRegistryGenerationRef.current += 1;
+    setWindowRegistryEntries([]);
+    setWindowRegistryCheckedAt(null);
+  }
+
+  function isCurrentWindowRegistryRequest(
+    generation: number,
+    context: { rootPath: string | null; selectedIds: string[] }
+  ) {
+    const current = windowRegistryContextRef.current;
+    return (
+      generation === windowRegistryGenerationRef.current &&
+      current.rootPath === context.rootPath &&
+      current.selectedIds.length === context.selectedIds.length &&
+      current.selectedIds.every((id, index) => id === context.selectedIds[index])
+    );
   }
 
   async function withWindowActionLock(action: string, run: () => Promise<void>): Promise<void> {
@@ -1107,6 +1150,7 @@ function App() {
   }
 
   async function focusProfileWindow(profile: ChromeProfile) {
+    invalidateWindowRegistry();
     try {
       await focusProfileWindowWithTimeout(profile);
       setMessage(`已切换到 ${profile.name}`);
@@ -1935,6 +1979,12 @@ function App() {
   }
 
   async function inspectWindowsForSelectedProfiles() {
+    invalidateWindowRegistry();
+    const requestGeneration = windowRegistryGenerationRef.current;
+    const requestContext = {
+      rootPath,
+      selectedIds: [...selectedIds]
+    };
     await withWindowActionLock("检查窗口", async () => {
       const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
 
@@ -1950,9 +2000,19 @@ function App() {
       setWindowInspecting(true);
       try {
         const summaries: string[] = [];
+        const registryInputs: BrowserWindowRegistryInput[] = [];
         for (const profile of freshRunningSelectedProfiles) {
           const windows = await listProfileWindowsWithTimeout(profile, "检查窗口");
+          registryInputs.push({
+            profileId: profile.id,
+            profileName: profile.name,
+            windows
+          });
           summaries.push(formatWindowInspectionSummary(profile.name, windows));
+        }
+        if (isCurrentWindowRegistryRequest(requestGeneration, requestContext)) {
+          setWindowRegistryEntries(buildPrimaryWindowRegistry(registryInputs));
+          setWindowRegistryCheckedAt(new Date().toISOString());
         }
         setMessage(`窗口检查：${summaries.join("；")}`);
         finishWindowOperation(operation, "succeeded", buildInspectWindowOperationSummary({
@@ -1998,6 +2058,7 @@ function App() {
   }
 
   async function focusWindowsForSelectedProfiles() {
+    invalidateWindowRegistry();
     await withWindowActionLock("前置窗口", async () => {
       const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
 
@@ -2045,6 +2106,7 @@ function App() {
   }
 
   async function quitBrowsersForSelectedProfiles() {
+    invalidateWindowRegistry();
     await withWindowActionLock("关闭运行账号", async () => {
       const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
       if (freshRunningSelectedProfiles.length === 0) {
@@ -2090,6 +2152,7 @@ function App() {
   }
 
   async function restartBrowsersForSelectedProfiles() {
+    invalidateWindowRegistry();
     await withWindowActionLock("重启运行账号", async () => {
       const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
       if (freshRunningSelectedProfiles.length === 0) {
@@ -2177,6 +2240,7 @@ function App() {
   }
 
   async function tileWindowsForSelectedProfiles() {
+    invalidateWindowRegistry();
     await withWindowActionLock("平铺窗口", async () => {
       const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
 
@@ -2366,6 +2430,7 @@ function App() {
   }
 
   async function syncLayoutForSelectedProfiles() {
+    invalidateWindowRegistry();
     await withWindowActionLock("同步布局", async () => {
       const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
 
@@ -2911,7 +2976,9 @@ function App() {
           }}
           activity={{
             browserOperations,
-            launchEvents
+            launchEvents,
+            windowRegistryEntries,
+            windowRegistryCheckedAt
           }}
         />
 

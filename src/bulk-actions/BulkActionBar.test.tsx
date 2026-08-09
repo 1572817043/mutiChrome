@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { expect, test, vi } from "vitest";
 import type { ChromeProfile } from "../types";
+import type { BrowserWindowRegistryEntry } from "../browserWindows";
 import type { WindowLayoutPreset } from "../browserWindows";
 import { BatchDeleteConfirmDialog } from "./BatchDeleteConfirmDialog";
 import { BulkActionBar } from "./BulkActionBar";
@@ -168,6 +169,36 @@ test("批量栏保留打开、重试、停止和更多操作入口", () => {
   expect(handlers.onInspectWindows).toHaveBeenCalledTimes(1);
   expect(handlers.onTileWindows).toHaveBeenCalledTimes(1);
   expect(handlers.onRequestDelete).toHaveBeenCalledTimes(1);
+});
+
+test("批量栏更多操作中渲染只读窗口状态面板", () => {
+  const { props } = createBulkActionBarProps({
+    selection: {
+      selectedCount: 1,
+      selectedProfiles: [profile("account-001", "主号")]
+    },
+    activity: {
+      windowRegistryEntries: [
+        {
+          profileId: "account-001",
+          profileName: "主号",
+          status: "ready",
+          windowCount: 1,
+          primaryWindow: { index: 1, title: "Chrome", x: 12, y: 34, width: 1280, height: 720 },
+          hasMultipleWindows: false,
+          minimized: false,
+          windowError: null
+        } satisfies BrowserWindowRegistryEntry
+      ],
+      windowRegistryCheckedAt: "2026-08-09T10:20:30.000Z"
+    }
+  });
+
+  render(<BulkActionBar {...props} />);
+  fireEvent.click(screen.getByRole("button", { name: "更多操作" }));
+
+  expect(screen.getByRole("region", { name: "窗口状态" })).toBeTruthy();
+  expect(screen.getByText("1280x720 @ 12,34")).toBeTruthy();
 });
 
 test("批量栏只允许关闭选中的运行账号", () => {
