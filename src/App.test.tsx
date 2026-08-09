@@ -35,6 +35,7 @@ interface TestProjectUrl {
 describe("App launcher layout", () => {
   afterEach(() => {
     vi.useRealTimers();
+    vi.restoreAllMocks();
   });
 
   test("旧常用网址会迁移为结构化网址库", () => {
@@ -585,6 +586,195 @@ describe("App launcher layout", () => {
     expect(snapshotSpy.mock.calls.length).toBeGreaterThan(2);
     quitSpy.mockRestore();
     snapshotSpy.mockRestore();
+  });
+
+  test("重启运行账号只处理点击后 fresh running 的账号并按关闭后启动顺序执行", async () => {
+    const user = userEvent.setup();
+    const snapshotSpy = vi
+      .spyOn(profileApi, "snapshotBrowserSessions")
+      .mockResolvedValueOnce([
+        browserSessionSnapshot("account-001", true),
+        browserSessionSnapshot("account-002", false)
+      ])
+      .mockResolvedValueOnce([
+        browserSessionSnapshot("account-001", false),
+        browserSessionSnapshot("account-002", true)
+      ])
+      .mockResolvedValue([
+        browserSessionSnapshot("account-001", false),
+        browserSessionSnapshot("account-002", false)
+      ]);
+    const quitSpy = vi.spyOn(profileApi, "quitProfileBrowser").mockResolvedValue();
+    const openProfileSpy = vi.spyOn(profileApi, "openProfile").mockResolvedValue(
+      "/tmp/account-002"
+    );
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "选择 抽奖号" }));
+    await user.click(screen.getByRole("button", { name: "更多操作" }));
+    await user.click(screen.getByRole("button", { name: "重启运行账号" }));
+
+    await waitFor(() => {
+      expect(quitSpy).toHaveBeenCalledWith("~/MultiChromeProfiles", "account-002");
+      expect(openProfileSpy).toHaveBeenCalledWith(
+        "~/MultiChromeProfiles",
+        "account-002",
+        "/Applications/Google Chrome.app",
+        "chrome://newtab/"
+      );
+    });
+    expect(quitSpy).toHaveBeenCalledTimes(1);
+    expect(openProfileSpy).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText("已重启 1 个运行账号")).toBeTruthy();
+    await waitFor(() => {
+      expect(savedDocument().profiles[1].lastOpenedAt).not.toBeNull();
+    });
+    expect(snapshotSpy.mock.calls.length).toBeGreaterThan(2);
+  });
+
+  test("重启运行账号单个关闭或启动失败仍继续处理其它账号并汇总", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(profileApi, "snapshotBrowserSessions")
+      .mockResolvedValueOnce([
+        browserSessionSnapshot("account-001", true),
+        browserSessionSnapshot("account-002", true)
+      ])
+      .mockResolvedValueOnce([
+        browserSessionSnapshot("account-001", true),
+        browserSessionSnapshot("account-002", true)
+      ])
+      .mockResolvedValue([
+        browserSessionSnapshot("account-001", false),
+        browserSessionSnapshot("account-002", false)
+      ]);
+    vi.spyOn(profileApi, "quitProfileBrowser")
+      .mockRejectedValueOnce(new Error("退出失败"))
+      .mockResolvedValueOnce();
+    const openProfileSpy = vi.spyOn(profileApi, "openProfile").mockResolvedValue(
+      "/tmp/account-002"
+    );
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "选择 抽奖号" }));
+    await user.click(screen.getByRole("button", { name: "更多操作" }));
+    await user.click(screen.getByRole("button", { name: "重启运行账号" }));
+
+    await waitFor(() => {
+      expect(openProfileSpy).toHaveBeenCalledWith(
+        "~/MultiChromeProfiles",
+        "account-002",
+        "/Applications/Google Chrome.app",
+        "chrome://newtab/"
+      );
+    });
+    expect(openProfileSpy).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText("已重启 1 个运行账号，1 个失败")).toBeTruthy();
+  });
+
+  test("重启准备期间快速点击关闭只允许第一个窗口动作进入后端", async () => {
+    const user = userEvent.setup();
+    const runningSnapshots = [
+      browserSessionSnapshot("account-001", true),
+      browserSessionSnapshot("account-002", true)
+    ];
+    let resolveRefresh: (snapshots: BrowserSessionSnapshot[]) => void = () => undefined;
+    const refreshPromise = new Promise<BrowserSessionSnapshot[]>((resolve) => {
+      resolveRefresh = resolve;
+    });
+    const snapshotSpy = vi
+      .spyOn(profileApi, "snapshotBrowserSessions")
+      .mockResolvedValueOnce(runningSnapshots)
+      .mockReturnValueOnce(refreshPromise)
+      .mockResolvedValue(runningSnapshots);
+    const quitSpy = vi.spyOn(profileApi, "quitProfileBrowser").mockResolvedValue();
+    const openProfileSpy = vi.spyOn(profileApi, "openProfile").mockResolvedValue(
+      "/tmp/profile"
+    );
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "选择 抽奖号" }));
+    await user.click(screen.getByRole("button", { name: "更多操作" }));
+    await user.click(screen.getByRole("button", { name: "重启运行账号" }));
+    await user.click(screen.getByRole("button", { name: "关闭运行账号" }));
+
+    resolveRefresh(runningSnapshots);
+    await waitFor(() => expect(quitSpy).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(openProfileSpy).toHaveBeenCalledTimes(1));
+    await waitFor(() => {
+      const stored = savedDocument();
+      expect(stored.profiles[0].lastOpenedAt).not.toBeNull();
+      expect(stored.profiles[1].lastOpenedAt).not.toBeNull();
+    });
+    expect(snapshotSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  test("重启运行账号启动失败后继续处理后续账号且失败账号不更新打开时间", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(profileApi, "snapshotBrowserSessions")
+      .mockResolvedValueOnce([
+        browserSessionSnapshot("account-001", true),
+        browserSessionSnapshot("account-002", true)
+      ])
+      .mockResolvedValueOnce([
+        browserSessionSnapshot("account-001", true),
+        browserSessionSnapshot("account-002", true)
+      ])
+      .mockResolvedValue([
+        browserSessionSnapshot("account-001", false),
+        browserSessionSnapshot("account-002", false)
+      ]);
+    vi.spyOn(profileApi, "quitProfileBrowser").mockResolvedValue();
+    const openProfileSpy = vi
+      .spyOn(profileApi, "openProfile")
+      .mockRejectedValueOnce(new Error("启动失败"))
+      .mockResolvedValueOnce("/tmp/account-002");
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "选择 抽奖号" }));
+    await user.click(screen.getByRole("button", { name: "更多操作" }));
+    await user.click(screen.getByRole("button", { name: "重启运行账号" }));
+
+    await waitFor(() => expect(openProfileSpy).toHaveBeenCalledTimes(2));
+    expect(openProfileSpy.mock.calls.map((call) => call[1])).toEqual([
+      "account-001",
+      "account-002"
+    ]);
+    await waitFor(() => {
+      const stored = savedDocument();
+      expect(stored.profiles[0].lastOpenedAt).toBeNull();
+      expect(stored.profiles[1].lastOpenedAt).not.toBeNull();
+    });
+  });
+
+  test("重启成功但保存打开时间失败时仍收口最近操作并提示保存失败", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(profileApi, "snapshotBrowserSessions")
+      .mockResolvedValueOnce([browserSessionSnapshot("account-001", true)])
+      .mockResolvedValueOnce([browserSessionSnapshot("account-001", true)])
+      .mockResolvedValue([
+        browserSessionSnapshot("account-001", false)
+      ]);
+    vi.spyOn(profileApi, "quitProfileBrowser").mockResolvedValue();
+    vi.spyOn(profileApi, "openProfile").mockResolvedValue("/tmp/account-001");
+    vi.spyOn(profileApi, "saveProfiles").mockRejectedValue(new Error("保存失败"));
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "更多操作" }));
+    await user.click(screen.getByRole("button", { name: "重启运行账号" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("status").textContent).toContain(
+        "已重启 1 个运行账号；保存打开时间失败：保存失败"
+      );
+    });
+    const recentList = await screen.findByRole("list", { name: "最近操作记录" });
+    expect(within(recentList).getByText("失败")).toBeTruthy();
+    expect(within(recentList).queryByText("运行中")).toBeNull();
   });
 
   test("运行状态会轻量动态刷新并移除已退出账号", async () => {
