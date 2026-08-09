@@ -1273,6 +1273,55 @@ describe("App launcher layout", () => {
     focusSpy.mockRestore();
   });
 
+  test("选择左主右辅后平铺使用对应布局边界", async () => {
+    const user = userEvent.setup();
+    Object.defineProperty(window.screen, "availWidth", { configurable: true, value: 1000 });
+    Object.defineProperty(window.screen, "availHeight", { configurable: true, value: 800 });
+    vi.spyOn(profileApi, "listRunningProfiles").mockResolvedValue(["account-001", "account-002"]);
+    const listWindowsCalls = new Map<string, number>();
+    const listWindowsSpy = vi
+      .spyOn(profileApi, "listProfileWindows")
+      .mockImplementation(async (_rootPath, profileId) => {
+        const callCount = (listWindowsCalls.get(profileId) ?? 0) + 1;
+        listWindowsCalls.set(profileId, callCount);
+        const bounds =
+          callCount === 1
+            ? { x: 0, y: 0, width: 600, height: 800 }
+            : profileId === "account-001"
+              ? { x: 0, y: 0, width: 600, height: 800 }
+              : { x: 600, y: 0, width: 400, height: 800 };
+        return [{ index: 1, title: "Chrome", ...bounds }];
+      });
+    const setBoundsSpy = vi.spyOn(profileApi, "setProfileWindowBounds").mockResolvedValue();
+    const focusSpy = vi.spyOn(profileApi, "focusProfileWindow").mockResolvedValue();
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "选择 抽奖号" }));
+    await openBulkMore(user);
+    await user.selectOptions(screen.getByLabelText("布局"), "left-main");
+    await user.click(screen.getByRole("button", { name: "平铺窗口" }));
+
+    expect(setBoundsSpy).toHaveBeenNthCalledWith(
+      1,
+      "~/MultiChromeProfiles",
+      "account-001",
+      { x: 0, y: 0, width: 600, height: 800 }
+    );
+    expect(setBoundsSpy).toHaveBeenNthCalledWith(
+      2,
+      "~/MultiChromeProfiles",
+      "account-002",
+      { x: 600, y: 0, width: 400, height: 800 }
+    );
+    expect(focusSpy).toHaveBeenCalledTimes(2);
+    expect(await screen.findByText("已平铺 2 个窗口")).toBeTruthy();
+    vi.mocked(profileApi.listRunningProfiles).mockRestore();
+    listWindowsSpy.mockRestore();
+    setBoundsSpy.mockRestore();
+    focusSpy.mockRestore();
+  });
+
   test("批量栏可以前置选中运行账号窗口", async () => {
     const user = userEvent.setup();
     vi.spyOn(profileApi, "listRunningProfiles").mockResolvedValue([

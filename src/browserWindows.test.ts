@@ -3,6 +3,7 @@ import type { ChromeWindowInfo } from "./api";
 import {
   buildWindowLayoutSyncPlan,
   buildGridWindowLayoutPlan,
+  buildWindowLayoutPlan,
   buildPrimaryWindowRegistry,
   maxTileableWindowCount,
   tileBoundsForCount,
@@ -149,6 +150,92 @@ describe("browserWindows", () => {
     );
 
     expect(plan.capacity).toBe(2);
+    expect(plan.capacityExceeded).toBe(true);
+    expect(plan.placements).toEqual([]);
+  });
+
+  test("双列布局按从左到右、从上到下排列并保留工作区原点", () => {
+    const registry = buildPrimaryWindowRegistry(
+      Array.from({ length: 4 }, (_, index) => ({
+        profileId: `account-00${index + 1}`,
+        profileName: `账号 ${index + 1}`,
+        windows: [chromeWindow()]
+      }))
+    );
+
+    const plan = buildWindowLayoutPlan(
+      registry,
+      { x: 10, y: 20, width: 800, height: 600 },
+      { preset: "two-columns", minWindowWidth: 320, minWindowHeight: 240 }
+    );
+
+    expect(plan.capacityExceeded).toBe(false);
+    expect(plan.placements.map(({ bounds }) => bounds)).toEqual([
+      { x: 10, y: 20, width: 400, height: 300 },
+      { x: 410, y: 20, width: 400, height: 300 },
+      { x: 10, y: 320, width: 400, height: 300 },
+      { x: 410, y: 320, width: 400, height: 300 }
+    ]);
+  });
+
+  test("双列布局在最小尺寸容量不足时不生成移动计划", () => {
+    const registry = buildPrimaryWindowRegistry(
+      Array.from({ length: 3 }, (_, index) => ({
+        profileId: `account-00${index + 1}`,
+        profileName: `账号 ${index + 1}`,
+        windows: [chromeWindow()]
+      }))
+    );
+
+    const plan = buildWindowLayoutPlan(
+      registry,
+      { x: 10, y: 20, width: 640, height: 240 },
+      { preset: "two-columns", minWindowWidth: 320, minWindowHeight: 240 }
+    );
+
+    expect(plan.capacity).toBe(2);
+    expect(plan.capacityExceeded).toBe(true);
+    expect(plan.placements).toEqual([]);
+  });
+
+  test("左主右辅布局保留原点并在右侧竖向排列", () => {
+    const registry = buildPrimaryWindowRegistry(
+      Array.from({ length: 3 }, (_, index) => ({
+        profileId: `account-00${index + 1}`,
+        profileName: `账号 ${index + 1}`,
+        windows: [chromeWindow()]
+      }))
+    );
+
+    const plan = buildWindowLayoutPlan(
+      registry,
+      { x: 30, y: 40, width: 1000, height: 800 },
+      { preset: "left-main", minWindowWidth: 320, minWindowHeight: 240 }
+    );
+
+    expect(plan.capacityExceeded).toBe(false);
+    expect(plan.placements.map(({ bounds }) => bounds)).toEqual([
+      { x: 30, y: 40, width: 600, height: 800 },
+      { x: 630, y: 40, width: 400, height: 400 },
+      { x: 630, y: 440, width: 400, height: 400 }
+    ]);
+  });
+
+  test("左主右辅布局在主区或辅区低于最小尺寸时报告容量不足", () => {
+    const registry = buildPrimaryWindowRegistry(
+      Array.from({ length: 2 }, (_, index) => ({
+        profileId: `account-00${index + 1}`,
+        profileName: `账号 ${index + 1}`,
+        windows: [chromeWindow()]
+      }))
+    );
+
+    const plan = buildWindowLayoutPlan(
+      registry,
+      { x: 30, y: 40, width: 600, height: 800 },
+      { preset: "left-main", minWindowWidth: 320, minWindowHeight: 240 }
+    );
+
     expect(plan.capacityExceeded).toBe(true);
     expect(plan.placements).toEqual([]);
   });

@@ -61,11 +61,12 @@ import { RuntimeTabsPanel } from "./browser/RuntimeTabsPanel";
 import { useProfileRuntimeTabs } from "./browser/useProfileRuntimeTabs";
 import { isSessionRunning, profileSessionStatus } from "./browserSessions";
 import {
-  buildGridWindowLayoutPlan,
+  buildWindowLayoutPlan,
   buildPrimaryWindowRegistry,
   buildWindowLayoutSyncPlan,
   windowMatchesBounds,
-  type BrowserWindowRegistryInput
+  type BrowserWindowRegistryInput,
+  type WindowLayoutPreset
 } from "./browserWindows";
 import {
   cloneProfileForDraft,
@@ -244,6 +245,7 @@ function App() {
   const [windowQuitting, setWindowQuitting] = useState(false);
   const [windowRestarting, setWindowRestarting] = useState(false);
   const [layoutSourceProfileId, setLayoutSourceProfileId] = useState("");
+  const [tileLayoutPreset, setTileLayoutPreset] = useState<WindowLayoutPreset>("grid");
   const [openingProjectId, setOpeningProjectId] = useState<string | null>(null);
   const [message, setMessage] = useState("正在初始化...");
   const {
@@ -2214,12 +2216,12 @@ function App() {
         }
 
         const windowRegistry = buildPrimaryWindowRegistry(registryInputs);
-        const layoutPlan = buildGridWindowLayoutPlan(windowRegistry, {
+        const layoutPlan = buildWindowLayoutPlan(windowRegistry, {
           x: availableScreenLeft(),
           y: availableScreenTop(),
           width: availableScreenWidth(),
           height: availableScreenHeight()
-        });
+        }, { preset: tileLayoutPreset });
         const profileById = new Map(
           freshRunningSelectedProfiles.map((profile) => [profile.id, profile])
         );
@@ -2896,7 +2898,9 @@ function App() {
             windowQuitting,
             windowRestarting,
             runningProfileIds,
+            tileLayoutPreset,
             layoutSourceProfileId: resolvedLayoutSourceProfileId,
+            onTileLayoutPresetChange: setTileLayoutPreset,
             onLayoutSourceProfileChange: setLayoutSourceProfileId,
             onInspectWindows: () => void inspectWindowsForSelectedProfiles(),
             onTileWindows: () => void tileWindowsForSelectedProfiles(),

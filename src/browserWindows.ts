@@ -1,7 +1,7 @@
 import type { ChromeWindowInfo, WindowBounds } from "./api";
 
 export type BrowserWindowRegistryStatus = "ready" | "missing" | "error";
-export type WindowLayoutPreset = "grid";
+export type WindowLayoutPreset = "grid" | "two-columns" | "left-main";
 export type WindowLayoutSkipReason = "missing-window" | "window-error";
 export type WindowSyncSkipReason =
   | "missing-window"
@@ -41,6 +41,7 @@ export interface ScreenWorkArea {
 export interface WindowLayoutOptions {
   minWindowWidth?: number;
   minWindowHeight?: number;
+  preset?: WindowLayoutPreset;
 }
 
 export interface WindowLayoutPlacement {
@@ -119,6 +120,15 @@ export function buildGridWindowLayoutPlan(
   workArea: ScreenWorkArea,
   options: WindowLayoutOptions = {}
 ): WindowLayoutPlan {
+  return buildWindowLayoutPlan(registry, workArea, { ...options, preset: "grid" });
+}
+
+export function buildWindowLayoutPlan(
+  registry: BrowserWindowRegistryEntry[],
+  workArea: ScreenWorkArea,
+  options: WindowLayoutOptions = {}
+): WindowLayoutPlan {
+  const preset = options.preset ?? "grid";
   const tileableEntries = registry.filter((entry) => entry.status === "ready");
   const skipped = registry
     .filter((entry) => entry.status !== "ready")
@@ -127,25 +137,14 @@ export function buildGridWindowLayoutPlan(
       profileName: entry.profileName,
       reason: entry.status === "error" ? "window-error" : "missing-window"
     }));
-  const capacity = maxTileableWindowCount(
-    workArea.width,
-    workArea.height,
-    options.minWindowWidth,
-    options.minWindowHeight
-  );
+  const capacity = layoutCapacity(workArea, preset, options, tileableEntries.length);
   const capacityExceeded = tileableEntries.length > capacity;
   const bounds = capacityExceeded
     ? []
-    : tileBoundsForCount(
-        tileableEntries.length,
-        workArea.width,
-        workArea.height,
-        workArea.x,
-        workArea.y
-      );
+    : boundsForPreset(tileableEntries.length, workArea, preset);
 
   return {
-    preset: "grid",
+    preset,
     requestedCount: registry.length,
     tileableCount: tileableEntries.length,
     capacity,
@@ -162,6 +161,115 @@ export function buildGridWindowLayoutPlan(
       (entry) => entry.hasMultipleWindows
     ).length
   };
+}
+
+function layoutCapacity(
+  workArea: ScreenWorkArea,
+  preset: WindowLayoutPreset,
+  options: WindowLayoutOptions,
+  tileableCount: number
+): number {
+  const minWidth = options.minWindowWidth ?? DEFAULT_MIN_WINDOW_WIDTH;
+  const minHeight = options.minWindowHeight ?? DEFAULT_MIN_WINDOW_HEIGHT;
+
+  if (preset === "grid") {
+    return maxTileableWindowCount(workArea.width, workArea.height, minWidth, minHeight);
+  }
+
+  if (preset === "two-columns") {
+    if (workArea.width < minWidth || workArea.height < minHeight) {
+      return 0;
+    }
+    if (tileableCount <= 1) {
+      return 1;
+    }
+    const columns = Math.floor(workArea.width / minWidth);
+    const rows = Math.floor(workArea.height / minHeight);
+    return columns < 2 ? 0 : 2 * rows;
+  }
+
+  const mainWidth = Math.floor(workArea.width * 0.6);
+  const sideWidth = workArea.width - mainWidth;
+  if (
+    workArea.height < minHeight ||
+    mainWidth < minWidth ||
+    sideWidth < minWidth
+  ) {
+    return mainWidth >= minWidth && workArea.height >= minHeight ? 1 : 0;
+  }
+
+  return 1 + Math.floor(workArea.height / minHeight);
+}
+
+function boundsForPreset(
+  count: number,
+  workArea: ScreenWorkArea,
+  preset: WindowLayoutPreset
+): WindowBounds[] {
+  if (preset === "grid") {
+    return tileBoundsForCount(
+      count,
+      workArea.width,
+      workArea.height,
+      workArea.x,
+      workArea.y
+    );
+  }
+
+  if (preset === "two-columns") {
+    if (count <= 0) {
+      return [];
+    }
+    if (count === 1) {
+      return [{
+        x: workArea.x,
+        y: workArea.y,
+        width: workArea.width,
+        height: workArea.height
+      }];
+    }
+    const columns = 2;
+    const rows = Math.ceil(count / columns);
+    const tileWidth = Math.floor(workArea.width / columns);
+    const tileHeight = Math.floor(workArea.height / rows);
+    return Array.from({ length: count }, (_, index) => ({
+      x: workArea.x + (index % columns) * tileWidth,
+      y: workArea.y + Math.floor(index / columns) * tileHeight,
+      width: tileWidth,
+      height: tileHeight
+    }));
+  }
+
+  if (count <= 0) {
+    return [];
+  }
+  if (count === 1) {
+    return [{
+      x: workArea.x,
+      y: workArea.y,
+      width: workArea.width,
+      height: workArea.height
+    }];
+  }
+
+  const mainWidth = Math.floor(workArea.width * 0.6);
+  const sideWidth = workArea.width - mainWidth;
+  const sideCount = count - 1;
+  const sideHeight = Math.floor(workArea.height / sideCount);
+  return [
+    {
+      x: workArea.x,
+      y: workArea.y,
+      width: mainWidth,
+      height: workArea.height
+    },
+    ...Array.from({ length: sideCount }, (_, index) => ({
+      x: workArea.x + mainWidth,
+      y: workArea.y + index * sideHeight,
+      width: sideWidth,
+      height: sideHeight
+    }))
+  ];
 }
 
 export function buildWindowLayoutSyncPlan(
