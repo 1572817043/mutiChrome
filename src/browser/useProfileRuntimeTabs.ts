@@ -32,6 +32,7 @@ export interface UseProfileRuntimeTabsOptions {
 
 export interface UseProfileRuntimeTabsResult {
   model: RuntimeTabsPanelModel;
+  loading: boolean;
   readTabs: () => Promise<void>;
   reset: () => void;
 }
@@ -155,5 +156,5 @@ export function useProfileRuntimeTabs({
     }
   }
 
-  return { model, readTabs, reset };
+  return { model, loading: state.status === "loading", readTabs, reset };
 }

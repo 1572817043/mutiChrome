@@ -115,6 +115,25 @@ describe("账号展示组件", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  test("编辑模式渲染标签页面板，而创建模式不渲染", () => {
+    const panel = <div>运行时标签页面板</div>;
+    const props = {
+      profile: profile(),
+      rootPath: "/tmp/multichrome",
+      selectedSize: null,
+      onChange: vi.fn(),
+      onSave: vi.fn(),
+      onClose: vi.fn(),
+      runtimeTabsPanel: panel
+    };
+
+    const { rerender } = render(<EditProfileDialog {...props} />);
+    expect(screen.getByText("运行时标签页面板")).toBeTruthy();
+
+    rerender(<EditProfileDialog {...props} mode="create" />);
+    expect(screen.queryByText("运行时标签页面板")).toBeNull();
+  });
+
   test("批量新建弹窗预览和删除确认文案保持不变", () => {
     const onChange = vi.fn();
     const onSave = vi.fn();

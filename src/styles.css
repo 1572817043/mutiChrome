@@ -2100,6 +2100,93 @@ button:disabled {
   margin-bottom: 10px;
 }
 
+.runtime-tabs-panel {
+  display: grid;
+  gap: 8px;
+  margin: 2px 0 12px;
+  padding: 10px 0;
+  border-top: 1px solid #dfe8e1;
+  border-bottom: 1px solid #dfe8e1;
+}
+
+.runtime-tabs-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.runtime-tabs-header h3 {
+  margin: 0 0 4px;
+  font-size: 14px;
+}
+
+.runtime-tabs-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  color: #637269;
+  font-size: 12px;
+}
+
+.runtime-tabs-hint,
+.runtime-tabs-error {
+  margin: 0;
+  font-size: 12px;
+}
+
+.runtime-tabs-error {
+  color: #9d3f38;
+}
+
+.runtime-tabs-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.runtime-tabs-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid #dfe8e1;
+  border-radius: 6px;
+  background: #f8faf8;
+}
+
+.runtime-tabs-row-main {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.runtime-tabs-row-main strong,
+.runtime-tabs-row-main span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-tabs-row-main strong {
+  color: #2b3f35;
+  font-size: 13px;
+}
+
+.runtime-tabs-row-main span {
+  color: #637269;
+  font-size: 12px;
+}
+
+.runtime-tabs-row code {
+  color: #637269;
+  font-size: 11px;
+}
+
 .danger-zone {
   display: flex;
   align-items: center;
@@ -3076,6 +3163,30 @@ button:disabled {
   border-color: #33343a;
   background: rgb(23 23 25 / 94%);
   box-shadow: 0 14px 34px rgb(0 0 0 / 24%);
+}
+
+:root[data-theme="dark"] .runtime-tabs-panel {
+  border-top-color: #2f3036;
+  border-bottom-color: #2f3036;
+}
+
+:root[data-theme="dark"] .runtime-tabs-status,
+:root[data-theme="dark"] .runtime-tabs-row-main span,
+:root[data-theme="dark"] .runtime-tabs-row code {
+  color: #a1a1aa;
+}
+
+:root[data-theme="dark"] .runtime-tabs-row {
+  border-color: #33343a;
+  background: #1b1c1f;
+}
+
+:root[data-theme="dark"] .runtime-tabs-row-main strong {
+  color: #f4f4f5;
+}
+
+:root[data-theme="dark"] .runtime-tabs-error {
+  color: #ef9a91;
 }
 
 @media (max-width: 1180px) {

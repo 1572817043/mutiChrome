@@ -124,6 +124,7 @@ describe("useProfileRuntimeTabs", () => {
     act(() => {
       readPromise = hook.result.current.readTabs();
     });
+    expect(hook.result.current.loading).toBe(true);
     expect(hook.result.current.model).toMatchObject({
       canReadTabs: false,
       rows: [],
@@ -134,6 +135,7 @@ describe("useProfileRuntimeTabs", () => {
     await act(async () => {
       await readPromise;
     });
+    expect(hook.result.current.loading).toBe(false);
     expect(hook.result.current.model).toMatchObject({
       canReadTabs: true,
       rows: [
