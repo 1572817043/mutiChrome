@@ -1,4 +1,5 @@
 import { Copy, FolderOpen, Tags, Trash2, X } from "lucide-react";
+import type { ReactNode } from "react";
 import { formatBytes, profilePath } from "../api";
 import type { AccountPlatform, ChromeProfile } from "../types";
 import { AccountPlatformEditor } from "./AccountPlatformEditor";
@@ -17,6 +18,7 @@ interface EditProfileDialogProps {
   onDeleteRecord?: () => void;
   onDeleteWithData?: () => void;
   onSave?: () => Promise<void>;
+  runtimeTabsPanel?: ReactNode;
   onClose: () => void;
 }
 
@@ -33,6 +35,7 @@ export function EditProfileDialog({
   onDeleteRecord,
   onDeleteWithData,
   onSave,
+  runtimeTabsPanel,
   onClose
 }: EditProfileDialogProps) {
   const titleId = "edit-profile-title";
@@ -146,6 +149,8 @@ export function EditProfileDialog({
                   复制账号
                 </button>
               </div>
+
+              {runtimeTabsPanel}
 
               <div className="danger-zone">
                 <div>

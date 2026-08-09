@@ -580,6 +580,66 @@ describe("App launcher layout", () => {
     sizeSpy.mockRestore();
   });
 
+  test("运行中的账号编辑弹窗可以读取浏览器标签页", async () => {
+    const user = userEvent.setup();
+    const snapshotSpy = vi
+      .spyOn(profileApi, "snapshotBrowserSessions")
+      .mockResolvedValue([
+        browserSessionSnapshot("account-001", true),
+        browserSessionSnapshot("account-002", false)
+      ]);
+    const listTabsSpy = vi.spyOn(profileApi, "listRuntimeTabs").mockResolvedValue([
+      {
+        targetId: "0123456789abcdef",
+        type: "page",
+        url: "https://example.com/runtime",
+        title: "Runtime Home",
+        webSocketDebuggerUrl: null,
+        checkedAt: 1000
+      }
+    ]);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "编辑 主号" }));
+    const dialog = await screen.findByRole("dialog", { name: "编辑 主号" });
+    await user.click(within(dialog).getByRole("button", { name: "读取标签页" }));
+
+    expect(listTabsSpy).toHaveBeenCalledWith("~/MultiChromeProfiles", "account-001");
+    expect(await within(dialog).findByText("Runtime Home")).toBeTruthy();
+    expect(within(dialog).getByText("https://example.com/runtime")).toBeTruthy();
+    snapshotSpy.mockRestore();
+    listTabsSpy.mockRestore();
+  });
+
+  test("运行账号缺少调试端口时不允许编辑弹窗读取标签页", async () => {
+    const user = userEvent.setup();
+    const snapshotSpy = vi
+      .spyOn(profileApi, "snapshotBrowserSessions")
+      .mockResolvedValue([
+        {
+          ...browserSessionSnapshot("account-001", true),
+          debugPort: null,
+          cdpStatus: "missing-port"
+        },
+        browserSessionSnapshot("account-002", false)
+      ]);
+    const listTabsSpy = vi.spyOn(profileApi, "listRuntimeTabs").mockResolvedValue([]);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "编辑 主号" }));
+    const dialog = await screen.findByRole("dialog", { name: "编辑 主号" });
+    expect(
+      within(dialog).getByText("重新打开账号以启用标签页读取")
+    ).toBeTruthy();
+    expect(
+      (within(dialog).getByRole("button", { name: "读取标签页" }) as HTMLButtonElement)
+        .disabled
+    ).toBe(true);
+    expect(listTabsSpy).not.toHaveBeenCalled();
+    snapshotSpy.mockRestore();
+    listTabsSpy.mockRestore();
+  });
+
   test("运行中的账号可以切换到对应 Chrome 进程", async () => {
     const user = userEvent.setup();
     vi.spyOn(profileApi, "listRunningProfiles").mockResolvedValue(["account-001"]);

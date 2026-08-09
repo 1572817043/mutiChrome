@@ -57,6 +57,8 @@ import {
   type BrowserOperation
 } from "./browserOperations";
 import { useBrowserOperations } from "./browser/operations/useBrowserOperations";
+import { RuntimeTabsPanel } from "./browser/RuntimeTabsPanel";
+import { useProfileRuntimeTabs } from "./browser/useProfileRuntimeTabs";
 import { isSessionRunning, profileSessionStatus } from "./browserSessions";
 import {
   buildGridWindowLayoutPlan,
@@ -378,6 +380,12 @@ function App() {
   const selectedSize = editingProfile
     ? profileSizes[editingProfile.id] ?? null
     : null;
+  const runtimeTabs = useProfileRuntimeTabs({
+    rootPath,
+    selectedProfile: editingProfile,
+    selectedProfileCount: editingProfile ? 1 : 0,
+    session: editingProfile ? browserSessionsById[editingProfile.id] ?? null : null
+  });
 
   const visibleProfiles = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
@@ -2921,6 +2929,13 @@ function App() {
           }
           onDeleteRecord={() => requestDeleteEditingProfile("record")}
           onDeleteWithData={() => requestDeleteEditingProfile("data")}
+          runtimeTabsPanel={
+            <RuntimeTabsPanel
+              model={runtimeTabs.model}
+              onReadTabs={runtimeTabs.readTabs}
+              loading={runtimeTabs.loading}
+            />
+          }
           onClose={closeEditor}
         />
       ) : null}
