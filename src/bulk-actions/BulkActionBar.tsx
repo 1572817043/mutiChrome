@@ -5,6 +5,8 @@ import type { BrowserOperation } from "../browserOperations";
 import { LaunchEventList } from "../browser/launch/LaunchEventList";
 import { OperationList } from "../browser/operations/OperationList";
 import { WindowRegistryPanel } from "../browser/windows/WindowRegistryPanel";
+import { WindowSyncDetailsPanel } from "../browser/windows/WindowSyncDetailsPanel";
+import type { WindowSyncDetails } from "../browser/windows/windowSyncController";
 import { UrlShortcutGroup } from "../url-library/UrlShortcutGroup";
 import type { ChromeProfile } from "../types";
 import type {
@@ -53,6 +55,7 @@ interface BulkActionWindowProps {
   windowInspecting: boolean;
   windowTiling: boolean;
   windowSyncing: boolean;
+  windowSyncPreviewing: boolean;
   windowFocusing: boolean;
   windowQuitting: boolean;
   windowRestarting: boolean;
@@ -64,6 +67,7 @@ interface BulkActionWindowProps {
   onInspectWindows: () => void;
   onTileWindows: () => void;
   onSyncLayout: () => void;
+  onPreviewSync: () => void;
   onFocusWindows: () => void;
   onQuitWindows: () => void;
   onRestartWindows: () => void;
@@ -74,6 +78,7 @@ interface BulkActionActivityProps {
   launchEvents: BrowserLaunchEvent[];
   windowRegistryEntries?: BrowserWindowRegistryEntry[];
   windowRegistryCheckedAt?: string | null;
+  windowSyncDetails?: WindowSyncDetails | null;
 }
 
 export function BulkActionBar({
@@ -104,6 +109,7 @@ export function BulkActionBar({
     windowInspecting,
     windowTiling,
     windowSyncing,
+    windowSyncPreviewing,
     windowFocusing,
     windowQuitting,
     windowRestarting,
@@ -115,6 +121,7 @@ export function BulkActionBar({
     onInspectWindows,
     onTileWindows,
     onSyncLayout,
+    onPreviewSync,
     onFocusWindows,
     onQuitWindows,
     onRestartWindows
@@ -123,7 +130,8 @@ export function BulkActionBar({
     browserOperations,
     launchEvents,
     windowRegistryEntries = [],
-    windowRegistryCheckedAt = null
+    windowRegistryCheckedAt = null,
+    windowSyncDetails = null
   } = activity;
   const [expanded, setExpanded] = useState(false);
   const visibleRecentUrls = recentUrls.filter((url) => !favoriteUrls.includes(url));
@@ -137,6 +145,7 @@ export function BulkActionBar({
     windowInspecting ||
     windowTiling ||
     windowSyncing ||
+    windowSyncPreviewing ||
     windowFocusing ||
     windowQuitting ||
     windowRestarting;
@@ -353,6 +362,14 @@ export function BulkActionBar({
               className="secondary-button compact"
               type="button"
               disabled={windowActionDisabled}
+              onClick={onPreviewSync}
+            >
+              {windowSyncPreviewing ? "预览中" : "预览同步"}
+            </button>
+            <button
+              className="secondary-button compact"
+              type="button"
+              disabled={windowActionDisabled}
               onClick={onSyncLayout}
             >
               {windowSyncing ? "同步中" : "同步布局"}
@@ -380,6 +397,7 @@ export function BulkActionBar({
             entries={windowRegistryEntries}
             checkedAt={windowRegistryCheckedAt}
           />
+          <WindowSyncDetailsPanel details={windowSyncDetails} />
           <div className="bulk-more-row">
             <button
               className="secondary-button compact"

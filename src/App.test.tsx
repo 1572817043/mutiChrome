@@ -1723,6 +1723,94 @@ describe("App launcher layout", () => {
     focusSpy.mockRestore();
   });
 
+  test("预览同步只读取窗口并展示目标 bounds，不移动或前置窗口", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(profileApi, "listRunningProfiles").mockResolvedValue([
+      "account-001",
+      "account-002"
+    ]);
+    const listWindowsSpy = vi
+      .spyOn(profileApi, "listProfileWindows")
+      .mockResolvedValueOnce([
+        { index: 1, title: "主窗口", x: 80, y: 120, width: 960, height: 720 }
+      ])
+      .mockResolvedValueOnce([
+        { index: 1, title: "目标窗口", x: 0, y: 0, width: 640, height: 480 }
+      ]);
+    const setBoundsSpy = vi.spyOn(profileApi, "setProfileWindowBounds");
+    const focusSpy = vi.spyOn(profileApi, "focusProfileWindow");
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "选择 抽奖号" }));
+    await openBulkMore(user);
+    await user.click(screen.getByRole("button", { name: "预览同步" }));
+
+    expect(listWindowsSpy).toHaveBeenCalledTimes(2);
+    expect(setBoundsSpy).not.toHaveBeenCalled();
+    expect(focusSpy).not.toHaveBeenCalled();
+    expect(await screen.findByText("预览")).toBeTruthy();
+    expect(screen.getByText("将同步到")).toBeTruthy();
+    expect(screen.getByText(/抽奖号：960x720 @ 80,120/)).toBeTruthy();
+    listWindowsSpy.mockRestore();
+    setBoundsSpy.mockRestore();
+    focusSpy.mockRestore();
+  });
+
+  test("真实同步完成后在同步详情中展示结果账号", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(profileApi, "listRunningProfiles").mockResolvedValue([
+      "account-001",
+      "account-002"
+    ]);
+    vi.spyOn(profileApi, "listProfileWindows")
+      .mockResolvedValueOnce([
+        { index: 1, title: "主窗口", x: 80, y: 120, width: 960, height: 720 }
+      ])
+      .mockResolvedValueOnce([
+        { index: 1, title: "目标窗口", x: 0, y: 0, width: 640, height: 480 }
+      ])
+      .mockResolvedValueOnce([
+        { index: 1, title: "目标窗口", x: 80, y: 120, width: 960, height: 720 }
+      ]);
+    vi.spyOn(profileApi, "setProfileWindowBounds").mockResolvedValue();
+    vi.spyOn(profileApi, "focusProfileWindow").mockResolvedValue();
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "选择 抽奖号" }));
+    await openBulkMore(user);
+    await user.click(screen.getByRole("button", { name: "同步布局" }));
+
+    expect(await screen.findByText("结果")).toBeTruthy();
+    expect(screen.getByText("抽奖号：同步成功")).toBeTruthy();
+  });
+
+  test("切换选择会清空已有同步详情", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(profileApi, "listRunningProfiles").mockResolvedValue([
+      "account-001",
+      "account-002"
+    ]);
+    vi.spyOn(profileApi, "listProfileWindows")
+      .mockResolvedValueOnce([
+        { index: 1, title: "主窗口", x: 80, y: 120, width: 960, height: 720 }
+      ])
+      .mockResolvedValueOnce([
+        { index: 1, title: "目标窗口", x: 0, y: 0, width: 640, height: 480 }
+      ]);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "选择 抽奖号" }));
+    await openBulkMore(user);
+    await user.click(screen.getByRole("button", { name: "预览同步" }));
+    expect(await screen.findByText("预览")).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "选择 抽奖号" }));
+    expect(screen.getByText("尚未预览或同步布局")).toBeTruthy();
+  });
+
   test("布局同步会跳过读取失败的目标并继续同步其它目标", async () => {
     const user = userEvent.setup();
     localStorage.setItem(
@@ -1921,9 +2009,45 @@ describe("App launcher layout", () => {
     expect(
       await screen.findByText("主账号窗口已最小化，请先恢复窗口再同步布局")
     ).toBeTruthy();
+    expect(screen.getByText("结果")).toBeTruthy();
+    expect(screen.getByText("主账号：主号（窗口已最小化）")).toBeTruthy();
     vi.mocked(profileApi.listRunningProfiles).mockRestore();
     listWindowsSpy.mockRestore();
     setBoundsSpy.mockRestore();
+  });
+
+  test("预览同步被 lock 拒绝的第二次点击不会使第一次详情失效", async () => {
+    const user = userEvent.setup();
+    const pendingTargetWindows = deferred<Awaited<ReturnType<typeof profileApi.listProfileWindows>>>();
+    vi.spyOn(profileApi, "listRunningProfiles").mockResolvedValue([
+      "account-001",
+      "account-002"
+    ]);
+    const listWindowsSpy = vi
+      .spyOn(profileApi, "listProfileWindows")
+      .mockResolvedValueOnce([
+        { index: 1, title: "主窗口", x: 80, y: 120, width: 960, height: 720 }
+      ])
+      .mockReturnValueOnce(pendingTargetWindows.promise);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "选择 抽奖号" }));
+    await openBulkMore(user);
+    const previewButton = screen.getByRole("button", { name: "预览同步" });
+    fireEvent.click(previewButton);
+    fireEvent.click(previewButton);
+    await waitFor(() => expect(listWindowsSpy).toHaveBeenCalledTimes(2));
+    expect(
+      await screen.findByText("窗口操作“预览同步”正在进行，请稍候")
+    ).toBeTruthy();
+
+    pendingTargetWindows.resolve([
+      { index: 1, title: "目标窗口", x: 0, y: 0, width: 640, height: 480 }
+    ]);
+
+    expect(await screen.findByText("预览")).toBeTruthy();
+    expect(screen.getByText(/抽奖号：960x720 @ 80,120/)).toBeTruthy();
   });
 
   test("同步布局失败后会登记窗口操作失败", async () => {
