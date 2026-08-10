@@ -75,6 +75,7 @@ import {
   readWindowSyncPlanForProfiles,
   type WindowSyncDetails
 } from "./browser/windows/windowSyncController";
+import { focusWindowsForProfilesInOrder } from "./browser/windows/windowFocusController";
 import { readWindowRegistryForProfiles } from "./browser/windows/windowRegistryController";
 import {
   cloneProfileForDraft,
@@ -2051,24 +2052,6 @@ function App() {
     });
   }
 
-  async function focusProfileWindowsInOrder(profilesToFocus: ChromeProfile[]) {
-    let focusedCount = 0;
-    let failedCount = 0;
-    let firstFailedError: unknown = null;
-
-    for (const profile of profilesToFocus) {
-      try {
-        await focusProfileWindowWithTimeout(profile);
-        focusedCount += 1;
-      } catch (error) {
-        failedCount += 1;
-        firstFailedError ??= error;
-      }
-    }
-
-    return { focusedCount, failedCount, firstFailedError };
-  }
-
   async function focusWindowsForSelectedProfiles() {
     invalidateWindowRegistry();
     await withWindowActionLock("前置窗口", async () => {
@@ -2086,7 +2069,9 @@ function App() {
       setWindowFocusing(true);
       try {
         const { focusedCount, failedCount, firstFailedError } =
-          await focusProfileWindowsInOrder(freshRunningSelectedProfiles);
+          await focusWindowsForProfilesInOrder(freshRunningSelectedProfiles, {
+            focusWindow: focusProfileWindowWithTimeout
+          });
 
         if (focusedCount > 0) {
           const messageParts = [`已前置 ${focusedCount} 个窗口`];
@@ -2394,7 +2379,9 @@ function App() {
           if (failedCount > 0) {
             messageParts.push(`${failedCount} 个失败`);
           }
-          const focusResult = await focusProfileWindowsInOrder(tiledProfiles);
+          const focusResult = await focusWindowsForProfilesInOrder(tiledProfiles, {
+            focusWindow: focusProfileWindowWithTimeout
+          });
           if (focusResult.failedCount > 0) {
             focusFailedCount = focusResult.failedCount;
             messageParts.push(`${focusResult.failedCount} 个未能前置`);
@@ -2650,10 +2637,10 @@ function App() {
           if (failedCount > 0) {
             messageParts.push(`${failedCount} 个失败`);
           }
-          const focusResult = await focusProfileWindowsInOrder([
-            ...syncedProfiles,
-            sourceProfile
-          ]);
+          const focusResult = await focusWindowsForProfilesInOrder(
+            [...syncedProfiles, sourceProfile],
+            { focusWindow: focusProfileWindowWithTimeout }
+          );
           if (focusResult.failedCount > 0) {
             focusFailedCount = focusResult.failedCount;
             messageParts.push(`${focusResult.failedCount} 个未能前置`);
