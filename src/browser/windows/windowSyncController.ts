@@ -1,8 +1,13 @@
 import type { ChromeWindowInfo, WindowBounds } from "../../api";
 import {
+  buildPrimaryWindowRegistry,
+  buildWindowLayoutSyncPlan,
   windowMatchesBounds,
+  type BrowserWindowRegistryInput,
   type WindowSyncPlan
 } from "../../browserWindows";
+import type { ChromeProfile } from "../../types";
+import { errorMessage } from "../../shared/windowAutomationErrors";
 
 export type WindowSyncResultEntryStatus = "synced" | "unchanged" | "failed";
 
@@ -20,6 +25,10 @@ export interface WindowSyncControllerDependencies {
 
 export interface WindowSyncControllerOptions {
   firstFailedError?: unknown;
+}
+
+export interface WindowSyncPlanReaderDependencies {
+  readWindows: (profile: ChromeProfile, purpose: string) => Promise<ChromeWindowInfo[]>;
 }
 
 export interface WindowSyncControllerResult {
@@ -47,6 +56,65 @@ export interface WindowSyncResultDetails {
 export type WindowSyncDetails =
   | WindowSyncPreviewDetails
   | WindowSyncResultDetails;
+
+export async function readWindowSyncPlanForProfiles(
+  profiles: ChromeProfile[],
+  sourceProfile: ChromeProfile,
+  dependencies: WindowSyncPlanReaderDependencies
+): Promise<{ syncPlan: WindowSyncPlan; firstFailedError: unknown | null }> {
+  const registryInputs: BrowserWindowRegistryInput[] = [];
+  let firstFailedError: unknown | null = null;
+
+  try {
+    const sourceWindows = await dependencies.readWindows(sourceProfile, "读取主窗口");
+    registryInputs.push({
+      profileId: sourceProfile.id,
+      profileName: sourceProfile.name,
+      windows: sourceWindows
+    });
+  } catch (error) {
+    firstFailedError = error;
+    registryInputs.push({
+      profileId: sourceProfile.id,
+      profileName: sourceProfile.name,
+      windows: [],
+      windowError: errorMessage(error)
+    });
+  }
+
+  let windowRegistry = buildPrimaryWindowRegistry(registryInputs);
+  let syncPlan = buildWindowLayoutSyncPlan(windowRegistry, sourceProfile.id);
+  if (syncPlan.sourceStatus !== "ready") {
+    return { syncPlan, firstFailedError };
+  }
+
+  for (const profile of profiles) {
+    if (profile.id === sourceProfile.id) {
+      continue;
+    }
+
+    try {
+      const windows = await dependencies.readWindows(profile, "检查同步窗口");
+      registryInputs.push({
+        profileId: profile.id,
+        profileName: profile.name,
+        windows
+      });
+    } catch (error) {
+      firstFailedError ??= error;
+      registryInputs.push({
+        profileId: profile.id,
+        profileName: profile.name,
+        windows: [],
+        windowError: errorMessage(error)
+      });
+    }
+  }
+
+  windowRegistry = buildPrimaryWindowRegistry(registryInputs);
+  syncPlan = buildWindowLayoutSyncPlan(windowRegistry, sourceProfile.id);
+  return { syncPlan, firstFailedError };
+}
 
 export function buildWindowSyncPreviewDetails(
   plan: WindowSyncPlan
