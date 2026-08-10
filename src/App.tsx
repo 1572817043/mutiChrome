@@ -63,17 +63,16 @@ import { isSessionRunning, profileSessionStatus } from "./browserSessions";
 import {
   buildWindowLayoutPlan,
   buildPrimaryWindowRegistry,
-  buildWindowLayoutSyncPlan,
   windowMatchesBounds,
   type BrowserWindowRegistryEntry,
   type BrowserWindowRegistryInput,
-  type WindowLayoutPreset,
-  type WindowSyncPlan
+  type WindowLayoutPreset
 } from "./browserWindows";
 import {
   buildWindowSyncPreviewDetails,
   createEmptyWindowSyncControllerResult,
   executeWindowSyncPlan,
+  readWindowSyncPlanForProfiles,
   type WindowSyncDetails
 } from "./browser/windows/windowSyncController";
 import {
@@ -724,69 +723,6 @@ function App() {
         .map((snapshot) => snapshot.profileId)
     );
     return selectedProfiles.filter((profile) => runningIds.has(profile.id));
-  }
-
-  async function readWindowSyncPlanForProfiles(
-    freshRunningSelectedProfiles: ChromeProfile[],
-    sourceProfile: ChromeProfile
-  ): Promise<{ syncPlan: WindowSyncPlan; firstFailedError: unknown | null }> {
-    const registryInputs: BrowserWindowRegistryInput[] = [];
-    let firstFailedError: unknown | null = null;
-
-    try {
-      const sourceWindows = await listProfileWindowsWithTimeout(
-        sourceProfile,
-        "读取主窗口"
-      );
-      registryInputs.push({
-        profileId: sourceProfile.id,
-        profileName: sourceProfile.name,
-        windows: sourceWindows
-      });
-    } catch (error) {
-      registryInputs.push({
-        profileId: sourceProfile.id,
-        profileName: sourceProfile.name,
-        windows: [],
-        windowError: errorMessage(error)
-      });
-    }
-
-    let windowRegistry = buildPrimaryWindowRegistry(registryInputs);
-    let syncPlan = buildWindowLayoutSyncPlan(windowRegistry, sourceProfile.id);
-    if (syncPlan.sourceStatus !== "ready") {
-      return { syncPlan, firstFailedError };
-    }
-
-    for (const profile of freshRunningSelectedProfiles) {
-      if (profile.id === sourceProfile.id) {
-        continue;
-      }
-
-      try {
-        const windows = await listProfileWindowsWithTimeout(
-          profile,
-          "检查同步窗口"
-        );
-        registryInputs.push({
-          profileId: profile.id,
-          profileName: profile.name,
-          windows
-        });
-      } catch (error) {
-        firstFailedError ??= error;
-        registryInputs.push({
-          profileId: profile.id,
-          profileName: profile.name,
-          windows: [],
-          windowError: errorMessage(error)
-        });
-      }
-    }
-
-    windowRegistry = buildPrimaryWindowRegistry(registryInputs);
-    syncPlan = buildWindowLayoutSyncPlan(windowRegistry, sourceProfile.id);
-    return { syncPlan, firstFailedError };
   }
 
   function invalidateWindowRegistry() {
@@ -2535,7 +2471,11 @@ function App() {
       try {
         const { syncPlan } = await readWindowSyncPlanForProfiles(
           freshRunningSelectedProfiles,
-          sourceProfile
+          sourceProfile,
+          {
+            readWindows: (profile, purpose) =>
+              listProfileWindowsWithTimeout(profile, purpose)
+          }
         );
         if (isCurrentWindowRegistryRequest(requestGeneration, requestContext)) {
           setWindowSyncDetails(buildWindowSyncPreviewDetails(syncPlan));
@@ -2582,8 +2522,12 @@ function App() {
         let { syncPlan, firstFailedError } =
           await readWindowSyncPlanForProfiles(
             freshRunningSelectedProfiles,
-            sourceProfile
-        );
+            sourceProfile,
+            {
+              readWindows: (profile, purpose) =>
+                listProfileWindowsWithTimeout(profile, purpose)
+            }
+          );
         if (syncPlan.sourceStatus === "missing-window") {
           if (isCurrentWindowRegistryRequest(requestGeneration, requestContext)) {
             setWindowSyncDetails({

@@ -1,10 +1,12 @@
 import { describe, expect, test } from "vitest";
 import type { ChromeWindowInfo, WindowBounds } from "../../api";
 import type { WindowSyncPlan } from "../../browserWindows";
+import type { ChromeProfile } from "../../types";
 import {
   buildWindowSyncPreviewDetails,
   createEmptyWindowSyncControllerResult,
-  executeWindowSyncPlan
+  executeWindowSyncPlan,
+  readWindowSyncPlanForProfiles
 } from "./windowSyncController";
 
 function chromeWindow(overrides: Partial<ChromeWindowInfo> = {}): ChromeWindowInfo {
@@ -38,6 +40,20 @@ function syncPlan(overrides: Partial<WindowSyncPlan> = {}): WindowSyncPlan {
     minimizedCount: 0,
     failedCount: 0,
     ...overrides
+  };
+}
+
+function profile(id: string, name: string): ChromeProfile {
+  return {
+    id,
+    name,
+    tags: [],
+    notes: "",
+    status: "active",
+    accountPlatforms: [],
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    lastOpenedAt: null
   };
 }
 
@@ -188,5 +204,143 @@ describe("executeWindowSyncPlan", () => {
       minimizedCount: 2,
       entries: []
     });
+  });
+});
+
+describe("readWindowSyncPlanForProfiles", () => {
+  test("主账号读取失败时返回 window-error 且不读取目标账号", async () => {
+    const sourceProfile = profile("account-001", "主号");
+    const targetProfile = profile("account-002", "目标号");
+    const sourceError = new Error("主账号读取失败");
+    const readCalls: string[] = [];
+
+    await expect(
+      readWindowSyncPlanForProfiles(
+        [sourceProfile, targetProfile],
+        sourceProfile,
+        {
+          readWindows: async (currentProfile) => {
+            readCalls.push(currentProfile.id);
+            throw sourceError;
+          }
+        }
+      )
+    ).resolves.toMatchObject({
+      syncPlan: {
+        sourceProfileId: sourceProfile.id,
+        sourceProfileName: sourceProfile.name,
+        sourceStatus: "window-error",
+        sourceWindowError: "主账号读取失败",
+        placements: [],
+        skipped: []
+      },
+      firstFailedError: sourceError
+    });
+    expect(readCalls).toEqual([sourceProfile.id]);
+  });
+
+  test("主账号无窗口或最小化时保持计划语义且不读取目标账号", async () => {
+    const sourceProfile = profile("account-001", "主号");
+    const targetProfile = profile("account-002", "目标号");
+    const readCalls: string[] = [];
+
+    await expect(
+      readWindowSyncPlanForProfiles(
+        [sourceProfile, targetProfile],
+        sourceProfile,
+        {
+          readWindows: async (currentProfile) => {
+            readCalls.push(currentProfile.id);
+            return currentProfile.id === sourceProfile.id
+              ? [chromeWindow({ minimized: true })]
+              : [chromeWindow()];
+          }
+        }
+      )
+    ).resolves.toMatchObject({
+      syncPlan: {
+        sourceStatus: "minimized-window",
+        placements: [],
+        skipped: []
+      },
+      firstFailedError: null
+    });
+    expect(readCalls).toEqual([sourceProfile.id]);
+  });
+
+  test("目标账号部分读取失败时继续生成 placements 和 skipped，并保留首个目标错误", async () => {
+    const sourceProfile = profile("account-001", "主号");
+    const failedTarget = profile("account-002", "失败号");
+    const readyTarget = profile("account-003", "目标号");
+    const targetError = new Error("目标读取失败");
+    const readCalls: string[] = [];
+
+    await expect(
+      readWindowSyncPlanForProfiles(
+        [sourceProfile, failedTarget, readyTarget],
+        sourceProfile,
+        {
+          readWindows: async (currentProfile) => {
+            readCalls.push(currentProfile.id);
+            if (currentProfile.id === failedTarget.id) {
+              throw targetError;
+            }
+            return [chromeWindow()];
+          }
+        }
+      )
+    ).resolves.toMatchObject({
+      syncPlan: {
+        sourceStatus: "ready",
+        placements: [
+          {
+            profileId: readyTarget.id,
+            profileName: readyTarget.name
+          }
+        ],
+        skipped: [
+          {
+            profileId: failedTarget.id,
+            profileName: failedTarget.name,
+            reason: "window-error"
+          }
+        ],
+        failedCount: 1
+      },
+      firstFailedError: targetError
+    });
+    expect(readCalls).toEqual([sourceProfile.id, failedTarget.id, readyTarget.id]);
+  });
+
+  test("全部读取成功时按传入顺序生成计划且 firstFailedError 为 null", async () => {
+    const sourceProfile = profile("account-001", "主号");
+    const firstTarget = profile("account-002", "目标一");
+    const secondTarget = profile("account-003", "目标二");
+    const readCalls: string[] = [];
+
+    await expect(
+      readWindowSyncPlanForProfiles(
+        [sourceProfile, firstTarget, secondTarget],
+        sourceProfile,
+        {
+          readWindows: async (currentProfile) => {
+            readCalls.push(currentProfile.id);
+            return [chromeWindow()];
+          }
+        }
+      )
+    ).resolves.toMatchObject({
+      syncPlan: {
+        sourceStatus: "ready",
+        placements: [
+          { profileId: firstTarget.id, profileName: firstTarget.name },
+          { profileId: secondTarget.id, profileName: secondTarget.name }
+        ],
+        skipped: [],
+        failedCount: 0
+      },
+      firstFailedError: null
+    });
+    expect(readCalls).toEqual([sourceProfile.id, firstTarget.id, secondTarget.id]);
   });
 });
