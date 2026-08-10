@@ -3,6 +3,7 @@ import { expect, test, vi } from "vitest";
 import type { ChromeProfile } from "../types";
 import type { BrowserWindowRegistryEntry } from "../browserWindows";
 import type { WindowLayoutPreset } from "../browserWindows";
+import type { WindowSyncDetails } from "../browser/windows/windowSyncController";
 import { BatchDeleteConfirmDialog } from "./BatchDeleteConfirmDialog";
 import { BulkActionBar } from "./BulkActionBar";
 
@@ -41,6 +42,7 @@ function createBulkActionBarProps(overrides: BulkActionBarOverrides = {}) {
     onInspectWindows: vi.fn(),
     onTileWindows: vi.fn(),
     onSyncLayout: vi.fn(),
+    onPreviewSync: vi.fn(),
     onFocusWindows: vi.fn(),
     onQuitWindows: vi.fn(),
     onRestartWindows: vi.fn(),
@@ -85,6 +87,7 @@ function createBulkActionBarProps(overrides: BulkActionBarOverrides = {}) {
         windowInspecting: false,
         windowTiling: false,
         windowSyncing: false,
+        windowSyncPreviewing: false,
         windowFocusing: false,
         windowQuitting: false,
         windowRestarting: false,
@@ -96,6 +99,7 @@ function createBulkActionBarProps(overrides: BulkActionBarOverrides = {}) {
         onInspectWindows: handlers.onInspectWindows,
         onTileWindows: handlers.onTileWindows,
         onSyncLayout: handlers.onSyncLayout,
+        onPreviewSync: handlers.onPreviewSync,
         onFocusWindows: handlers.onFocusWindows,
         onQuitWindows: handlers.onQuitWindows,
         onRestartWindows: handlers.onRestartWindows,
@@ -104,6 +108,7 @@ function createBulkActionBarProps(overrides: BulkActionBarOverrides = {}) {
       activity: {
         browserOperations: [],
         launchEvents: [],
+        windowSyncDetails: null as WindowSyncDetails | null,
         ...overrides.activity
       }
     }
@@ -199,6 +204,26 @@ test("批量栏更多操作中渲染只读窗口状态面板", () => {
 
   expect(screen.getByRole("region", { name: "窗口状态" })).toBeTruthy();
   expect(screen.getByText("1280x720 @ 12,34")).toBeTruthy();
+});
+
+test("批量栏展示预览同步按钮和同步详情面板", () => {
+  const { handlers, props } = createBulkActionBarProps({
+    selection: {
+      selectedCount: 2,
+      selectedProfiles: [profile("account-001", "主号"), profile("account-002", "小号")]
+    },
+    windowActions: {
+      runningProfileIds: ["account-001", "account-002"],
+      layoutSourceProfileId: "account-001"
+    }
+  });
+
+  render(<BulkActionBar {...props} />);
+  fireEvent.click(screen.getByRole("button", { name: "更多操作" }));
+
+  fireEvent.click(screen.getByRole("button", { name: "预览同步" }));
+  expect(handlers.onPreviewSync).toHaveBeenCalledTimes(1);
+  expect(screen.getByRole("region", { name: "同步详情" })).toBeTruthy();
 });
 
 test("批量栏只允许关闭选中的运行账号", () => {

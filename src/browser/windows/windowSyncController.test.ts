@@ -1,7 +1,11 @@
 import { describe, expect, test } from "vitest";
 import type { ChromeWindowInfo, WindowBounds } from "../../api";
 import type { WindowSyncPlan } from "../../browserWindows";
-import { executeWindowSyncPlan } from "./windowSyncController";
+import {
+  buildWindowSyncPreviewDetails,
+  createEmptyWindowSyncControllerResult,
+  executeWindowSyncPlan
+} from "./windowSyncController";
 
 function chromeWindow(overrides: Partial<ChromeWindowInfo> = {}): ChromeWindowInfo {
   return {
@@ -49,7 +53,15 @@ describe("executeWindowSyncPlan", () => {
       unchangedCount: 0,
       failedCount: 0,
       firstFailedError: null,
-      syncedProfileIds: ["account-002"]
+      syncedProfileIds: ["account-002"],
+      entries: [
+        {
+          profileId: "account-002",
+          profileName: "目标号",
+          status: "synced",
+          error: null
+        }
+      ]
     });
   });
 
@@ -65,7 +77,14 @@ describe("executeWindowSyncPlan", () => {
       syncedCount: 0,
       unchangedCount: 1,
       failedCount: 0,
-      syncedProfileIds: []
+      syncedProfileIds: [],
+      entries: [
+        {
+          profileId: "account-002",
+          status: "unchanged",
+          error: null
+        }
+      ]
     });
   });
 
@@ -80,7 +99,14 @@ describe("executeWindowSyncPlan", () => {
       unchangedCount: 0,
       failedCount: 1,
       firstFailedError: expect.any(Error),
-      syncedProfileIds: []
+      syncedProfileIds: [],
+      entries: [
+        {
+          profileId: "account-002",
+          status: "failed",
+          error: expect.any(Error)
+        }
+      ]
     });
   });
 
@@ -100,7 +126,8 @@ describe("executeWindowSyncPlan", () => {
       syncedCount: 0,
       unchangedCount: 0,
       failedCount: 1,
-      firstFailedError: missingProfileError
+      firstFailedError: missingProfileError,
+      entries: [{ status: "failed", error: missingProfileError }]
     });
   });
 
@@ -124,7 +151,42 @@ describe("executeWindowSyncPlan", () => {
       unchangedCount: 0,
       failedCount: 3,
       firstFailedError,
-      syncedProfileIds: []
+      syncedProfileIds: [],
+      entries: [{ status: "failed", error: executionError }]
+    });
+  });
+
+  test("preview details 保留 source、placements 和 skipped", () => {
+    const plan = syncPlan({
+      sourceStatus: "ready",
+      skipped: [
+        {
+          profileId: "account-003",
+          profileName: "最小化号",
+          reason: "minimized-window"
+        }
+      ],
+      minimizedCount: 1
+    });
+
+    expect(buildWindowSyncPreviewDetails(plan)).toEqual({
+      mode: "preview",
+      plan
+    });
+  });
+
+  test("empty result 保留 source plan 的跳过计数并使用 result 结构", () => {
+    const plan = syncPlan({ noWindowCount: 1, minimizedCount: 2 });
+
+    expect(createEmptyWindowSyncControllerResult(plan)).toEqual({
+      syncedCount: 0,
+      unchangedCount: 0,
+      failedCount: 0,
+      firstFailedError: null,
+      syncedProfileIds: [],
+      noWindowCount: 1,
+      minimizedCount: 2,
+      entries: []
     });
   });
 });

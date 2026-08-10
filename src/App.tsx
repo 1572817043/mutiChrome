@@ -67,9 +67,15 @@ import {
   windowMatchesBounds,
   type BrowserWindowRegistryEntry,
   type BrowserWindowRegistryInput,
-  type WindowLayoutPreset
+  type WindowLayoutPreset,
+  type WindowSyncPlan
 } from "./browserWindows";
-import { executeWindowSyncPlan } from "./browser/windows/windowSyncController";
+import {
+  buildWindowSyncPreviewDetails,
+  createEmptyWindowSyncControllerResult,
+  executeWindowSyncPlan,
+  type WindowSyncDetails
+} from "./browser/windows/windowSyncController";
 import {
   cloneProfileForDraft,
   createProfile,
@@ -243,11 +249,13 @@ function App() {
   const [windowInspecting, setWindowInspecting] = useState(false);
   const [windowTiling, setWindowTiling] = useState(false);
   const [windowSyncing, setWindowSyncing] = useState(false);
+  const [windowSyncPreviewing, setWindowSyncPreviewing] = useState(false);
   const [windowFocusing, setWindowFocusing] = useState(false);
   const [windowQuitting, setWindowQuitting] = useState(false);
   const [windowRestarting, setWindowRestarting] = useState(false);
   const [windowRegistryEntries, setWindowRegistryEntries] = useState<BrowserWindowRegistryEntry[]>([]);
   const [windowRegistryCheckedAt, setWindowRegistryCheckedAt] = useState<string | null>(null);
+  const [windowSyncDetails, setWindowSyncDetails] = useState<WindowSyncDetails | null>(null);
   const windowRegistryGenerationRef = useRef(0);
   const [layoutSourceProfileId, setLayoutSourceProfileId] = useState("");
   const [tileLayoutPreset, setTileLayoutPreset] = useState<WindowLayoutPreset>("grid");
@@ -433,6 +441,7 @@ function App() {
       windowRegistryGenerationRef.current += 1;
       setWindowRegistryEntries([]);
       setWindowRegistryCheckedAt(null);
+      setWindowSyncDetails(null);
     }
   }, [rootPath, selectedIds]);
   const runtimeDiagnosticsProfile = useMemo(() => {
@@ -650,8 +659,10 @@ function App() {
     setWindowInspecting(false);
     setWindowTiling(false);
     setWindowSyncing(false);
+    setWindowSyncPreviewing(false);
     setWindowFocusing(false);
     setOpeningProjectId(null);
+    setWindowSyncDetails(null);
     bulkOpenCancelledRef.current = false;
     projectOpenCancelledRef.current = false;
     bulkOpenDelayResolveRef.current = null;
@@ -715,10 +726,74 @@ function App() {
     return selectedProfiles.filter((profile) => runningIds.has(profile.id));
   }
 
+  async function readWindowSyncPlanForProfiles(
+    freshRunningSelectedProfiles: ChromeProfile[],
+    sourceProfile: ChromeProfile
+  ): Promise<{ syncPlan: WindowSyncPlan; firstFailedError: unknown | null }> {
+    const registryInputs: BrowserWindowRegistryInput[] = [];
+    let firstFailedError: unknown | null = null;
+
+    try {
+      const sourceWindows = await listProfileWindowsWithTimeout(
+        sourceProfile,
+        "读取主窗口"
+      );
+      registryInputs.push({
+        profileId: sourceProfile.id,
+        profileName: sourceProfile.name,
+        windows: sourceWindows
+      });
+    } catch (error) {
+      registryInputs.push({
+        profileId: sourceProfile.id,
+        profileName: sourceProfile.name,
+        windows: [],
+        windowError: errorMessage(error)
+      });
+    }
+
+    let windowRegistry = buildPrimaryWindowRegistry(registryInputs);
+    let syncPlan = buildWindowLayoutSyncPlan(windowRegistry, sourceProfile.id);
+    if (syncPlan.sourceStatus !== "ready") {
+      return { syncPlan, firstFailedError };
+    }
+
+    for (const profile of freshRunningSelectedProfiles) {
+      if (profile.id === sourceProfile.id) {
+        continue;
+      }
+
+      try {
+        const windows = await listProfileWindowsWithTimeout(
+          profile,
+          "检查同步窗口"
+        );
+        registryInputs.push({
+          profileId: profile.id,
+          profileName: profile.name,
+          windows
+        });
+      } catch (error) {
+        firstFailedError ??= error;
+        registryInputs.push({
+          profileId: profile.id,
+          profileName: profile.name,
+          windows: [],
+          windowError: errorMessage(error)
+        });
+      }
+    }
+
+    windowRegistry = buildPrimaryWindowRegistry(registryInputs);
+    syncPlan = buildWindowLayoutSyncPlan(windowRegistry, sourceProfile.id);
+    return { syncPlan, firstFailedError };
+  }
+
   function invalidateWindowRegistry() {
     windowRegistryGenerationRef.current += 1;
     setWindowRegistryEntries([]);
     setWindowRegistryCheckedAt(null);
+    setWindowSyncDetails(null);
   }
 
   function isCurrentWindowRegistryRequest(
@@ -2430,9 +2505,57 @@ function App() {
     });
   }
 
+  async function previewSyncLayoutForSelectedProfiles() {
+    await withWindowActionLock("预览同步", async () => {
+      invalidateWindowRegistry();
+      const requestGeneration = windowRegistryGenerationRef.current;
+      const requestContext = {
+        rootPath,
+        selectedIds: [...selectedIds]
+      };
+      const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
+      if (freshRunningSelectedProfiles.length < 2) {
+        setMessage("至少选择 2 个运行账号才能预览同步布局");
+        return;
+      }
+
+      const sourceProfile =
+        freshRunningSelectedProfiles.find(
+          (profile) => profile.id === resolvedLayoutSourceProfileId
+        ) ?? freshRunningSelectedProfiles[0];
+      if (!sourceProfile) {
+        setMessage("请选择一个运行账号作为主账号");
+        return;
+      }
+      if (!canStartBrowserOperationForProfiles(freshRunningSelectedProfiles)) {
+        return;
+      }
+
+      setWindowSyncPreviewing(true);
+      try {
+        const { syncPlan } = await readWindowSyncPlanForProfiles(
+          freshRunningSelectedProfiles,
+          sourceProfile
+        );
+        if (isCurrentWindowRegistryRequest(requestGeneration, requestContext)) {
+          setWindowSyncDetails(buildWindowSyncPreviewDetails(syncPlan));
+        }
+      } catch (error) {
+        setMessage(windowAutomationErrorMessage(error));
+      } finally {
+        setWindowSyncPreviewing(false);
+      }
+    });
+  }
+
   async function syncLayoutForSelectedProfiles() {
-    invalidateWindowRegistry();
     await withWindowActionLock("同步布局", async () => {
+      invalidateWindowRegistry();
+      const requestGeneration = windowRegistryGenerationRef.current;
+      const requestContext = {
+        rootPath,
+        selectedIds: [...selectedIds]
+      };
       const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
 
       if (freshRunningSelectedProfiles.length < 2) {
@@ -2456,31 +2579,19 @@ function App() {
       const operation = startWindowOperation("同步布局", freshRunningSelectedProfiles);
       setWindowSyncing(true);
       try {
-        const registryInputs: BrowserWindowRegistryInput[] = [];
-        let firstFailedError: unknown = null;
-
-        try {
-          const sourceWindows = await listProfileWindowsWithTimeout(
-            sourceProfile,
-            "读取主窗口"
-          );
-          registryInputs.push({
-            profileId: sourceProfile.id,
-            profileName: sourceProfile.name,
-            windows: sourceWindows
-          });
-        } catch (error) {
-          registryInputs.push({
-            profileId: sourceProfile.id,
-            profileName: sourceProfile.name,
-            windows: [],
-            windowError: errorMessage(error)
-          });
-        }
-
-        let windowRegistry = buildPrimaryWindowRegistry(registryInputs);
-        let syncPlan = buildWindowLayoutSyncPlan(windowRegistry, sourceProfile.id);
+        let { syncPlan, firstFailedError } =
+          await readWindowSyncPlanForProfiles(
+            freshRunningSelectedProfiles,
+            sourceProfile
+        );
         if (syncPlan.sourceStatus === "missing-window") {
+          if (isCurrentWindowRegistryRequest(requestGeneration, requestContext)) {
+            setWindowSyncDetails({
+              mode: "result",
+              plan: syncPlan,
+              result: createEmptyWindowSyncControllerResult(syncPlan)
+            });
+          }
           setMessage("主账号没有可同步窗口");
           finishWindowOperation(
             operation,
@@ -2495,6 +2606,13 @@ function App() {
           return;
         }
         if (syncPlan.sourceStatus === "minimized-window") {
+          if (isCurrentWindowRegistryRequest(requestGeneration, requestContext)) {
+            setWindowSyncDetails({
+              mode: "result",
+              plan: syncPlan,
+              result: createEmptyWindowSyncControllerResult(syncPlan)
+            });
+          }
           setMessage("主账号窗口已最小化，请先恢复窗口再同步布局");
           finishWindowOperation(
             operation,
@@ -2509,6 +2627,13 @@ function App() {
           return;
         }
         if (syncPlan.sourceStatus === "window-error") {
+          if (isCurrentWindowRegistryRequest(requestGeneration, requestContext)) {
+            setWindowSyncDetails({
+              mode: "result",
+              plan: syncPlan,
+              result: createEmptyWindowSyncControllerResult(syncPlan)
+            });
+          }
           setMessage(windowAutomationErrorMessage(syncPlan.sourceWindowError));
           finishWindowOperation(
             operation,
@@ -2523,34 +2648,6 @@ function App() {
           return;
         }
 
-        for (const profile of freshRunningSelectedProfiles) {
-          if (profile.id === sourceProfile.id) {
-            continue;
-          }
-
-          try {
-            const windows = await listProfileWindowsWithTimeout(
-              profile,
-              "检查同步窗口"
-            );
-            registryInputs.push({
-              profileId: profile.id,
-              profileName: profile.name,
-              windows
-            });
-          } catch (error) {
-            firstFailedError ??= error;
-            registryInputs.push({
-              profileId: profile.id,
-              profileName: profile.name,
-              windows: [],
-              windowError: errorMessage(error)
-            });
-          }
-        }
-
-        windowRegistry = buildPrimaryWindowRegistry(registryInputs);
-        syncPlan = buildWindowLayoutSyncPlan(windowRegistry, sourceProfile.id);
         const profileById = new Map(
           freshRunningSelectedProfiles.map((profile) => [profile.id, profile])
         );
@@ -2579,6 +2676,9 @@ function App() {
           },
           { firstFailedError }
         );
+        if (isCurrentWindowRegistryRequest(requestGeneration, requestContext)) {
+          setWindowSyncDetails({ mode: "result", plan: syncPlan, result: syncResult });
+        }
         const {
           syncedCount,
           noWindowCount,
@@ -2958,6 +3058,7 @@ function App() {
             windowInspecting,
             windowTiling,
             windowSyncing,
+            windowSyncPreviewing,
             windowFocusing,
             windowQuitting,
             windowRestarting,
@@ -2968,6 +3069,7 @@ function App() {
             onLayoutSourceProfileChange: setLayoutSourceProfileId,
             onInspectWindows: () => void inspectWindowsForSelectedProfiles(),
             onTileWindows: () => void tileWindowsForSelectedProfiles(),
+            onPreviewSync: () => void previewSyncLayoutForSelectedProfiles(),
             onSyncLayout: () => void syncLayoutForSelectedProfiles(),
             onFocusWindows: () => void focusWindowsForSelectedProfiles(),
             onQuitWindows: () => void quitBrowsersForSelectedProfiles(),
@@ -2977,7 +3079,8 @@ function App() {
             browserOperations,
             launchEvents,
             windowRegistryEntries,
-            windowRegistryCheckedAt
+            windowRegistryCheckedAt,
+            windowSyncDetails
           }}
         />
 
