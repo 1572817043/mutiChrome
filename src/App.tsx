@@ -75,6 +75,7 @@ import {
   readWindowSyncPlanForProfiles,
   type WindowSyncDetails
 } from "./browser/windows/windowSyncController";
+import { readWindowRegistryForProfiles } from "./browser/windows/windowRegistryController";
 import {
   cloneProfileForDraft,
   createProfile,
@@ -2011,19 +2012,18 @@ function App() {
       const operation = startWindowOperation("检查窗口", freshRunningSelectedProfiles);
       setWindowInspecting(true);
       try {
-        const summaries: string[] = [];
-        const registryInputs: BrowserWindowRegistryInput[] = [];
-        for (const profile of freshRunningSelectedProfiles) {
-          const windows = await listProfileWindowsWithTimeout(profile, "检查窗口");
-          registryInputs.push({
-            profileId: profile.id,
-            profileName: profile.name,
-            windows
-          });
-          summaries.push(formatWindowInspectionSummary(profile.name, windows));
-        }
+        const { entries, inspectedWindows } = await readWindowRegistryForProfiles(
+          freshRunningSelectedProfiles,
+          {
+            readWindows: (profile, purpose) =>
+              listProfileWindowsWithTimeout(profile, purpose)
+          }
+        );
+        const summaries = inspectedWindows.map(({ profile, windows }) =>
+          formatWindowInspectionSummary(profile.name, windows)
+        );
         if (isCurrentWindowRegistryRequest(requestGeneration, requestContext)) {
-          setWindowRegistryEntries(buildPrimaryWindowRegistry(registryInputs));
+          setWindowRegistryEntries(entries);
           setWindowRegistryCheckedAt(new Date().toISOString());
         }
         setMessage(`窗口检查：${summaries.join("；")}`);
