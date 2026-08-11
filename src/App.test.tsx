@@ -6914,6 +6914,46 @@ describe("App launcher layout", () => {
     restoreBackupSpy.mockRestore();
   });
 
+  test("切换根目录后不会写回旧的轻量备份结果", async () => {
+    const user = userEvent.setup();
+    const backupRequest = deferred<{ path: string; profileCount: number }>();
+    const createBackupSpy = vi
+      .spyOn(profileApi, "createProfilesBackup")
+      .mockReturnValue(backupRequest.promise);
+    render(<App />);
+
+    const dialog = await openSettingsDialog(user);
+    await user.click(within(dialog).getByRole("button", { name: "创建备份" }));
+    await waitFor(() => {
+      expect(createBackupSpy).toHaveBeenCalledWith("~/MultiChromeProfiles");
+    });
+
+    changeRootPathDraft(dialog, "/tmp/other-root");
+    await detectRootPathDraft(user, dialog);
+    await waitFor(() => {
+      expect((within(dialog).getByLabelText("配置根目录") as HTMLInputElement).value).toBe(
+        "/tmp/other-root"
+      );
+    });
+
+    backupRequest.resolve({
+      path: "/tmp/old-root-backup.json",
+      profileCount: 7
+    });
+    await act(async () => {
+      await backupRequest.promise;
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(within(dialog).queryByText("/tmp/old-root-backup.json")).toBeNull();
+    expect(
+      (within(dialog).getByLabelText("备份文件路径") as HTMLInputElement).value
+    ).not.toBe("/tmp/old-root-backup.json");
+    expect(screen.getByRole("status").textContent).not.toContain("已创建备份：7 个账号");
+    createBackupSpy.mockRestore();
+  });
+
   test("同 root 恢复在 pending 普通保存后仍以恢复文档为最终状态", async () => {
     const user = userEvent.setup();
     const pendingSave = deferred<void>();
@@ -7239,6 +7279,99 @@ describe("App launcher layout", () => {
     expect(await screen.findByText("完整备份已创建：1 个账号")).toBeTruthy();
     expect(await within(dialog).findByText("~/MultiChromeProfiles/app-data/backups/full-profiles-1")).toBeTruthy();
     previewSpy.mockRestore();
+    createSpy.mockRestore();
+  });
+
+  test("切换根目录后不会写回旧的完整备份预览", async () => {
+    const user = userEvent.setup();
+    const previewRequest = deferred<{
+      destinationDir: string;
+      profileCount: number;
+      profileIds: string[];
+      totalBytes: number;
+    }>();
+    const previewSpy = vi
+      .spyOn(profileApi, "previewFullProfileBackup")
+      .mockReturnValue(previewRequest.promise);
+    render(<App />);
+
+    const dialog = await openSettingsDialog(user);
+    await user.click(within(dialog).getByRole("button", { name: "预览完整备份" }));
+    await waitFor(() => {
+      expect(previewSpy).toHaveBeenCalledWith("~/MultiChromeProfiles", []);
+    });
+
+    changeRootPathDraft(dialog, "/tmp/other-root");
+    await detectRootPathDraft(user, dialog);
+    await waitFor(() => {
+      expect((within(dialog).getByLabelText("配置根目录") as HTMLInputElement).value).toBe(
+        "/tmp/other-root"
+      );
+    });
+
+    previewRequest.resolve({
+      destinationDir: "/tmp/old-root-backups",
+      profileCount: 8,
+      profileIds: ["old-account"],
+      totalBytes: 9216
+    });
+    await act(async () => {
+      await previewRequest.promise;
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(within(dialog).queryByText("/tmp/old-root-backups")).toBeNull();
+    expect(within(dialog).queryByText("预计 9.00 KB")).toBeNull();
+    expect(screen.getByRole("status").textContent).not.toContain("已预览完整备份：8 个账号");
+    previewSpy.mockRestore();
+  });
+
+  test("切换根目录后不会写回旧的完整备份结果", async () => {
+    const user = userEvent.setup();
+    const backupRequest = deferred<{
+      path: string;
+      profileCount: number;
+      profileIds: string[];
+      totalBytes: number;
+    }>();
+    const createSpy = vi
+      .spyOn(profileApi, "createFullProfileBackup")
+      .mockReturnValue(backupRequest.promise);
+    render(<App />);
+
+    const dialog = await openSettingsDialog(user);
+    await user.click(within(dialog).getByRole("button", { name: "创建完整备份" }));
+    await waitFor(() => {
+      expect(createSpy).toHaveBeenCalledWith("~/MultiChromeProfiles", []);
+    });
+
+    changeRootPathDraft(dialog, "/tmp/other-root");
+    await detectRootPathDraft(user, dialog);
+    await waitFor(() => {
+      expect((within(dialog).getByLabelText("配置根目录") as HTMLInputElement).value).toBe(
+        "/tmp/other-root"
+      );
+    });
+
+    backupRequest.resolve({
+      path: "/tmp/old-root-full-backup",
+      profileCount: 6,
+      profileIds: ["old-account"],
+      totalBytes: 2048
+    });
+    await act(async () => {
+      await backupRequest.promise;
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(within(dialog).queryByText("/tmp/old-root-full-backup")).toBeNull();
+    expect(within(dialog).queryByText("2.00 KB")).toBeNull();
+    expect(
+      (within(dialog).getByLabelText("完整备份目录路径") as HTMLInputElement).value
+    ).not.toBe("/tmp/old-root-full-backup");
+    expect(screen.getByRole("status").textContent).not.toContain("完整备份已创建：6 个账号");
     createSpy.mockRestore();
   });
 
