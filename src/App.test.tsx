@@ -6684,6 +6684,70 @@ describe("App launcher layout", () => {
     repairHealthSpy.mockRestore();
   });
 
+  test("切换根目录后不会写回旧根的修复结果", async () => {
+    const user = userEvent.setup();
+    const repairRequest = deferred<Awaited<ReturnType<typeof profileApi.repairProfileRootHealth>>>();
+    const repairHealthSpy = vi
+      .spyOn(profileApi, "repairProfileRootHealth")
+      .mockReturnValue(repairRequest.promise);
+    render(<App />);
+
+    const dialog = await openSettingsDialog(user);
+    await user.click(within(dialog).getByRole("button", { name: "修复可自动处理项" }));
+    await waitFor(() => {
+      expect(
+        (within(dialog).getByRole("button", { name: "修复中" }) as HTMLButtonElement).disabled
+      ).toBe(true);
+    });
+
+    changeRootPathDraft(dialog, "/tmp/other-root");
+    await detectRootPathDraft(user, dialog);
+    await waitFor(() => {
+      expect((within(dialog).getByLabelText("配置根目录") as HTMLInputElement).value).toBe(
+        "/tmp/other-root"
+      );
+    });
+
+    repairRequest.resolve({
+      repairedCount: 1,
+      actions: [
+        {
+          code: "old_root_repair",
+          title: "旧 root 修复动作",
+          detail: "旧 root 专属修复结果",
+          path: "~/MultiChromeProfiles/old-root-only",
+          profileId: null
+        }
+      ],
+      health: {
+        rootPath: "~/MultiChromeProfiles",
+        summary: { profileCount: 0, warningCount: 0, errorCount: 1 },
+        issues: [
+          {
+            severity: "error",
+            code: "old_root_health",
+            title: "旧 root 修复后的错误",
+            detail: "旧 root 专属健康结果",
+            path: "~/MultiChromeProfiles/old-root-only",
+            profileId: null
+          }
+        ]
+      }
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(within(dialog).queryByText("旧 root 修复动作")).toBeNull();
+    expect(within(dialog).queryByText("旧 root 修复后的错误")).toBeNull();
+    expect(screen.getByRole("status").textContent).not.toContain("已修复 1 个问题");
+    expect(
+      (within(dialog).getByRole("button", { name: "修复可自动处理项" }) as HTMLButtonElement).disabled
+    ).toBe(false);
+    repairHealthSpy.mockRestore();
+  });
+
   test("设置弹窗可以把未登记的 Profile 文件夹登记为账号", async () => {
     const user = userEvent.setup();
     const checkHealthSpy = vi
@@ -6732,6 +6796,69 @@ describe("App launcher layout", () => {
       expect(registered?.notes).toBe("从已有 Profile 目录登记");
     });
     expect(checkHealthSpy).toHaveBeenCalledTimes(2);
+    checkHealthSpy.mockRestore();
+  });
+
+  test("切换根目录后不会写回旧根孤儿登记触发的健康结果", async () => {
+    const user = userEvent.setup();
+    const orphanHealthRequest = deferred<RootHealthReport>();
+    const checkHealthSpy = vi
+      .spyOn(profileApi, "checkProfileRootHealth")
+      .mockResolvedValueOnce({
+        rootPath: "~/MultiChromeProfiles",
+        summary: { profileCount: 2, warningCount: 1, errorCount: 0 },
+        issues: [
+          {
+            severity: "warning",
+            code: "orphan_profile_dir",
+            title: "旧 root 孤儿目录",
+            detail: "旧 root 专属孤儿结果",
+            path: "~/MultiChromeProfiles/profiles/orphan-001",
+            profileId: "orphan-001"
+          }
+        ]
+      })
+      .mockReturnValueOnce(orphanHealthRequest.promise);
+    render(<App />);
+
+    const dialog = await openSettingsDialog(user);
+    await user.click(within(dialog).getByRole("button", { name: "健康检查" }));
+    await user.click(await within(dialog).findByRole("button", { name: "登记为账号 orphan-001" }));
+    await waitFor(() => expect(checkHealthSpy).toHaveBeenCalledTimes(2));
+
+    changeRootPathDraft(dialog, "/tmp/other-root");
+    await detectRootPathDraft(user, dialog);
+    await waitFor(() => {
+      expect((within(dialog).getByLabelText("配置根目录") as HTMLInputElement).value).toBe(
+        "/tmp/other-root"
+      );
+    });
+
+    orphanHealthRequest.resolve({
+      rootPath: "~/MultiChromeProfiles",
+      summary: { profileCount: 3, warningCount: 1, errorCount: 0 },
+      issues: [
+        {
+          severity: "warning",
+          code: "old_orphan_health",
+          title: "旧 root 孤儿登记后的结果",
+          detail: "旧 root 专属健康结果",
+          path: "~/MultiChromeProfiles/profiles/orphan-001",
+          profileId: "orphan-001"
+        }
+      ]
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(within(dialog).queryByText("旧 root 孤儿登记后的结果")).toBeNull();
+    expect(within(dialog).queryByText("~/MultiChromeProfiles/profiles/orphan-001")).toBeNull();
+    expect(screen.getByRole("status").textContent).not.toContain("健康检查发现 1 个提醒");
+    expect(
+      within(dialog).queryByRole("button", { name: "登记中" })
+    ).toBeNull();
     checkHealthSpy.mockRestore();
   });
 
