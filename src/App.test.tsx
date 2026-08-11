@@ -1504,6 +1504,104 @@ describe("App launcher layout", () => {
     focusSpy.mockRestore();
   });
 
+  test("前置窗口部分失败仍继续处理并登记失败 summary", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(profileApi, "listRunningProfiles").mockResolvedValue([
+      "account-001",
+      "account-002"
+    ]);
+    const focusSpy = vi
+      .spyOn(profileApi, "focusProfileWindow")
+      .mockResolvedValueOnce()
+      .mockRejectedValueOnce(new Error("抽奖号前置失败"));
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "选择 抽奖号" }));
+    await openBulkMore(user);
+    await user.click(screen.getByRole("button", { name: "前置窗口" }));
+
+    expect(focusSpy).toHaveBeenCalledTimes(2);
+    expect(focusSpy).toHaveBeenNthCalledWith(
+      1,
+      "~/MultiChromeProfiles",
+      "account-001"
+    );
+    expect(focusSpy).toHaveBeenNthCalledWith(
+      2,
+      "~/MultiChromeProfiles",
+      "account-002"
+    );
+    expect(await screen.findByText("已前置 1 个窗口，1 个失败")).toBeTruthy();
+    const operationList = await screen.findByRole("list", { name: "最近操作记录" });
+    expect(within(operationList).getByText("失败")).toBeTruthy();
+    expect(within(operationList).getByText("前置窗口")).toBeTruthy();
+    expect(within(operationList).getByText("结果：已前置 1 个，失败 1 个")).toBeTruthy();
+  });
+
+  test("平铺成功但前置部分失败时保留组合结果", async () => {
+    const user = userEvent.setup();
+    Object.defineProperty(window.screen, "availWidth", {
+      configurable: true,
+      value: 1200
+    });
+    Object.defineProperty(window.screen, "availHeight", {
+      configurable: true,
+      value: 800
+    });
+    vi.spyOn(profileApi, "listRunningProfiles").mockResolvedValue([
+      "account-001",
+      "account-002"
+    ]);
+    const listWindowsSpy = vi
+      .spyOn(profileApi, "listProfileWindows")
+      .mockResolvedValueOnce([
+        { index: 1, title: "主窗口", x: 0, y: 0, width: 600, height: 800 }
+      ])
+      .mockResolvedValueOnce([
+        { index: 1, title: "目标窗口", x: 0, y: 0, width: 600, height: 800 }
+      ])
+      .mockResolvedValueOnce([
+        { index: 1, title: "主窗口", x: 0, y: 0, width: 600, height: 800 }
+      ])
+      .mockResolvedValueOnce([
+        { index: 1, title: "目标窗口", x: 600, y: 0, width: 600, height: 800 }
+      ]);
+    const setBoundsSpy = vi
+      .spyOn(profileApi, "setProfileWindowBounds")
+      .mockResolvedValue();
+    const focusSpy = vi
+      .spyOn(profileApi, "focusProfileWindow")
+      .mockResolvedValueOnce()
+      .mockRejectedValueOnce(new Error("抽奖号前置失败"));
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "选择 抽奖号" }));
+    await openBulkMore(user);
+    await user.click(screen.getByRole("button", { name: "平铺窗口" }));
+
+    expect(setBoundsSpy).toHaveBeenCalledTimes(2);
+    expect(focusSpy).toHaveBeenCalledTimes(2);
+    expect(focusSpy).toHaveBeenNthCalledWith(
+      1,
+      "~/MultiChromeProfiles",
+      "account-001"
+    );
+    expect(focusSpy).toHaveBeenNthCalledWith(
+      2,
+      "~/MultiChromeProfiles",
+      "account-002"
+    );
+    expect(await screen.findByText("已平铺 2 个窗口，1 个未能前置")).toBeTruthy();
+    const operationList = await screen.findByRole("list", { name: "最近操作记录" });
+    expect(within(operationList).getByText("失败")).toBeTruthy();
+    expect(within(operationList).getByText("平铺窗口")).toBeTruthy();
+    expect(
+      within(operationList).getByText("结果：已平铺 2 / 2，未能前置 1 个")
+    ).toBeTruthy();
+  });
+
   test("平铺窗口会在窗口没有实际移动时提示未生效", async () => {
     const user = userEvent.setup();
     Object.defineProperty(window.screen, "availWidth", {
