@@ -1255,6 +1255,19 @@ function App() {
     }
   }
 
+  async function copyRuntimeTabUrl(url: string) {
+    try {
+      if (!navigator.clipboard?.writeText) {
+        setMessage("当前环境不能复制到剪贴板");
+        return;
+      }
+      await navigator.clipboard.writeText(url);
+      setMessage("已复制标签页网址");
+    } catch (error) {
+      setMessage(errorMessage(error));
+    }
+  }
+
   async function revealEditingProfile() {
     if (!editingProfile) {
       return;
@@ -3200,6 +3213,7 @@ function App() {
             <RuntimeTabsPanel
               model={runtimeTabs.model}
               onReadTabs={runtimeTabs.readTabs}
+              onCopyUrl={(url) => void copyRuntimeTabUrl(url)}
               loading={runtimeTabs.loading}
             />
           }

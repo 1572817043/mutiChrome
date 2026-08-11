@@ -1,9 +1,10 @@
-import { RefreshCw } from "lucide-react";
+import { Copy, RefreshCw } from "lucide-react";
 import type { RuntimeTabsPanelModel } from "./runtimeTabs";
 
 interface RuntimeTabsPanelProps {
   model: RuntimeTabsPanelModel;
   onReadTabs: () => void | Promise<void>;
+  onCopyUrl?: (url: string) => void | Promise<void>;
   loading?: boolean;
 }
 
@@ -14,6 +15,7 @@ function shortTargetId(targetId: string): string {
 export function RuntimeTabsPanel({
   model,
   onReadTabs,
+  onCopyUrl,
   loading = false
 }: RuntimeTabsPanelProps) {
   const buttonDisabled = loading || !model.canReadTabs;
@@ -57,7 +59,20 @@ export function RuntimeTabsPanel({
                 <strong title={row.title}>{row.title}</strong>
                 <span title={row.url}>{row.url}</span>
               </div>
-              <code title={row.targetId}>{shortTargetId(row.targetId)}</code>
+              <div className="runtime-tabs-row-actions">
+                <code title={row.targetId}>{shortTargetId(row.targetId)}</code>
+                {onCopyUrl ? (
+                  <button
+                    className="icon-button compact"
+                    type="button"
+                    aria-label={`复制网址 ${row.title} ${row.url}`}
+                    title="复制网址"
+                    onClick={() => void onCopyUrl(row.url)}
+                  >
+                    <Copy size={14} />
+                  </button>
+                ) : null}
+              </div>
             </li>
           ))}
         </ul>
