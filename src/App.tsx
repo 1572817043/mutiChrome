@@ -1993,13 +1993,13 @@ function App() {
   }
 
   async function inspectWindowsForSelectedProfiles() {
-    invalidateWindowRegistry();
-    const requestGeneration = windowRegistryGenerationRef.current;
-    const requestContext = {
-      rootPath,
-      selectedIds: [...selectedIds]
-    };
     await withWindowActionLock("检查窗口", async () => {
+      invalidateWindowRegistry();
+      const requestGeneration = windowRegistryGenerationRef.current;
+      const requestContext = {
+        rootPath,
+        selectedIds: [...selectedIds]
+      };
       const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
 
       if (freshRunningSelectedProfiles.length === 0) {
@@ -2053,8 +2053,8 @@ function App() {
   }
 
   async function focusWindowsForSelectedProfiles() {
-    invalidateWindowRegistry();
     await withWindowActionLock("前置窗口", async () => {
+      invalidateWindowRegistry();
       const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
 
       if (freshRunningSelectedProfiles.length === 0) {
@@ -2103,8 +2103,8 @@ function App() {
   }
 
   async function quitBrowsersForSelectedProfiles() {
-    invalidateWindowRegistry();
     await withWindowActionLock("关闭运行账号", async () => {
+      invalidateWindowRegistry();
       const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
       if (freshRunningSelectedProfiles.length === 0) {
         setMessage("没有选中的运行账号");
@@ -2149,8 +2149,8 @@ function App() {
   }
 
   async function restartBrowsersForSelectedProfiles() {
-    invalidateWindowRegistry();
     await withWindowActionLock("重启运行账号", async () => {
+      invalidateWindowRegistry();
       const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
       if (freshRunningSelectedProfiles.length === 0) {
         setMessage("没有选中的运行账号");
@@ -2237,8 +2237,8 @@ function App() {
   }
 
   async function tileWindowsForSelectedProfiles() {
-    invalidateWindowRegistry();
     await withWindowActionLock("平铺窗口", async () => {
+      invalidateWindowRegistry();
       const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
 
       if (freshRunningSelectedProfiles.length === 0) {
