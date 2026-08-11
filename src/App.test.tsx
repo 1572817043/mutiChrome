@@ -6538,7 +6538,7 @@ describe("App launcher layout", () => {
     ).toBe("");
   });
 
-  test("切换根目录不会提前结束进行中的健康检查", async () => {
+  test("切换根目录会使旧健康检查结果失效", async () => {
     const user = userEvent.setup();
     let resolveHealthCheck!: (report: RootHealthReport) => void;
     const checkHealthSpy = vi.spyOn(profileApi, "checkProfileRootHealth").mockImplementation(
@@ -6562,20 +6562,31 @@ describe("App launcher layout", () => {
         "/tmp/other-root"
       );
     });
-    expect((within(dialog).getByRole("button", { name: "检查中" }) as HTMLButtonElement).disabled).toBe(
-      true
+    expect((within(dialog).getByRole("button", { name: "健康检查" }) as HTMLButtonElement).disabled).toBe(
+      false
     );
 
     resolveHealthCheck({
       rootPath: "~/MultiChromeProfiles",
-      summary: { profileCount: 0, warningCount: 0, errorCount: 0 },
-      issues: []
+      summary: { profileCount: 0, warningCount: 0, errorCount: 1 },
+      issues: [
+        {
+          severity: "error",
+          code: "missing_profiles_index",
+          title: "旧 root 健康错误",
+          detail: "旧 root 专属健康检查结果",
+          path: "~/MultiChromeProfiles/old-root-only",
+          profileId: null
+        }
+      ]
     });
-    await waitFor(() => {
-      expect((within(dialog).getByRole("button", { name: "健康检查" }) as HTMLButtonElement).disabled).toBe(
-        false
-      );
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
     });
+    expect(within(dialog).queryByText("旧 root 健康错误")).toBeNull();
+    expect(within(dialog).queryByText("~/MultiChromeProfiles/old-root-only")).toBeNull();
+    expect(screen.getByRole("status").textContent).not.toContain("健康检查发现 1 个错误");
     checkHealthSpy.mockRestore();
   });
 
