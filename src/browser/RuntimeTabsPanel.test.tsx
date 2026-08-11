@@ -135,6 +135,31 @@ describe("RuntimeTabsPanel", () => {
     ).toBeTruthy();
   });
 
+  test("复制全部按钮按当前行顺序传递 URL 并保留重复项", () => {
+    const onCopyAllUrls = vi.fn();
+    render(
+      <RuntimeTabsPanel
+        model={createModel({
+          rows: [
+            { targetId: "target-1", title: "第一行", url: "https://example.com/first", checkedAt: 1000 },
+            { targetId: "target-2", title: "重复网址", url: "https://example.com/first", checkedAt: 1000 },
+            { targetId: "target-3", title: "第三行", url: "https://example.com/third", checkedAt: 1000 }
+          ]
+        })}
+        onReadTabs={vi.fn()}
+        onCopyAllUrls={onCopyAllUrls}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "复制全部 3 个标签页网址" }));
+
+    expect(onCopyAllUrls).toHaveBeenCalledWith([
+      "https://example.com/first",
+      "https://example.com/first",
+      "https://example.com/third"
+    ]);
+  });
+
   test("同名标签页的复制按钮会用不同 URL 区分并复制对应 URL", () => {
     const onCopyUrl = vi.fn();
     render(
@@ -231,6 +256,7 @@ describe("RuntimeTabsPanel", () => {
     );
 
     expect(screen.queryByRole("button", { name: /复制网址/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /复制全部.*标签页网址/ })).toBeNull();
 
     rerender(
       <RuntimeTabsPanel
@@ -242,6 +268,7 @@ describe("RuntimeTabsPanel", () => {
       />
     );
     expect(screen.queryByRole("button", { name: /复制网址/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /复制全部.*标签页网址/ })).toBeNull();
 
     rerender(
       <RuntimeTabsPanel
@@ -259,6 +286,7 @@ describe("RuntimeTabsPanel", () => {
       />
     );
     expect(screen.queryByRole("button", { name: /复制网址/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /复制全部.*标签页网址/ })).toBeNull();
   });
 
   test("失败时显示错误信息", () => {

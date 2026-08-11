@@ -5,6 +5,7 @@ interface RuntimeTabsPanelProps {
   model: RuntimeTabsPanelModel;
   onReadTabs: () => void | Promise<void>;
   onCopyUrl?: (url: string) => void | Promise<void>;
+  onCopyAllUrls?: (urls: string[]) => void | Promise<void>;
   loading?: boolean;
 }
 
@@ -16,6 +17,7 @@ export function RuntimeTabsPanel({
   model,
   onReadTabs,
   onCopyUrl,
+  onCopyAllUrls,
   loading = false
 }: RuntimeTabsPanelProps) {
   const buttonDisabled = loading || !model.canReadTabs;
@@ -39,6 +41,16 @@ export function RuntimeTabsPanel({
           <RefreshCw size={14} />
           {loading ? "读取中" : "读取标签页"}
         </button>
+        {model.rows.length > 0 && onCopyAllUrls ? (
+          <button
+            className="secondary-button compact"
+            type="button"
+            onClick={() => void onCopyAllUrls(model.rows.map((row) => row.url))}
+          >
+            <Copy size={14} />
+            {`复制全部 ${model.rows.length} 个标签页网址`}
+          </button>
+        ) : null}
       </div>
 
       {model.disabledReason && !loading ? (
