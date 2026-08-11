@@ -6959,6 +6959,31 @@ describe("App launcher layout", () => {
     restoreBackupSpy.mockRestore();
   });
 
+  test("轻量恢复失败后会收口 working 并保留确认态", async () => {
+    const user = userEvent.setup();
+    const restoreBackupSpy = vi
+      .spyOn(profileApi, "restoreProfilesBackup")
+      .mockRejectedValue(new Error("恢复失败"));
+    const saveProfilesSpy = vi.spyOn(profileApi, "saveProfiles");
+    render(<App />);
+
+    const dialog = await openSettingsDialog(user);
+    fireEvent.change(within(dialog).getByLabelText("备份文件路径"), {
+      target: { value: "/tmp/multichrome-backup.json" }
+    });
+    await user.click(within(dialog).getByRole("button", { name: "从备份恢复" }));
+    await user.click(within(dialog).getByRole("button", { name: "确认恢复" }));
+
+    await waitFor(() => expect(restoreBackupSpy).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText("恢复失败")).toBeTruthy();
+    expect(await within(dialog).findByText("确认从备份恢复")).toBeTruthy();
+    expect(within(dialog).queryByRole("button", { name: "恢复中" })).toBeNull();
+    expect(
+      (within(dialog).getByRole("button", { name: "确认恢复" }) as HTMLButtonElement).disabled
+    ).toBe(false);
+    expect(saveProfilesSpy).not.toHaveBeenCalled();
+  });
+
   test("轻量恢复后 Chrome 检测失败仍提交恢复 UI 并提示", async () => {
     const user = userEvent.setup();
     const restoredDocument = documentWith([
