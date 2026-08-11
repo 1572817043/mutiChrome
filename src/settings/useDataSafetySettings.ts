@@ -69,9 +69,14 @@ export function useDataSafetySettings({
   const [fullBackupWorking, setFullBackupWorking] = useState<FullBackupWorking | null>(null);
   const [fullRestoreConfirmOpen, setFullRestoreConfirmOpen] = useState(false);
   const restoreInFlightRef = useRef(false);
+  const dataSafetyGenerationRef = useRef(0);
+  const currentRootPathRef = useRef(rootPath);
+  currentRootPathRef.current = rootPath;
 
   function resetDataSafetyState() {
+    dataSafetyGenerationRef.current += 1;
     setHealthReport(null);
+    setHealthChecking(false);
     setRepairResult(null);
     setBackupResult(null);
     setRestoreConfirmOpen(false);
@@ -82,6 +87,13 @@ export function useDataSafetySettings({
     setFullRestorePreview(null);
     setFullBackupWorking(null);
     setFullRestoreConfirmOpen(false);
+  }
+
+  function isCurrentDataSafetyRequest(requestRootPath: string, requestGeneration: number) {
+    return (
+      currentRootPathRef.current === requestRootPath &&
+      dataSafetyGenerationRef.current === requestGeneration
+    );
   }
 
   function closeDataSafetyDialogs() {
@@ -153,9 +165,14 @@ export function useDataSafetySettings({
       return;
     }
 
+    const requestRootPath = rootPath;
+    const requestGeneration = dataSafetyGenerationRef.current;
     setHealthChecking(true);
     try {
-      const report = await profileApi.checkProfileRootHealth(rootPath);
+      const report = await profileApi.checkProfileRootHealth(requestRootPath);
+      if (!isCurrentDataSafetyRequest(requestRootPath, requestGeneration)) {
+        return;
+      }
       setHealthReport(report);
       setRepairResult(null);
       const { errorCount, warningCount } = report.summary;
@@ -167,9 +184,14 @@ export function useDataSafetySettings({
         onMessage("目录健康检查通过");
       }
     } catch (error) {
+      if (!isCurrentDataSafetyRequest(requestRootPath, requestGeneration)) {
+        return;
+      }
       onMessage(errorMessage(error));
     } finally {
-      setHealthChecking(false);
+      if (isCurrentDataSafetyRequest(requestRootPath, requestGeneration)) {
+        setHealthChecking(false);
+      }
     }
   }
 
