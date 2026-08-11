@@ -77,6 +77,8 @@ export function useDataSafetySettings({
     dataSafetyGenerationRef.current += 1;
     setHealthReport(null);
     setHealthChecking(false);
+    setHealthRepairing(false);
+    setOrphanRegisteringId(null);
     setRepairResult(null);
     setBackupResult(null);
     setRestoreConfirmOpen(false);
@@ -201,9 +203,14 @@ export function useDataSafetySettings({
       return;
     }
 
+    const requestRootPath = rootPath;
+    const requestGeneration = dataSafetyGenerationRef.current;
     setHealthRepairing(true);
     try {
-      const result = await profileApi.repairProfileRootHealth(rootPath);
+      const result = await profileApi.repairProfileRootHealth(requestRootPath);
+      if (!isCurrentDataSafetyRequest(requestRootPath, requestGeneration)) {
+        return;
+      }
       setRepairResult(result);
       setHealthReport(result.health);
       onMessage(
@@ -212,9 +219,14 @@ export function useDataSafetySettings({
           : "没有可自动修复的问题"
       );
     } catch (error) {
+      if (!isCurrentDataSafetyRequest(requestRootPath, requestGeneration)) {
+        return;
+      }
       onMessage(errorMessage(error));
     } finally {
-      setHealthRepairing(false);
+      if (isCurrentDataSafetyRequest(requestRootPath, requestGeneration)) {
+        setHealthRepairing(false);
+      }
     }
   }
 
@@ -242,16 +254,29 @@ export function useDataSafetySettings({
       lastOpenedAt: null
     };
 
+    const requestRootPath = rootPath;
+    const requestGeneration = dataSafetyGenerationRef.current;
     setOrphanRegisteringId(profileId);
     try {
       await onPersistProfiles([...profiles, profile], `已登记 ${profileId}`);
-      const report = await profileApi.checkProfileRootHealth(rootPath);
+      if (!isCurrentDataSafetyRequest(requestRootPath, requestGeneration)) {
+        return;
+      }
+      const report = await profileApi.checkProfileRootHealth(requestRootPath);
+      if (!isCurrentDataSafetyRequest(requestRootPath, requestGeneration)) {
+        return;
+      }
       setHealthReport(report);
       setRepairResult(null);
     } catch (error) {
+      if (!isCurrentDataSafetyRequest(requestRootPath, requestGeneration)) {
+        return;
+      }
       onMessage(errorMessage(error));
     } finally {
-      setOrphanRegisteringId(null);
+      if (isCurrentDataSafetyRequest(requestRootPath, requestGeneration)) {
+        setOrphanRegisteringId(null);
+      }
     }
   }
 
