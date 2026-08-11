@@ -283,13 +283,13 @@ export function BulkActionBar({
                 aria-label="批量追加标签"
                 placeholder="追加标签，逗号分隔"
                 value={bulkTag}
-                disabled={selectedCount === 0}
+                disabled={selectedCount === 0 || bulkOpenRunning}
                 onChange={(event) => onBulkTagChange(event.target.value)}
               />
               <button
                 className="primary-button compact"
                 type="button"
-                disabled={selectedCount === 0}
+                disabled={selectedCount === 0 || bulkOpenRunning}
                 onClick={onAppendTags}
               >
                 追加标签

@@ -176,6 +176,33 @@ test("批量栏保留打开、重试、停止和更多操作入口", () => {
   expect(handlers.onRequestDelete).toHaveBeenCalledTimes(1);
 });
 
+test("批量打开期间锁定批量追加标签", () => {
+  const { handlers, props } = createBulkActionBarProps({
+    selection: {
+      selectedCount: 1,
+      selectedProfiles: [profile("account-001", "主号")]
+    },
+    urlQueue: {
+      bulkOpenRunning: true
+    },
+    tagging: {
+      bulkTag: "daily"
+    }
+  });
+
+  render(<BulkActionBar {...props} />);
+  fireEvent.click(screen.getByRole("button", { name: "更多操作" }));
+
+  const tagInput = screen.getByLabelText("批量追加标签") as HTMLInputElement;
+  const appendButton = screen.getByRole("button", { name: "追加标签" }) as HTMLButtonElement;
+  expect(tagInput.disabled).toBe(true);
+  expect(appendButton.disabled).toBe(true);
+
+  fireEvent.click(appendButton);
+
+  expect(handlers.onAppendTags).not.toHaveBeenCalled();
+});
+
 test("批量栏更多操作中渲染只读窗口状态面板", () => {
   const { props } = createBulkActionBarProps({
     selection: {
