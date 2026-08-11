@@ -81,6 +81,7 @@ export function useDataSafetySettings({
     setOrphanRegisteringId(null);
     setRepairResult(null);
     setBackupResult(null);
+    setBackupWorking(null);
     setRestoreConfirmOpen(false);
     setFullBackupScope("all");
     setFullBackupPreview(null);
@@ -323,16 +324,18 @@ export function useDataSafetySettings({
     if (!beginRestoreOperation()) {
       return;
     }
+    const requestRootPath = rootPath;
+    const requestGeneration = dataSafetyGenerationRef.current;
     const backupPath = backupPathDraft.trim();
     setBackupWorking("restore");
     try {
       const restored = await onRestoreDocument({
-        targetRootPath: rootPath,
+        targetRootPath: requestRootPath,
         restore: async () => {
-          const document = await profileApi.restoreProfilesBackup(rootPath, backupPath);
+          const document = await profileApi.restoreProfilesBackup(requestRootPath, backupPath);
           const settings = normalizeSettings(document.settings);
           const environment = await readRestoredEnvironment(
-            rootPath,
+            requestRootPath,
             settings,
             document.profiles.length,
             `已从备份恢复 ${document.profiles.length} 个账号`
@@ -344,13 +347,17 @@ export function useDataSafetySettings({
           };
         }
       });
-      if (restored) {
+      if (restored && isCurrentDataSafetyRequest(requestRootPath, requestGeneration)) {
         clearLightBackupRestoreState();
       }
     } catch (error) {
-      onMessage(errorMessage(error));
+      if (isCurrentDataSafetyRequest(requestRootPath, requestGeneration)) {
+        onMessage(errorMessage(error));
+      }
     } finally {
-      setBackupWorking(null);
+      if (isCurrentDataSafetyRequest(requestRootPath, requestGeneration)) {
+        setBackupWorking(null);
+      }
       finishRestoreOperation();
     }
   }
@@ -487,20 +494,22 @@ export function useDataSafetySettings({
       return;
     }
 
+    const requestRootPath = rootPath;
+    const requestGeneration = dataSafetyGenerationRef.current;
+    const restorePath = fullRestorePreview.path;
     setFullBackupWorking("restore");
     try {
-      const restorePath = fullRestorePreview.path;
       const restored = await onRestoreDocument({
-        targetRootPath: rootPath,
+        targetRootPath: requestRootPath,
         restore: async () => {
           const document = await profileApi.restoreFullProfileBackup(
-            rootPath,
+            requestRootPath,
             restorePath,
             true
           );
           const settings = normalizeSettings(document.settings);
           const environment = await readRestoredEnvironment(
-            rootPath,
+            requestRootPath,
             settings,
             document.profiles.length,
             `完整备份已恢复：${document.profiles.length} 个账号`
@@ -512,13 +521,17 @@ export function useDataSafetySettings({
           };
         }
       });
-      if (restored) {
+      if (restored && isCurrentDataSafetyRequest(requestRootPath, requestGeneration)) {
         clearFullBackupRestoreState();
       }
     } catch (error) {
-      onMessage(errorMessage(error));
+      if (isCurrentDataSafetyRequest(requestRootPath, requestGeneration)) {
+        onMessage(errorMessage(error));
+      }
     } finally {
-      setFullBackupWorking(null);
+      if (isCurrentDataSafetyRequest(requestRootPath, requestGeneration)) {
+        setFullBackupWorking(null);
+      }
       finishRestoreOperation();
     }
   }
