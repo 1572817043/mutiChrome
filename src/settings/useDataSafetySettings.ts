@@ -286,17 +286,27 @@ export function useDataSafetySettings({
       return;
     }
 
+    const requestRootPath = rootPath;
+    const requestGeneration = dataSafetyGenerationRef.current;
     setBackupWorking("create");
     try {
-      const backup = await profileApi.createProfilesBackup(rootPath);
+      const backup = await profileApi.createProfilesBackup(requestRootPath);
+      if (!isCurrentDataSafetyRequest(requestRootPath, requestGeneration)) {
+        return;
+      }
       setBackupResult(backup);
       setBackupPathDraft(backup.path);
       setRestoreConfirmOpen(false);
       onMessage(`已创建备份：${backup.profileCount} 个账号`);
     } catch (error) {
+      if (!isCurrentDataSafetyRequest(requestRootPath, requestGeneration)) {
+        return;
+      }
       onMessage(errorMessage(error));
     } finally {
-      setBackupWorking(null);
+      if (isCurrentDataSafetyRequest(requestRootPath, requestGeneration)) {
+        setBackupWorking(null);
+      }
     }
   }
 
@@ -365,19 +375,29 @@ export function useDataSafetySettings({
       return;
     }
 
+    const requestRootPath = rootPath;
+    const requestGeneration = dataSafetyGenerationRef.current;
     setFullBackupWorking("preview");
     setFullBackupResult(null);
     try {
       const preview = await profileApi.previewFullProfileBackup(
-        rootPath,
+        requestRootPath,
         selectedFullBackupProfileIds()
       );
+      if (!isCurrentDataSafetyRequest(requestRootPath, requestGeneration)) {
+        return;
+      }
       setFullBackupPreview(preview);
       onMessage(`已预览完整备份：${preview.profileCount} 个账号`);
     } catch (error) {
+      if (!isCurrentDataSafetyRequest(requestRootPath, requestGeneration)) {
+        return;
+      }
       onMessage(errorMessage(error));
     } finally {
-      setFullBackupWorking(null);
+      if (isCurrentDataSafetyRequest(requestRootPath, requestGeneration)) {
+        setFullBackupWorking(null);
+      }
     }
   }
 
@@ -391,21 +411,31 @@ export function useDataSafetySettings({
       return;
     }
 
+    const requestRootPath = rootPath;
+    const requestGeneration = dataSafetyGenerationRef.current;
     setFullBackupWorking("create");
     try {
       const backup = await profileApi.createFullProfileBackup(
-        rootPath,
+        requestRootPath,
         selectedFullBackupProfileIds()
       );
+      if (!isCurrentDataSafetyRequest(requestRootPath, requestGeneration)) {
+        return;
+      }
       setFullBackupResult(backup);
       setFullBackupPathDraft(backup.path);
       setFullRestorePreview(null);
       setFullRestoreConfirmOpen(false);
       onMessage(`完整备份已创建：${backup.profileCount} 个账号`);
     } catch (error) {
+      if (!isCurrentDataSafetyRequest(requestRootPath, requestGeneration)) {
+        return;
+      }
       onMessage(errorMessage(error));
     } finally {
-      setFullBackupWorking(null);
+      if (isCurrentDataSafetyRequest(requestRootPath, requestGeneration)) {
+        setFullBackupWorking(null);
+      }
     }
   }
 
