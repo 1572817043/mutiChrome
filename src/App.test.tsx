@@ -851,6 +851,11 @@ describe("App launcher layout", () => {
 
   test("运行中的账号编辑弹窗可以读取浏览器标签页", async () => {
     const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true
+    });
     const snapshotSpy = vi
       .spyOn(profileApi, "snapshotBrowserSessions")
       .mockResolvedValue([
@@ -863,7 +868,7 @@ describe("App launcher layout", () => {
         type: "page",
         url: "https://example.com/runtime",
         title: "Runtime Home",
-        webSocketDebuggerUrl: null,
+        webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/page/0123456789abcdef",
         checkedAt: 1000
       }
     ]);
@@ -876,8 +881,89 @@ describe("App launcher layout", () => {
     expect(listTabsSpy).toHaveBeenCalledWith("~/MultiChromeProfiles", "account-001");
     expect(await within(dialog).findByText("Runtime Home")).toBeTruthy();
     expect(within(dialog).getByText("https://example.com/runtime")).toBeTruthy();
+    expect(within(dialog).queryByText("ws://127.0.0.1:9222/devtools/page/0123456789abcdef")).toBeNull();
+    await user.click(
+      within(dialog).getByRole("button", {
+        name: "复制网址 Runtime Home https://example.com/runtime"
+      })
+    );
+    expect(writeText).toHaveBeenCalledWith("https://example.com/runtime");
+    expect(writeText).not.toHaveBeenCalledWith(
+      "ws://127.0.0.1:9222/devtools/page/0123456789abcdef"
+    );
+    expect(await screen.findByText("已复制标签页网址")).toBeTruthy();
     snapshotSpy.mockRestore();
     listTabsSpy.mockRestore();
+  });
+
+  test("运行中的账号复制标签页网址时不支持剪贴板会提示既有文案", async () => {
+    const user = userEvent.setup();
+    Object.defineProperty(navigator, "clipboard", {
+      value: {},
+      configurable: true
+    });
+    vi.spyOn(profileApi, "snapshotBrowserSessions").mockResolvedValue([
+      browserSessionSnapshot("account-001", true),
+      browserSessionSnapshot("account-002", false)
+    ]);
+    vi.spyOn(profileApi, "listRuntimeTabs").mockResolvedValue([
+      {
+        targetId: "clipboard-target",
+        type: "page",
+        url: "https://example.com/clipboard",
+        title: "剪贴板测试",
+        webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/page/clipboard-target",
+        checkedAt: 1000
+      }
+    ]);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "编辑 主号" }));
+    const dialog = await screen.findByRole("dialog", { name: "编辑 主号" });
+    await user.click(within(dialog).getByRole("button", { name: "读取标签页" }));
+    await user.click(
+      within(dialog).getByRole("button", {
+        name: "复制网址 剪贴板测试 https://example.com/clipboard"
+      })
+    );
+
+    expect(await screen.findByText("当前环境不能复制到剪贴板")).toBeTruthy();
+  });
+
+  test("运行中的账号复制标签页网址失败时显示错误且不抛出未处理异常", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockRejectedValue(new Error("剪贴板拒绝"));
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true
+    });
+    vi.spyOn(profileApi, "snapshotBrowserSessions").mockResolvedValue([
+      browserSessionSnapshot("account-001", true),
+      browserSessionSnapshot("account-002", false)
+    ]);
+    vi.spyOn(profileApi, "listRuntimeTabs").mockResolvedValue([
+      {
+        targetId: "failure-target",
+        type: "page",
+        url: "https://example.com/failure",
+        title: "失败测试",
+        webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/page/failure-target",
+        checkedAt: 1000
+      }
+    ]);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "编辑 主号" }));
+    const dialog = await screen.findByRole("dialog", { name: "编辑 主号" });
+    await user.click(within(dialog).getByRole("button", { name: "读取标签页" }));
+    await user.click(
+      within(dialog).getByRole("button", {
+        name: "复制网址 失败测试 https://example.com/failure"
+      })
+    );
+
+    expect(await screen.findByText("剪贴板拒绝")).toBeTruthy();
+    expect(screen.queryByText("复制网址失败：剪贴板拒绝")).toBeNull();
   });
 
   test("运行账号缺少调试端口时不允许编辑弹窗读取标签页", async () => {

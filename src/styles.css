@@ -2253,6 +2253,12 @@ button:disabled {
   background: #f8faf8;
 }
 
+.runtime-tabs-row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .runtime-tabs-row-main {
   display: grid;
   min-width: 0;
