@@ -416,17 +416,27 @@ export function useDataSafetySettings({
       return;
     }
 
+    const requestRootPath = rootPath;
+    const requestGeneration = dataSafetyGenerationRef.current;
     setFullBackupWorking("restore-preview");
     setFullRestorePreview(null);
     setFullRestoreConfirmOpen(false);
     try {
-      const preview = await profileApi.previewFullProfileRestore(rootPath, backupPath);
+      const preview = await profileApi.previewFullProfileRestore(requestRootPath, backupPath);
+      if (!isCurrentDataSafetyRequest(requestRootPath, requestGeneration)) {
+        return;
+      }
       setFullRestorePreview(preview);
       onMessage(`已扫描完整备份：${preview.profileCount} 个账号`);
     } catch (error) {
+      if (!isCurrentDataSafetyRequest(requestRootPath, requestGeneration)) {
+        return;
+      }
       onMessage(errorMessage(error));
     } finally {
-      setFullBackupWorking(null);
+      if (isCurrentDataSafetyRequest(requestRootPath, requestGeneration)) {
+        setFullBackupWorking(null);
+      }
     }
   }
 

@@ -7296,6 +7296,63 @@ describe("App launcher layout", () => {
     restoreSpy.mockRestore();
   });
 
+  test("切换根目录后不会写回旧的完整恢复预览", async () => {
+    const user = userEvent.setup();
+    const previewRequest = deferred<{
+      path: string;
+      profileCount: number;
+      profileIds: string[];
+      newProfileIds: string[];
+      overwriteProfileIds: string[];
+      totalBytes: number;
+    }>();
+    const previewSpy = vi
+      .spyOn(profileApi, "previewFullProfileRestore")
+      .mockReturnValue(previewRequest.promise);
+    render(<App />);
+
+    const dialog = await openSettingsDialog(user);
+    fireEvent.change(within(dialog).getByLabelText("完整备份目录路径"), {
+      target: { value: "/tmp/old-root-full-profiles" }
+    });
+    await user.click(within(dialog).getByRole("button", { name: "扫描完整备份" }));
+    await waitFor(() => {
+      expect(previewSpy).toHaveBeenCalledWith(
+        "~/MultiChromeProfiles",
+        "/tmp/old-root-full-profiles"
+      );
+    });
+
+    changeRootPathDraft(dialog, "/tmp/other-root");
+    await detectRootPathDraft(user, dialog);
+    await waitFor(() => {
+      expect((within(dialog).getByLabelText("配置根目录") as HTMLInputElement).value).toBe(
+        "/tmp/other-root"
+      );
+    });
+    expect(within(dialog).queryByRole("button", { name: "恢复完整备份" })).toBeNull();
+
+    previewRequest.resolve({
+      path: "/tmp/old-root-full-profiles",
+      profileCount: 9,
+      profileIds: ["old-account"],
+      newProfileIds: ["old-account"],
+      overwriteProfileIds: [],
+      totalBytes: 4096
+    });
+    await act(async () => {
+      await previewRequest.promise;
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(within(dialog).queryByText("/tmp/old-root-full-profiles")).toBeNull();
+    expect(within(dialog).queryByText("新增 1 个")).toBeNull();
+    expect(within(dialog).queryByRole("button", { name: "恢复完整备份" })).toBeNull();
+    expect(screen.getByRole("status").textContent).not.toContain("已扫描完整备份：9 个账号");
+    previewSpy.mockRestore();
+  });
+
   test("完整恢复会等待 pending 导入复制完成后再替换目录", async () => {
     const user = userEvent.setup();
     const importCopy = deferred<void>();
