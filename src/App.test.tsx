@@ -7100,6 +7100,57 @@ describe("App launcher layout", () => {
     loadProfilesSpy.mockRestore();
   });
 
+  test("切换根目录后旧轻量恢复失败不会写回错误消息", async () => {
+    const user = userEvent.setup();
+    const restoreRequest = deferred<ProfileDocument>();
+    const restoreBackupSpy = vi
+      .spyOn(profileApi, "restoreProfilesBackup")
+      .mockReturnValue(restoreRequest.promise);
+    render(<App />);
+
+    const dialog = await openSettingsDialog(user);
+    fireEvent.change(within(dialog).getByLabelText("备份文件路径"), {
+      target: { value: "/tmp/multichrome-backup.json" }
+    });
+    await user.click(within(dialog).getByRole("button", { name: "从备份恢复" }));
+    await user.click(within(dialog).getByRole("button", { name: "确认恢复" }));
+    await waitFor(() => {
+      expect(restoreBackupSpy).toHaveBeenCalledTimes(1);
+    });
+
+    const initProfileRootSpy = vi
+      .spyOn(profileApi, "initProfileRoot")
+      .mockResolvedValue({ rootExists: true, writable: true, profileCount: 1 });
+    const loadProfilesSpy = vi
+      .spyOn(profileApi, "loadProfiles")
+      .mockResolvedValue(documentWith([profile({ id: "target-001", name: "目标账号" })]));
+    const saveProfilesSpy = vi
+      .spyOn(profileApi, "saveProfiles")
+      .mockResolvedValue(undefined);
+    changeRootPathDraft(dialog, "/tmp/other-root");
+    await user.click(within(dialog).getByRole("button", { name: "保存设置" }));
+    await screen.findByRole("button", { name: "选择 目标账号" });
+    expect(within(dialog).queryByText("确认从备份恢复")).toBeNull();
+
+    restoreRequest.reject(new Error("旧 root 恢复失败"));
+    await act(async () => {
+      await restoreRequest.promise.catch(() => undefined);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByRole("status").textContent).not.toContain("旧 root 恢复失败");
+    expect(within(dialog).queryByText("确认从备份恢复")).toBeNull();
+    expect(within(dialog).queryByRole("button", { name: "恢复中" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "选择 恢复号" })).toBeNull();
+    expect(loadProfilesSpy).toHaveBeenCalledWith("/tmp/other-root");
+    expect(saveProfilesSpy).toHaveBeenCalled();
+    restoreBackupSpy.mockRestore();
+    initProfileRootSpy.mockRestore();
+    loadProfilesSpy.mockRestore();
+    saveProfilesSpy.mockRestore();
+  });
+
   test("轻量恢复会等待恢复 API 完成后才清理确认态", async () => {
     const user = userEvent.setup();
     const restoreRequest = deferred<ProfileDocument>();
@@ -7603,6 +7654,70 @@ describe("App launcher layout", () => {
     previewSpy.mockRestore();
     restoreBackupSpy.mockRestore();
     restoreFullSpy.mockRestore();
+  });
+
+  test("切换根目录后旧完整恢复失败不会写回错误消息", async () => {
+    const user = userEvent.setup();
+    const restoreRequest = deferred<ProfileDocument>();
+    const previewSpy = vi
+      .spyOn(profileApi, "previewFullProfileRestore")
+      .mockResolvedValue({
+        path: "/tmp/full-profiles-1",
+        profileCount: 1,
+        profileIds: ["account-009"],
+        newProfileIds: ["account-009"],
+        overwriteProfileIds: [],
+        totalBytes: 4096
+      });
+    const restoreFullSpy = vi
+      .spyOn(profileApi, "restoreFullProfileBackup")
+      .mockReturnValue(restoreRequest.promise);
+    render(<App />);
+
+    const dialog = await openSettingsDialog(user);
+    fireEvent.change(within(dialog).getByLabelText("完整备份目录路径"), {
+      target: { value: "/tmp/full-profiles-1" }
+    });
+    await user.click(within(dialog).getByRole("button", { name: "扫描完整备份" }));
+    await user.click(await within(dialog).findByRole("button", { name: "恢复完整备份" }));
+    const confirmDialog = await screen.findByRole("dialog", { name: "确认恢复完整备份" });
+    await user.click(within(confirmDialog).getByRole("button", { name: "确认恢复" }));
+    await waitFor(() => {
+      expect(restoreFullSpy).toHaveBeenCalledTimes(1);
+    });
+
+    const initProfileRootSpy = vi
+      .spyOn(profileApi, "initProfileRoot")
+      .mockResolvedValue({ rootExists: true, writable: true, profileCount: 1 });
+    const loadProfilesSpy = vi
+      .spyOn(profileApi, "loadProfiles")
+      .mockResolvedValue(documentWith([profile({ id: "target-001", name: "目标账号" })]));
+    const saveProfilesSpy = vi
+      .spyOn(profileApi, "saveProfiles")
+      .mockResolvedValue(undefined);
+    changeRootPathDraft(dialog, "/tmp/other-root");
+    await user.click(within(dialog).getByRole("button", { name: "保存设置" }));
+    await screen.findByRole("button", { name: "选择 目标账号" });
+    expect(screen.queryByRole("dialog", { name: "确认恢复完整备份" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "恢复中" })).toBeNull();
+
+    restoreRequest.reject(new Error("旧 root 完整恢复失败"));
+    await act(async () => {
+      await restoreRequest.promise.catch(() => undefined);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByRole("status").textContent).not.toContain("旧 root 完整恢复失败");
+    expect(screen.queryByRole("dialog", { name: "确认恢复完整备份" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "恢复中" })).toBeNull();
+    expect(loadProfilesSpy).toHaveBeenCalledWith("/tmp/other-root");
+    expect(saveProfilesSpy).toHaveBeenCalled();
+    previewSpy.mockRestore();
+    restoreFullSpy.mockRestore();
+    initProfileRootSpy.mockRestore();
+    loadProfilesSpy.mockRestore();
+    saveProfilesSpy.mockRestore();
   });
 
   test("设置弹窗可以打开数据目录和备份目录", async () => {
