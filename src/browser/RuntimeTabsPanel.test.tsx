@@ -107,12 +107,14 @@ describe("RuntimeTabsPanel", () => {
             {
               targetId: "target-1",
               title: "第一行",
+              rawTitle: "第一行",
               url: "https://example.com/first",
               checkedAt: 1000
             },
             {
               targetId: "target-2",
               title: "第二行",
+              rawTitle: "第二行",
               url: "https://example.com/second",
               checkedAt: 1000
             }
@@ -199,6 +201,58 @@ describe("RuntimeTabsPanel", () => {
     expect(onCopyUrl).toHaveBeenNthCalledWith(2, "https://example.com/second");
   });
 
+  test("提供草稿 handler 时显示行内动作并回传对应标题和 URL", () => {
+    const onSaveAsUrlDraft = vi.fn();
+    render(
+      <RuntimeTabsPanel
+        model={createModel({
+          rows: [
+            {
+              targetId: "target-1",
+              title: "第一行",
+              rawTitle: "第一行",
+              url: "https://example.com/first",
+              checkedAt: 1000
+            },
+            {
+              targetId: "target-2",
+              title: "第二行",
+              rawTitle: "第二行",
+              url: "https://example.com/second",
+              checkedAt: 1000
+            }
+          ]
+        })}
+        onReadTabs={vi.fn()}
+        onCopyUrl={vi.fn()}
+        onSaveAsUrlDraft={onSaveAsUrlDraft}
+      />
+    );
+
+    expect(
+      screen.getByRole("button", {
+        name: "存为网址草稿 第二行 https://example.com/second"
+      })
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", {
+        name: "复制网址 第二行 https://example.com/second"
+      })
+    ).toBeTruthy();
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "存为网址草稿 第二行 https://example.com/second"
+      })
+    );
+
+    expect(onSaveAsUrlDraft).toHaveBeenCalledWith({
+      title: "第二行",
+      rawTitle: "第二行",
+      url: "https://example.com/second"
+    });
+  });
+
   test("点击每一行的复制按钮只复制对应 URL，且不影响读取按钮", () => {
     const onReadTabs = vi.fn();
     const onCopyUrl = vi.fn();
@@ -257,6 +311,7 @@ describe("RuntimeTabsPanel", () => {
 
     expect(screen.queryByRole("button", { name: /复制网址/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /复制全部.*标签页网址/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /存为网址草稿/ })).toBeNull();
 
     rerender(
       <RuntimeTabsPanel
@@ -269,6 +324,7 @@ describe("RuntimeTabsPanel", () => {
     );
     expect(screen.queryByRole("button", { name: /复制网址/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /复制全部.*标签页网址/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /存为网址草稿/ })).toBeNull();
 
     rerender(
       <RuntimeTabsPanel
@@ -287,6 +343,7 @@ describe("RuntimeTabsPanel", () => {
     );
     expect(screen.queryByRole("button", { name: /复制网址/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /复制全部.*标签页网址/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /存为网址草稿/ })).toBeNull();
   });
 
   test("失败时显示错误信息", () => {

@@ -88,12 +88,14 @@ describe("buildRuntimeTabsPanelModel", () => {
       {
         targetId: "target-1",
         title: "未命名标签页",
+        rawTitle: "  ",
         url: "about:blank",
         checkedAt: 2000
       },
       {
         targetId: "target-2",
         title: "第二个标签页",
+        rawTitle: "第二个标签页",
         url: "https://example.org",
         checkedAt: 3000
       }

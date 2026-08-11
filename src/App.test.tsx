@@ -1050,6 +1050,128 @@ describe("App launcher layout", () => {
     expect(screen.queryByText("复制网址失败：全量剪贴板拒绝")).toBeNull();
   });
 
+  test("运行中的账号可以将标签页预填为未持久化的网址草稿", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(profileApi, "snapshotBrowserSessions").mockResolvedValue([
+      browserSessionSnapshot("account-001", true),
+      browserSessionSnapshot("account-002", false)
+    ]);
+    vi.spyOn(profileApi, "listRuntimeTabs").mockResolvedValue([
+      {
+        targetId: "url-draft-target",
+        type: "page",
+        url: "https://example.com/draft",
+        title: "标签页草稿",
+        webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/page/url-draft-target",
+        checkedAt: 1000
+      }
+    ]);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "编辑 主号" }));
+    const accountDialog = await screen.findByRole("dialog", { name: "编辑 主号" });
+    await user.click(within(accountDialog).getByRole("button", { name: "读取标签页" }));
+    await user.click(
+      within(accountDialog).getByRole("button", {
+        name: "存为网址草稿 标签页草稿 https://example.com/draft"
+      })
+    );
+
+    expect(screen.queryByRole("dialog", { name: "编辑 主号" })).toBeNull();
+    const urlDraftDialog = await screen.findByRole("dialog", { name: "新建网址" });
+    expect((within(urlDraftDialog).getByLabelText("网址名称") as HTMLInputElement).value).toBe(
+      "标签页草稿"
+    );
+    expect((within(urlDraftDialog).getByLabelText("网址 URL") as HTMLInputElement).value).toBe(
+      "https://example.com/draft"
+    );
+    expect((within(urlDraftDialog).getByLabelText("网址标签") as HTMLInputElement).value).toBe("");
+    expect((within(urlDraftDialog).getByLabelText("网址备注") as HTMLTextAreaElement).value).toBe("");
+    expect(savedDocument().settings.urlLibrary).toEqual([]);
+
+    await user.click(within(urlDraftDialog).getByRole("button", { name: "取消" }));
+
+    expect(screen.queryByRole("dialog", { name: "新建网址" })).toBeNull();
+    expect(savedDocument().settings.urlLibrary).toEqual([]);
+  });
+
+  test("空标题标签页存为网址草稿时使用网址展示名并在保存后才写入", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(profileApi, "snapshotBrowserSessions").mockResolvedValue([
+      browserSessionSnapshot("account-001", true),
+      browserSessionSnapshot("account-002", false)
+    ]);
+    vi.spyOn(profileApi, "listRuntimeTabs").mockResolvedValue([
+      {
+        targetId: "empty-title-draft-target",
+        type: "page",
+        url: "https://example.com/path?source=runtime",
+        title: " ",
+        webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/page/empty-title-draft-target",
+        checkedAt: 1000
+      }
+    ]);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "编辑 主号" }));
+    const accountDialog = await screen.findByRole("dialog", { name: "编辑 主号" });
+    await user.click(within(accountDialog).getByRole("button", { name: "读取标签页" }));
+    await user.click(
+      within(accountDialog).getByRole("button", {
+        name: "存为网址草稿 未命名标签页 https://example.com/path?source=runtime"
+      })
+    );
+
+    const urlDraftDialog = await screen.findByRole("dialog", { name: "新建网址" });
+    expect((within(urlDraftDialog).getByLabelText("网址名称") as HTMLInputElement).value).toBe(
+      "example.com/path?source=runtime"
+    );
+    expect(savedDocument().settings.urlLibrary).toEqual([]);
+
+    await user.click(within(urlDraftDialog).getByRole("button", { name: "保存网址" }));
+
+    expect(await screen.findByText("已保存网址")).toBeTruthy();
+    expect(savedDocument().settings.urlLibrary[0]).toMatchObject({
+      name: "example.com/path?source=runtime",
+      url: "https://example.com/path?source=runtime",
+      tags: [],
+      notes: ""
+    });
+  });
+
+  test("真实标题为未命名标签页时存为网址草稿会保留该标题", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(profileApi, "snapshotBrowserSessions").mockResolvedValue([
+      browserSessionSnapshot("account-001", true),
+      browserSessionSnapshot("account-002", false)
+    ]);
+    vi.spyOn(profileApi, "listRuntimeTabs").mockResolvedValue([
+      {
+        targetId: "literal-unnamed-title-target",
+        type: "page",
+        url: "https://example.com/literal-title",
+        title: "未命名标签页",
+        webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/page/literal-unnamed-title-target",
+        checkedAt: 1000
+      }
+    ]);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "编辑 主号" }));
+    const accountDialog = await screen.findByRole("dialog", { name: "编辑 主号" });
+    await user.click(within(accountDialog).getByRole("button", { name: "读取标签页" }));
+    await user.click(
+      within(accountDialog).getByRole("button", {
+        name: "存为网址草稿 未命名标签页 https://example.com/literal-title"
+      })
+    );
+
+    const urlDraftDialog = await screen.findByRole("dialog", { name: "新建网址" });
+    expect((within(urlDraftDialog).getByLabelText("网址名称") as HTMLInputElement).value).toBe(
+      "未命名标签页"
+    );
+  });
+
   test("运行账号缺少调试端口时不允许编辑弹窗读取标签页", async () => {
     const user = userEvent.setup();
     const snapshotSpy = vi
