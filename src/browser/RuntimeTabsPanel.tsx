@@ -1,11 +1,14 @@
-import { Copy, RefreshCw } from "lucide-react";
-import type { RuntimeTabsPanelModel } from "./runtimeTabs";
+import { Copy, Plus, RefreshCw } from "lucide-react";
+import type { RuntimeTabsPanelModel, RuntimeTabsPanelRow } from "./runtimeTabs";
 
 interface RuntimeTabsPanelProps {
   model: RuntimeTabsPanelModel;
   onReadTabs: () => void | Promise<void>;
   onCopyUrl?: (url: string) => void | Promise<void>;
   onCopyAllUrls?: (urls: string[]) => void | Promise<void>;
+  onSaveAsUrlDraft?: (
+    tab: Pick<RuntimeTabsPanelRow, "title" | "rawTitle" | "url">
+  ) => void;
   loading?: boolean;
 }
 
@@ -18,6 +21,7 @@ export function RuntimeTabsPanel({
   onReadTabs,
   onCopyUrl,
   onCopyAllUrls,
+  onSaveAsUrlDraft,
   loading = false
 }: RuntimeTabsPanelProps) {
   const buttonDisabled = loading || !model.canReadTabs;
@@ -82,6 +86,23 @@ export function RuntimeTabsPanel({
                     onClick={() => void onCopyUrl(row.url)}
                   >
                     <Copy size={14} />
+                  </button>
+                ) : null}
+                {onSaveAsUrlDraft ? (
+                  <button
+                    className="icon-button compact"
+                    type="button"
+                    aria-label={`存为网址草稿 ${row.title} ${row.url}`}
+                    title="存为网址草稿"
+                    onClick={() =>
+                      onSaveAsUrlDraft({
+                        title: row.title,
+                        rawTitle: row.rawTitle,
+                        url: row.url
+                      })
+                    }
+                  >
+                    <Plus size={14} />
                   </button>
                 ) : null}
               </div>

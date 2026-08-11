@@ -17,6 +17,7 @@ export interface RuntimeTabsPanelInput {
 export interface RuntimeTabsPanelRow {
   targetId: string;
   title: string;
+  rawTitle?: string;
   url: string;
   checkedAt: number;
 }
@@ -43,6 +44,7 @@ function formatTab(tab: BrowserRuntimeTabSnapshot): RuntimeTabsPanelRow {
   return {
     targetId: tab.targetId,
     title: tab.title.trim() || "未命名标签页",
+    rawTitle: tab.title,
     url: tab.url.trim() || "about:blank",
     checkedAt: tab.checkedAt
   };

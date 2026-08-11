@@ -1863,6 +1863,29 @@ function App() {
     setUrlLibraryEditorOpen(true);
   }
 
+  function startCreatingUrlLibraryItemFromRuntimeTab({
+    title,
+    rawTitle,
+    url
+  }: {
+    title: string;
+    rawTitle?: string;
+    url: string;
+  }) {
+    closeEditor();
+    setEditingUrlLibraryId(null);
+    setEditingUrlLibraryCreatedAt(null);
+    setUrlLibraryDraft({
+      name: (rawTitle ?? title).trim() || displayUrlLabel(url),
+      url,
+      tags: "",
+      notes: ""
+    });
+    setPendingUrlDeleteId(null);
+    setPendingUrlDeleteCreatedAt(null);
+    setUrlLibraryEditorOpen(true);
+  }
+
   function cancelUrlLibraryEdit() {
     setEditingUrlLibraryId(null);
     setEditingUrlLibraryCreatedAt(null);
@@ -3228,6 +3251,7 @@ function App() {
               onReadTabs={runtimeTabs.readTabs}
               onCopyUrl={(url) => void copyRuntimeTabUrl(url)}
               onCopyAllUrls={(urls) => void copyRuntimeTabUrls(urls)}
+              onSaveAsUrlDraft={startCreatingUrlLibraryItemFromRuntimeTab}
               loading={runtimeTabs.loading}
             />
           }
