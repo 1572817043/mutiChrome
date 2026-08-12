@@ -50,4 +50,23 @@ describe("UrlLibraryBatchDraftDialog", () => {
     await user.click(screen.getByRole("button", { name: "删除第 1 条网址" }));
     expect((screen.getByRole("button", { name: "保存 0 个网址" }) as HTMLButtonElement).disabled).toBe(true);
   });
+
+  test("保存中锁定关闭和草稿编辑", () => {
+    render(
+      <UrlLibraryBatchDraftDialog
+        drafts={[{ name: "第一页", url: "https://example.com/first" }]}
+        onChange={vi.fn()}
+        onSave={vi.fn()}
+        onClose={vi.fn()}
+        saving
+      />
+    );
+
+    expect((screen.getByRole("button", { name: "保存中..." }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "取消" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "关闭" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByLabelText("第 1 条网址名称") as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByLabelText("第 1 条网址 URL") as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "删除第 1 条网址" }) as HTMLButtonElement).disabled).toBe(true);
+  });
 });

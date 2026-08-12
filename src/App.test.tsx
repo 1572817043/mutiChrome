@@ -1298,6 +1298,178 @@ describe("App launcher layout", () => {
     expect(savedDocument().settings.urlLibrary).toEqual([]);
   });
 
+  test("批量网址草稿保存中仅提交一次，锁定草稿并在失败后允许重试", async () => {
+    const user = userEvent.setup();
+    const pendingSave = deferred<void>();
+    const saveProfilesSpy = vi
+      .spyOn(profileApi, "saveProfiles")
+      .mockImplementationOnce(() => pendingSave.promise)
+      .mockResolvedValue(undefined);
+    vi.spyOn(profileApi, "snapshotBrowserSessions").mockResolvedValue([
+      browserSessionSnapshot("account-001", true),
+      browserSessionSnapshot("account-002", false)
+    ]);
+    vi.spyOn(profileApi, "listRuntimeTabs").mockResolvedValue([
+      { targetId: "save-lock", type: "page", url: "https://example.com/save-lock", title: "保存锁", webSocketDebuggerUrl: null, checkedAt: 1000 }
+    ]);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "编辑 主号" }));
+    const accountDialog = await screen.findByRole("dialog", { name: "编辑 主号" });
+    await user.click(within(accountDialog).getByRole("button", { name: "读取标签页" }));
+    await user.click(within(accountDialog).getByRole("button", { name: "存为全部 1 个网址草稿" }));
+    const draftDialog = await screen.findByRole("dialog", { name: "存为全部网址草稿" });
+    const saveButton = within(draftDialog).getByRole("button", { name: "保存 1 个网址" });
+
+    fireEvent.click(saveButton);
+    fireEvent.click(saveButton);
+    await waitFor(() => expect(saveProfilesSpy).toHaveBeenCalledTimes(1));
+    expect((within(draftDialog).getByRole("button", { name: "保存中..." }) as HTMLButtonElement).disabled).toBe(true);
+    expect((within(draftDialog).getByRole("button", { name: "取消" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((within(draftDialog).getByRole("button", { name: "关闭" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((within(draftDialog).getByLabelText("第 1 条网址名称") as HTMLInputElement).disabled).toBe(true);
+    expect((within(draftDialog).getByRole("button", { name: "删除第 1 条网址" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.keyDown(document, { key: "Escape" });
+    fireEvent.mouseDown(draftDialog.parentElement as HTMLElement);
+    expect(screen.getByRole("dialog", { name: "存为全部网址草稿" })).toBeTruthy();
+
+    await act(async () => {
+      pendingSave.reject(new Error("首次保存失败"));
+      await pendingSave.promise.catch(() => undefined);
+    });
+    expect(await screen.findByText("首次保存失败")).toBeTruthy();
+    expect((within(draftDialog).getByRole("button", { name: "保存 1 个网址" }) as HTMLButtonElement).disabled).toBe(false);
+
+    await user.click(within(draftDialog).getByRole("button", { name: "保存 1 个网址" }));
+    await waitFor(() => expect(saveProfilesSpy).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole("dialog", { name: "存为全部网址草稿" })).toBeNull();
+    expect(saveProfilesSpy.mock.calls[1]?.[1].settings.urlLibrary).toHaveLength(1);
+    saveProfilesSpy.mockRestore();
+  });
+
+  test("批量网址草稿保存遇到根切换 stale 时不显示旧保存成功", async () => {
+    const user = userEvent.setup();
+    const pendingSave = deferred<void>();
+    const targetDocument = documentWith([profile({ id: "target-001", name: "目标账号" })]);
+    const saveProfilesSpy = vi
+      .spyOn(profileApi, "saveProfiles")
+      .mockImplementationOnce(() => pendingSave.promise)
+      .mockResolvedValue(undefined);
+    vi.spyOn(profileApi, "snapshotBrowserSessions").mockResolvedValue([
+      browserSessionSnapshot("account-001", true),
+      browserSessionSnapshot("account-002", false)
+    ]);
+    vi.spyOn(profileApi, "listRuntimeTabs").mockResolvedValue([
+      { targetId: "stale-save", type: "page", url: "https://example.com/stale-save", title: "旧根草稿", webSocketDebuggerUrl: null, checkedAt: 1000 }
+    ]);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "编辑 主号" }));
+    const accountDialog = await screen.findByRole("dialog", { name: "编辑 主号" });
+    await user.click(within(accountDialog).getByRole("button", { name: "读取标签页" }));
+    await user.click(within(accountDialog).getByRole("button", { name: "存为全部 1 个网址草稿" }));
+    const draftDialog = await screen.findByRole("dialog", { name: "存为全部网址草稿" });
+    await user.click(within(draftDialog).getByRole("button", { name: "保存 1 个网址" }));
+    await waitFor(() => expect(saveProfilesSpy).toHaveBeenCalledTimes(1));
+
+    vi.spyOn(profileApi, "initProfileRoot").mockResolvedValue({
+      rootExists: true,
+      writable: true,
+      profileCount: 1
+    });
+    vi.spyOn(profileApi, "loadProfiles").mockResolvedValue(targetDocument);
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    const settingsDialog = await screen.findByRole("dialog", { name: "设置" });
+    changeRootPathDraft(settingsDialog, "/tmp/runtime-stale-root");
+    await user.click(within(settingsDialog).getByRole("button", { name: "保存设置" }));
+    await waitFor(() => expect(saveProfilesSpy).toHaveBeenCalledTimes(2));
+
+    await act(async () => {
+      pendingSave.resolve();
+      await pendingSave.promise;
+    });
+
+    expect(await screen.findByRole("button", { name: "选择 目标账号" })).toBeTruthy();
+    expect(screen.queryByText("已保存 1 个网址")).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "存为全部网址草稿" })).toBeNull();
+    saveProfilesSpy.mockRestore();
+  });
+
+  test("根生命周期切换后旧批量保存不会锁定或关闭新草稿", async () => {
+    const user = userEvent.setup();
+    const pendingOldSave = deferred<void>();
+    const rootBDocument = documentWith([profile({ id: "root-b-001", name: "B 根账号" })]);
+    const rootAReturnDocument = documentWith([profile({ id: "root-a-001", name: "A 根新账号" })]);
+    const saveProfilesSpy = vi
+      .spyOn(profileApi, "saveProfiles")
+      .mockImplementationOnce(() => pendingOldSave.promise)
+      .mockResolvedValue(undefined);
+    vi.spyOn(profileApi, "snapshotBrowserSessions").mockResolvedValue([
+      browserSessionSnapshot("account-001", true),
+      browserSessionSnapshot("root-b-001", true),
+      browserSessionSnapshot("root-a-001", true)
+    ]);
+    vi.spyOn(profileApi, "listRuntimeTabs").mockResolvedValue([
+      { targetId: "lifecycle", type: "page", url: "https://example.com/lifecycle", title: "生命周期草稿", webSocketDebuggerUrl: null, checkedAt: 1000 }
+    ]);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "编辑 主号" }));
+    let accountDialog = await screen.findByRole("dialog", { name: "编辑 主号" });
+    await user.click(within(accountDialog).getByRole("button", { name: "读取标签页" }));
+    await user.click(within(accountDialog).getByRole("button", { name: "存为全部 1 个网址草稿" }));
+    let draftDialog = await screen.findByRole("dialog", { name: "存为全部网址草稿" });
+    await user.click(within(draftDialog).getByRole("button", { name: "保存 1 个网址" }));
+    await waitFor(() => expect(saveProfilesSpy).toHaveBeenCalledTimes(1));
+
+    vi.spyOn(profileApi, "initProfileRoot").mockResolvedValue({ rootExists: true, writable: true, profileCount: 1 });
+    vi.spyOn(profileApi, "loadProfiles")
+      .mockResolvedValueOnce(rootBDocument)
+      .mockResolvedValueOnce(rootAReturnDocument);
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    let settingsDialog = await screen.findByRole("dialog", { name: "设置" });
+    changeRootPathDraft(settingsDialog, "/tmp/runtime-root-b");
+    await user.click(within(settingsDialog).getByRole("button", { name: "保存设置" }));
+    await screen.findByRole("button", { name: "编辑 B 根账号" });
+    await user.click(within(settingsDialog).getByRole("button", { name: "关闭设置" }));
+
+    await user.click(screen.getByRole("button", { name: "编辑 B 根账号" }));
+    accountDialog = await screen.findByRole("dialog", { name: "编辑 B 根账号" });
+    await user.click(within(accountDialog).getByRole("button", { name: "读取标签页" }));
+    await user.click(within(accountDialog).getByRole("button", { name: "存为全部 1 个网址草稿" }));
+    draftDialog = await screen.findByRole("dialog", { name: "存为全部网址草稿" });
+    const bNameInput = within(draftDialog).getByLabelText("第 1 条网址名称") as HTMLInputElement;
+    expect(bNameInput.disabled).toBe(false);
+    await user.clear(bNameInput);
+    await user.type(bNameInput, "B 根新草稿");
+
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    settingsDialog = await screen.findByRole("dialog", { name: "设置" });
+    changeRootPathDraft(settingsDialog, "/tmp/runtime-root-a-return");
+    await user.click(within(settingsDialog).getByRole("button", { name: "保存设置" }));
+    await screen.findByRole("button", { name: "编辑 A 根新账号" });
+    await user.click(within(settingsDialog).getByRole("button", { name: "关闭设置" }));
+
+    await user.click(screen.getByRole("button", { name: "编辑 A 根新账号" }));
+    accountDialog = await screen.findByRole("dialog", { name: "编辑 A 根新账号" });
+    await user.click(within(accountDialog).getByRole("button", { name: "读取标签页" }));
+    await user.click(within(accountDialog).getByRole("button", { name: "存为全部 1 个网址草稿" }));
+    draftDialog = await screen.findByRole("dialog", { name: "存为全部网址草稿" });
+    const aNameInput = within(draftDialog).getByLabelText("第 1 条网址名称") as HTMLInputElement;
+    await user.clear(aNameInput);
+    await user.type(aNameInput, "A 根新草稿");
+
+    await act(async () => {
+      pendingOldSave.resolve();
+      await pendingOldSave.promise;
+    });
+
+    expect(screen.getByRole("dialog", { name: "存为全部网址草稿" })).toBeTruthy();
+    expect((within(draftDialog).getByLabelText("第 1 条网址名称") as HTMLInputElement).value).toBe("A 根新草稿");
+    expect(screen.getByRole("status").textContent).not.toContain("已保存 1 个网址");
+    saveProfilesSpy.mockRestore();
+  });
+
   test("空标题标签页存为网址草稿时使用网址展示名并在保存后才写入", async () => {
     const user = userEvent.setup();
     vi.spyOn(profileApi, "snapshotBrowserSessions").mockResolvedValue([

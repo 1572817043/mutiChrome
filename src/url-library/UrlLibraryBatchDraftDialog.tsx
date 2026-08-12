@@ -10,13 +10,15 @@ interface UrlLibraryBatchDraftDialogProps {
   onChange: (drafts: UrlLibraryBatchDraft[]) => void;
   onSave: () => void;
   onClose: () => void;
+  saving?: boolean;
 }
 
 export function UrlLibraryBatchDraftDialog({
   drafts,
   onChange,
   onSave,
-  onClose
+  onClose,
+  saving = false
 }: UrlLibraryBatchDraftDialogProps) {
   const titleId = "url-library-batch-draft-title";
 
@@ -30,7 +32,7 @@ export function UrlLibraryBatchDraftDialog({
     <div
       className="modal-backdrop"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget) {
+        if (!saving && event.target === event.currentTarget) {
           onClose();
         }
       }}
@@ -42,7 +44,9 @@ export function UrlLibraryBatchDraftDialog({
         aria-labelledby={titleId}
         onSubmit={(event) => {
           event.preventDefault();
-          onSave();
+          if (!saving) {
+            onSave();
+          }
         }}
       >
         <div className="modal-header">
@@ -50,7 +54,7 @@ export function UrlLibraryBatchDraftDialog({
             <h2 id={titleId}>存为全部网址草稿</h2>
             <p>确认保存前不会写入网址库。</p>
           </div>
-          <button className="icon-button" type="button" aria-label="关闭" onClick={onClose}>
+          <button className="icon-button" type="button" aria-label="关闭" onClick={onClose} disabled={saving}>
             <X size={18} />
           </button>
         </div>
@@ -64,6 +68,7 @@ export function UrlLibraryBatchDraftDialog({
                   aria-label={`第 ${index + 1} 条网址名称`}
                   value={draft.name}
                   onChange={(event) => updateDraft(index, { name: event.target.value })}
+                  disabled={saving}
                 />
               </label>
               <label className="field" htmlFor={`url-library-batch-url-${index}`}>
@@ -73,6 +78,7 @@ export function UrlLibraryBatchDraftDialog({
                   aria-label={`第 ${index + 1} 条网址 URL`}
                   value={draft.url}
                   onChange={(event) => updateDraft(index, { url: event.target.value })}
+                  disabled={saving}
                 />
               </label>
               <button
@@ -80,6 +86,7 @@ export function UrlLibraryBatchDraftDialog({
                 type="button"
                 aria-label={`删除第 ${index + 1} 条网址`}
                 onClick={() => onChange(drafts.filter((_, draftIndex) => draftIndex !== index))}
+                disabled={saving}
               >
                 <Trash2 size={14} />
                 删除
@@ -89,9 +96,9 @@ export function UrlLibraryBatchDraftDialog({
           {drafts.length === 0 ? <p className="muted-line">请至少保留一条网址。</p> : null}
         </div>
         <div className="modal-footer">
-          <button className="secondary-button" type="button" onClick={onClose}>取消</button>
-          <button className="primary-button" type="submit" disabled={drafts.length === 0}>
-            {`保存 ${drafts.length} 个网址`}
+          <button className="secondary-button" type="button" onClick={onClose} disabled={saving}>取消</button>
+          <button className="primary-button" type="submit" disabled={saving || drafts.length === 0}>
+            {saving ? "保存中..." : `保存 ${drafts.length} 个网址`}
           </button>
         </div>
       </form>
