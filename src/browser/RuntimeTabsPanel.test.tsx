@@ -1,4 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, test, vi } from "vitest";
 import type { RuntimeTabsPanelModel } from "./runtimeTabs";
 import { RuntimeTabsPanel } from "./RuntimeTabsPanel";
@@ -20,6 +21,33 @@ function createModel(
 }
 
 describe("RuntimeTabsPanel", () => {
+  test("只将保持原始顺序和重复项的 http(s) 标签页交给批量网址草稿", async () => {
+    const user = userEvent.setup();
+    const onSaveAllAsUrlDrafts = vi.fn();
+    render(
+      <RuntimeTabsPanel
+        model={createModel({
+          rows: [
+            { targetId: "internal", title: "内部页", rawTitle: "内部页", url: "chrome://newtab/", checkedAt: 1 },
+            { targetId: "first", title: "第一页", rawTitle: "第一页", url: "https://example.com/a", checkedAt: 1 },
+            { targetId: "duplicate", title: "重复页", rawTitle: "重复页", url: "https://example.com/a", checkedAt: 1 },
+            { targetId: "second", title: "第二页", rawTitle: "第二页", url: "http://example.com/b", checkedAt: 1 }
+          ]
+        })}
+        onReadTabs={vi.fn()}
+        onSaveAllAsUrlDrafts={onSaveAllAsUrlDrafts}
+      />
+    );
+
+    await user.click(screen.getByRole("button", { name: "存为全部 3 个网址草稿" }));
+
+    expect(onSaveAllAsUrlDrafts).toHaveBeenCalledWith([
+      { title: "第一页", rawTitle: "第一页", url: "https://example.com/a" },
+      { title: "重复页", rawTitle: "重复页", url: "https://example.com/a" },
+      { title: "第二页", rawTitle: "第二页", url: "http://example.com/b" }
+    ]);
+  });
+
   test("missing-port 时禁用读取并显示重新打开提示", () => {
     render(
       <RuntimeTabsPanel

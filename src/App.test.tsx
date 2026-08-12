@@ -1160,6 +1160,144 @@ describe("App launcher layout", () => {
     expect(savedDocument().settings.urlLibrary).toEqual([]);
   });
 
+  test("运行中的账号可以将可保存标签页预览后一次按原顺序存为网址草稿", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(profileApi, "snapshotBrowserSessions").mockResolvedValue([
+      browserSessionSnapshot("account-001", true),
+      browserSessionSnapshot("account-002", false)
+    ]);
+    vi.spyOn(profileApi, "listRuntimeTabs").mockResolvedValue([
+      { targetId: "batch-first", type: "page", url: "https://example.com/first", title: "第一页", webSocketDebuggerUrl: null, checkedAt: 1000 },
+      { targetId: "batch-internal", type: "page", url: "chrome://newtab/", title: "内部页", webSocketDebuggerUrl: null, checkedAt: 1000 },
+      { targetId: "batch-second", type: "page", url: "https://example.com/second", title: "第二页", webSocketDebuggerUrl: null, checkedAt: 1000 },
+      { targetId: "batch-third", type: "page", url: "https://example.com/third", title: "第三页", webSocketDebuggerUrl: null, checkedAt: 1000 }
+    ]);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "编辑 主号" }));
+    const accountDialog = await screen.findByRole("dialog", { name: "编辑 主号" });
+    await user.click(within(accountDialog).getByRole("button", { name: "读取标签页" }));
+    await user.click(within(accountDialog).getByRole("button", { name: "存为全部 3 个网址草稿" }));
+
+    const draftDialog = await screen.findByRole("dialog", { name: "存为全部网址草稿" });
+    expect(screen.queryByRole("dialog", { name: "编辑 主号" })).toBeNull();
+    expect(savedDocument().settings.urlLibrary).toEqual([]);
+    expect((within(draftDialog).getByLabelText("第 1 条网址名称") as HTMLInputElement).value).toBe("第一页");
+    expect((within(draftDialog).getByLabelText("第 3 条网址名称") as HTMLInputElement).value).toBe("第三页");
+
+    await user.click(within(draftDialog).getByRole("button", { name: "保存 3 个网址" }));
+
+    expect(await screen.findByText("已保存 3 个网址")).toBeTruthy();
+    expect(savedDocument().settings.urlLibrary.map((item) => item.url)).toEqual([
+      "https://example.com/first",
+      "https://example.com/second",
+      "https://example.com/third"
+    ]);
+  });
+
+  test("批量网址草稿任一条编辑为非网页 URL 时整批不写入", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(profileApi, "snapshotBrowserSessions").mockResolvedValue([
+      browserSessionSnapshot("account-001", true),
+      browserSessionSnapshot("account-002", false)
+    ]);
+    vi.spyOn(profileApi, "listRuntimeTabs").mockResolvedValue([
+      { targetId: "invalid-first", type: "page", url: "https://example.com/first", title: "第一页", webSocketDebuggerUrl: null, checkedAt: 1000 },
+      { targetId: "invalid-second", type: "page", url: "https://example.com/second", title: "第二页", webSocketDebuggerUrl: null, checkedAt: 1000 }
+    ]);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "编辑 主号" }));
+    const accountDialog = await screen.findByRole("dialog", { name: "编辑 主号" });
+    await user.click(within(accountDialog).getByRole("button", { name: "读取标签页" }));
+    await user.click(within(accountDialog).getByRole("button", { name: "存为全部 2 个网址草稿" }));
+    const draftDialog = await screen.findByRole("dialog", { name: "存为全部网址草稿" });
+    await user.clear(within(draftDialog).getByLabelText("第 2 条网址 URL"));
+    await user.type(within(draftDialog).getByLabelText("第 2 条网址 URL"), "chrome://newtab/");
+    await user.click(within(draftDialog).getByRole("button", { name: "保存 2 个网址" }));
+
+    expect(await screen.findByText("仅支持 http 或 https 网址")).toBeTruthy();
+    expect(savedDocument().settings.urlLibrary).toEqual([]);
+
+    await user.clear(within(draftDialog).getByLabelText("第 2 条网址 URL"));
+    await user.type(within(draftDialog).getByLabelText("第 2 条网址 URL"), "https://example.com/first");
+    await user.click(within(draftDialog).getByRole("button", { name: "保存 2 个网址" }));
+    expect(await screen.findByText("网址已存在")).toBeTruthy();
+    expect(savedDocument().settings.urlLibrary).toEqual([]);
+
+    await user.clear(within(draftDialog).getByLabelText("第 2 条网址 URL"));
+    await user.click(within(draftDialog).getByRole("button", { name: "保存 2 个网址" }));
+    expect(await screen.findByText("请先填写网址")).toBeTruthy();
+    expect(savedDocument().settings.urlLibrary).toEqual([]);
+  });
+
+  test("批量网址草稿与既有网址库重复时整批不写入", async () => {
+    const user = userEvent.setup();
+    const initialDocument = documentWith([
+      profile({ id: "account-001", name: "主号" }),
+      profile({ id: "account-002", name: "抽奖号" })
+    ]);
+    initialDocument.settings.urlLibrary = [{
+      id: "url-001",
+      name: "既有网址",
+      url: "https://example.com/existing",
+      tags: [],
+      notes: "",
+      createdAt: "2026-08-01T00:00:00.000Z",
+      updatedAt: "2026-08-01T00:00:00.000Z"
+    }];
+    localStorage.setItem("multichrome.profileDocument", JSON.stringify(initialDocument));
+    vi.spyOn(profileApi, "snapshotBrowserSessions").mockResolvedValue([
+      browserSessionSnapshot("account-001", true),
+      browserSessionSnapshot("account-002", false)
+    ]);
+    vi.spyOn(profileApi, "listRuntimeTabs").mockResolvedValue([
+      { targetId: "existing-first", type: "page", url: "https://example.com/new", title: "新网址", webSocketDebuggerUrl: null, checkedAt: 1000 },
+      { targetId: "existing-second", type: "page", url: "https://example.com/existing", title: "既有网址", webSocketDebuggerUrl: null, checkedAt: 1000 }
+    ]);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "编辑 主号" }));
+    const accountDialog = await screen.findByRole("dialog", { name: "编辑 主号" });
+    await user.click(within(accountDialog).getByRole("button", { name: "读取标签页" }));
+    await user.click(within(accountDialog).getByRole("button", { name: "存为全部 2 个网址草稿" }));
+    const draftDialog = await screen.findByRole("dialog", { name: "存为全部网址草稿" });
+    await user.click(within(draftDialog).getByRole("button", { name: "保存 2 个网址" }));
+
+    expect(await screen.findByText("网址已存在")).toBeTruthy();
+    expect(savedDocument().settings.urlLibrary).toHaveLength(1);
+    expect(savedDocument().settings.urlLibrary[0]?.url).toBe("https://example.com/existing");
+    expect((within(draftDialog).getByLabelText("第 1 条网址名称") as HTMLInputElement).value).toBe("新网址");
+    await user.clear(within(draftDialog).getByLabelText("第 1 条网址名称"));
+    await user.type(within(draftDialog).getByLabelText("第 1 条网址名称"), "仍可编辑");
+    expect((within(draftDialog).getByLabelText("第 1 条网址名称") as HTMLInputElement).value).toBe("仍可编辑");
+  });
+
+  test("批量网址草稿保存失败时保留预览和编辑数据", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(profileApi, "snapshotBrowserSessions").mockResolvedValue([
+      browserSessionSnapshot("account-001", true),
+      browserSessionSnapshot("account-002", false)
+    ]);
+    vi.spyOn(profileApi, "listRuntimeTabs").mockResolvedValue([
+      { targetId: "persist-failure", type: "page", url: "https://example.com/persist-failure", title: "保存失败标签页", webSocketDebuggerUrl: null, checkedAt: 1000 }
+    ]);
+    vi.spyOn(profileApi, "saveProfiles").mockRejectedValue(new Error("网址库保存失败"));
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "编辑 主号" }));
+    const accountDialog = await screen.findByRole("dialog", { name: "编辑 主号" });
+    await user.click(within(accountDialog).getByRole("button", { name: "读取标签页" }));
+    await user.click(within(accountDialog).getByRole("button", { name: "存为全部 1 个网址草稿" }));
+    const draftDialog = await screen.findByRole("dialog", { name: "存为全部网址草稿" });
+    await user.click(within(draftDialog).getByRole("button", { name: "保存 1 个网址" }));
+
+    expect(await screen.findByText("网址库保存失败")).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: "存为全部网址草稿" })).toBeTruthy();
+    expect((within(draftDialog).getByLabelText("第 1 条网址名称") as HTMLInputElement).value).toBe("保存失败标签页");
+    expect(savedDocument().settings.urlLibrary).toEqual([]);
+  });
+
   test("空标题标签页存为网址草稿时使用网址展示名并在保存后才写入", async () => {
     const user = userEvent.setup();
     vi.spyOn(profileApi, "snapshotBrowserSessions").mockResolvedValue([
