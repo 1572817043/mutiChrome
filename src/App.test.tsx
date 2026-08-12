@@ -1050,6 +1050,71 @@ describe("App launcher layout", () => {
     expect(screen.queryByText("复制网址失败：全量剪贴板拒绝")).toBeNull();
   });
 
+  test("运行中的账号可以复制全部标签页标题和网址", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    vi.spyOn(profileApi, "snapshotBrowserSessions").mockResolvedValue([
+      browserSessionSnapshot("account-001", true), browserSessionSnapshot("account-002", false)
+    ]);
+    vi.spyOn(profileApi, "listRuntimeTabs").mockResolvedValue([
+      { targetId: "detail-1", type: "page", url: "chrome://newtab/", title: "新标签页", webSocketDebuggerUrl: "ws://secret-1", checkedAt: 1000 },
+      { targetId: "detail-2", type: "page", url: "https://example.com/detail", title: " ", webSocketDebuggerUrl: "ws://secret-2", checkedAt: 1000 },
+      { targetId: "detail-3", type: "page", url: "chrome://newtab/", title: "新标签页", webSocketDebuggerUrl: "ws://secret-3", checkedAt: 1000 }
+    ]);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "编辑 主号" }));
+    const dialog = await screen.findByRole("dialog", { name: "编辑 主号" });
+    await user.click(within(dialog).getByRole("button", { name: "读取标签页" }));
+    await user.click(within(dialog).getByRole("button", { name: "复制全部 3 个标签页标题和网址" }));
+
+    expect(writeText).toHaveBeenCalledWith(
+      "标题：新标签页\n网址：chrome://newtab/\n\n标题：未命名标签页\n网址：https://example.com/detail\n\n标题：新标签页\n网址：chrome://newtab/"
+    );
+    expect(writeText).not.toHaveBeenCalledWith(expect.stringContaining("ws://secret"));
+    expect(await screen.findByText("已复制全部标签页标题和网址")).toBeTruthy();
+  });
+
+  test("复制全部标签页详情在剪贴板不可用时沿用既有错误语义", async () => {
+    const user = userEvent.setup();
+    Object.defineProperty(navigator, "clipboard", { value: {}, configurable: true });
+    vi.spyOn(profileApi, "snapshotBrowserSessions").mockResolvedValue([
+      browserSessionSnapshot("account-001", true), browserSessionSnapshot("account-002", false)
+    ]);
+    vi.spyOn(profileApi, "listRuntimeTabs").mockResolvedValue([
+      { targetId: "detail-failure", type: "page", url: "https://example.com/detail", title: "详情", webSocketDebuggerUrl: null, checkedAt: 1000 }
+    ]);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "编辑 主号" }));
+    const dialog = await screen.findByRole("dialog", { name: "编辑 主号" });
+    await user.click(within(dialog).getByRole("button", { name: "读取标签页" }));
+    await user.click(within(dialog).getByRole("button", { name: "复制全部 1 个标签页标题和网址" }));
+    expect(await screen.findByText("当前环境不能复制到剪贴板")).toBeTruthy();
+  });
+
+  test("复制全部标签页详情在剪贴板拒绝时显示错误", async () => {
+    const user = userEvent.setup();
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText: vi.fn().mockRejectedValue(new Error("详情剪贴板拒绝")) },
+      configurable: true
+    });
+    vi.spyOn(profileApi, "snapshotBrowserSessions").mockResolvedValue([
+      browserSessionSnapshot("account-001", true), browserSessionSnapshot("account-002", false)
+    ]);
+    vi.spyOn(profileApi, "listRuntimeTabs").mockResolvedValue([
+      { targetId: "detail-reject", type: "page", url: "https://example.com/detail", title: "详情", webSocketDebuggerUrl: null, checkedAt: 1000 }
+    ]);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "编辑 主号" }));
+    const dialog = await screen.findByRole("dialog", { name: "编辑 主号" });
+    await user.click(within(dialog).getByRole("button", { name: "读取标签页" }));
+    await user.click(within(dialog).getByRole("button", { name: "复制全部 1 个标签页标题和网址" }));
+    expect(await screen.findByText("详情剪贴板拒绝")).toBeTruthy();
+  });
+
   test("运行中的账号可以将标签页预填为未持久化的网址草稿", async () => {
     const user = userEvent.setup();
     vi.spyOn(profileApi, "snapshotBrowserSessions").mockResolvedValue([

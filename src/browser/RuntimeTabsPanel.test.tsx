@@ -162,6 +162,31 @@ describe("RuntimeTabsPanel", () => {
     ]);
   });
 
+  test("复制全部详情按当前顺序传递标题和重复 URL", () => {
+    const onCopyAllTabDetails = vi.fn();
+    render(
+      <RuntimeTabsPanel
+        model={createModel({
+          rows: [
+            { targetId: "target-1", title: "第一行", url: "chrome://newtab/", checkedAt: 1000 },
+            { targetId: "target-2", title: "未命名标签页", url: "https://example.com", checkedAt: 1000 },
+            { targetId: "target-3", title: "第一行", url: "chrome://newtab/", checkedAt: 1000 }
+          ]
+        })}
+        onReadTabs={vi.fn()}
+        onCopyAllTabDetails={onCopyAllTabDetails}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "复制全部 3 个标签页标题和网址" }));
+
+    expect(onCopyAllTabDetails).toHaveBeenCalledWith([
+      { title: "第一行", url: "chrome://newtab/" },
+      { title: "未命名标签页", url: "https://example.com" },
+      { title: "第一行", url: "chrome://newtab/" }
+    ]);
+  });
+
   test("存为项目草稿按当前行顺序传递标题、原始标题和重复 URL", () => {
     const onSaveAsProjectDraft = vi.fn();
     render(
@@ -432,6 +457,7 @@ describe("RuntimeTabsPanel", () => {
 
     expect(screen.queryByRole("button", { name: /复制网址/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /复制全部.*标签页网址/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /复制全部.*标签页标题和网址/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /存为网址草稿/ })).toBeNull();
     expect(screen.queryByRole("button", { name: "存为项目草稿" })).toBeNull();
 
@@ -446,6 +472,7 @@ describe("RuntimeTabsPanel", () => {
     );
     expect(screen.queryByRole("button", { name: /复制网址/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /复制全部.*标签页网址/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /复制全部.*标签页标题和网址/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /存为网址草稿/ })).toBeNull();
     expect(screen.queryByRole("button", { name: "存为项目草稿" })).toBeNull();
 
@@ -466,6 +493,7 @@ describe("RuntimeTabsPanel", () => {
     );
     expect(screen.queryByRole("button", { name: /复制网址/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /复制全部.*标签页网址/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /复制全部.*标签页标题和网址/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /存为网址草稿/ })).toBeNull();
     expect(screen.queryByRole("button", { name: "存为项目草稿" })).toBeNull();
   });
