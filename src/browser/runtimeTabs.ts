@@ -40,6 +40,15 @@ const cdpStatusLabels: Record<BrowserSessionCdpStatus, string> = {
   failed: "不可用"
 };
 
+export function isDraftableRuntimeTabUrl(url: string): boolean {
+  try {
+    const protocol = new URL(url).protocol;
+    return protocol === "http:" || protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 function formatTab(tab: BrowserRuntimeTabSnapshot): RuntimeTabsPanelRow {
   return {
     targetId: tab.targetId,

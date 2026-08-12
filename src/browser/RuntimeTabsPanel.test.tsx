@@ -205,6 +205,84 @@ describe("RuntimeTabsPanel", () => {
     ]);
   });
 
+  test("草稿动作只提供给 http 或 https 行，复制仍保留所有行", () => {
+    const onSaveAsUrlDraft = vi.fn();
+    const onSaveAsProjectDraft = vi.fn();
+    const onCopyUrl = vi.fn();
+    render(
+      <RuntimeTabsPanel
+        model={createModel({
+          rows: [
+            {
+              targetId: "chrome-newtab",
+              title: "新标签页",
+              rawTitle: "新标签页",
+              url: "chrome://newtab/",
+              checkedAt: 1000
+            },
+            {
+              targetId: "http-tab",
+              title: "可保存页面",
+              rawTitle: "可保存页面",
+              url: "https://example.com/save",
+              checkedAt: 1000
+            },
+            {
+              targetId: "about-blank",
+              title: "空白页",
+              rawTitle: "空白页",
+              url: "about:blank",
+              checkedAt: 1000
+            }
+          ]
+        })}
+        onReadTabs={vi.fn()}
+        onCopyUrl={onCopyUrl}
+        onSaveAsUrlDraft={onSaveAsUrlDraft}
+        onSaveAsProjectDraft={onSaveAsProjectDraft}
+      />
+    );
+
+    expect(
+      screen.queryByRole("button", { name: "存为网址草稿 新标签页 chrome://newtab/" })
+    ).toBeNull();
+    expect(
+      screen.getByRole("button", {
+        name: "存为网址草稿 可保存页面 https://example.com/save"
+      })
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "存为项目草稿" }));
+    expect(onSaveAsProjectDraft).toHaveBeenCalledWith([
+      {
+        title: "可保存页面",
+        rawTitle: "可保存页面",
+        url: "https://example.com/save"
+      }
+    ]);
+    fireEvent.click(
+      screen.getByRole("button", { name: "复制网址 新标签页 chrome://newtab/" })
+    );
+    expect(onCopyUrl).toHaveBeenCalledWith("chrome://newtab/");
+  });
+
+  test("没有可保存 URL 时不显示项目草稿动作", () => {
+    render(
+      <RuntimeTabsPanel
+        model={createModel({
+          rows: [
+            { targetId: "chrome-newtab", title: "新标签页", url: "chrome://newtab/", checkedAt: 1000 },
+            { targetId: "about-blank", title: "空白页", url: "about:blank", checkedAt: 1000 }
+          ]
+        })}
+        onReadTabs={vi.fn()}
+        onSaveAsProjectDraft={vi.fn()}
+      />
+    );
+
+    expect(screen.queryByRole("button", { name: "存为项目草稿" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /存为网址草稿/ })).toBeNull();
+  });
+
   test("同名标签页的复制按钮会用不同 URL 区分并复制对应 URL", () => {
     const onCopyUrl = vi.fn();
     render(
