@@ -1219,6 +1219,10 @@ pub fn profile_dir(root: &Path, profile_id: &str) -> PathBuf {
     root.join("profiles").join(profile_id)
 }
 
+pub fn validated_profile_dir(root: &Path, profile_id: &str) -> Result<PathBuf, String> {
+    safe_profile_dir(root, profile_id)
+}
+
 fn safe_profile_dir(root: &Path, profile_id: &str) -> Result<PathBuf, String> {
     validate_profile_id(profile_id)?;
     Ok(profile_dir(root, profile_id))

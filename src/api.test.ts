@@ -44,4 +44,42 @@ describe("profileApi Browser Runtime", () => {
       navigatedAt: 1000
     });
   });
+
+  test("getProfileEnvironmentSnapshot 调用只读环境快照 command", async () => {
+    invokeMock.mockResolvedValue({
+      profileId: "account-001",
+      profileDir: "/tmp/multichrome/profiles/account-001",
+      directoryStatus: "ready",
+      managedProfileRoot: true,
+      registered: true,
+      browserPath: "/Applications/Google Chrome.app",
+      browserAvailable: true,
+      running: true,
+      healthIssues: []
+    });
+
+    await profileApi.getProfileEnvironmentSnapshot(
+      "/tmp/multichrome",
+      "account-001",
+      "/Applications/Google Chrome.app"
+    );
+
+    expect(invokeMock).toHaveBeenCalledWith("profile_environment_snapshot", {
+      rootPath: "/tmp/multichrome",
+      profileId: "account-001",
+      browserPath: "/Applications/Google Chrome.app"
+    });
+  });
+
+  test("非 Tauri 预览的未登记账号不标记为受管目录", async () => {
+    delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+
+    const snapshot = await profileApi.getProfileEnvironmentSnapshot(
+      "/tmp/multichrome",
+      "account-001"
+    );
+
+    expect(snapshot.registered).toBe(false);
+    expect(snapshot.managedProfileRoot).toBe(false);
+  });
 });
