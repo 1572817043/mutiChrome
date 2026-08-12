@@ -2233,6 +2233,64 @@ button:disabled {
   color: #9d3f38;
 }
 
+.profile-environment-panel {
+  display: grid;
+  gap: 10px;
+  margin: 2px 0 12px;
+  padding: 12px;
+  border: 1px solid #dfe8e1;
+  border-radius: 8px;
+  background: #fbfdfb;
+}
+
+.profile-environment-panel .runtime-tabs-header {
+  padding-bottom: 10px;
+  border-bottom: 1px solid #e6eee8;
+}
+
+.profile-environment-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.profile-environment-list > div {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  padding: 8px 9px;
+  border: 1px solid #e3ebe5;
+  border-radius: 7px;
+  background: #ffffff;
+}
+
+.profile-environment-list dt {
+  color: #65756c;
+  font-size: 12px;
+}
+
+.profile-environment-list dd {
+  min-width: 0;
+  margin: 0;
+  color: #2b3f35;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.profile-environment-list code {
+  display: block;
+  overflow: hidden;
+  margin-top: 4px;
+  padding: 5px 7px;
+  border-radius: 5px;
+  color: #596960;
+  background: #f2f6f3;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .runtime-tabs-list {
   display: grid;
   gap: 6px;
@@ -3324,6 +3382,33 @@ button:disabled {
   border-bottom-color: #2f3036;
 }
 
+:root[data-theme="dark"] .profile-environment-panel {
+  border-color: #2f3036;
+  background: #171719;
+}
+
+:root[data-theme="dark"] .profile-environment-panel .runtime-tabs-header {
+  border-bottom-color: #2f3036;
+}
+
+:root[data-theme="dark"] .profile-environment-list > div {
+  border-color: #33343a;
+  background: #1b1c1f;
+}
+
+:root[data-theme="dark"] .profile-environment-list dt,
+:root[data-theme="dark"] .profile-environment-list code {
+  color: #a1a1aa;
+}
+
+:root[data-theme="dark"] .profile-environment-list dd {
+  color: #f4f4f5;
+}
+
+:root[data-theme="dark"] .profile-environment-list code {
+  background: #111214;
+}
+
 :root[data-theme="dark"] .runtime-tabs-status,
 :root[data-theme="dark"] .runtime-tabs-row-main span,
 :root[data-theme="dark"] .runtime-tabs-row code,
@@ -3380,5 +3465,9 @@ button:disabled {
 
   .search-box {
     width: 100%;
+  }
+
+  .profile-environment-list {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
