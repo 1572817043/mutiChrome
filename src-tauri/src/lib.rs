@@ -853,7 +853,8 @@ where
         profile_dir: profile_dir.to_string_lossy().to_string(),
         directory_status: profile_environment_directory_status(&profile_dir),
         managed_profile_root: registered
-            && profiles_root.is_dir()
+            && is_real_directory(&profiles_root)
+            && is_real_directory(&profile_dir)
             && profile_dir.parent() == Some(profiles_root.as_path()),
         registered,
         browser_path: browser_path.to_string_lossy().to_string(),
@@ -866,6 +867,11 @@ where
             registered,
         ),
     }
+}
+
+fn is_real_directory(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
 }
 
 fn profile_environment_directory_status(path: &Path) -> ProfileEnvironmentDirectoryStatus {
@@ -2984,6 +2990,82 @@ mod tests {
             .health_issues
             .iter()
             .any(|issue| issue.code == "profile_not_registered"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_environment_snapshot_does_not_manage_symlinked_profiles_root() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path();
+        init_root(root).unwrap();
+        let mut document = load_profile_document(root).unwrap();
+        document.profiles.push(profile_store::StoredProfile {
+            id: "account-001".to_string(),
+            name: "账号".to_string(),
+            tags: vec![],
+            notes: String::new(),
+            status: "active".to_string(),
+            account_platforms: vec![],
+            accent_color: None,
+            import_source: None,
+            created_at: "2026-01-01T00:00:00.000Z".to_string(),
+            updated_at: "2026-01-01T00:00:00.000Z".to_string(),
+            last_opened_at: None,
+        });
+        save_profile_document(root, &document).unwrap();
+        let linked_profiles_root = root.join("linked-profiles");
+        std::fs::create_dir(&linked_profiles_root).unwrap();
+        std::fs::remove_dir_all(root.join("profiles")).unwrap();
+        symlink(&linked_profiles_root, root.join("profiles")).unwrap();
+
+        let snapshot = profile_environment_snapshot_from_processes(
+            root,
+            "account-001",
+            Path::new("/Applications/Google Chrome.app"),
+            std::iter::empty(),
+        );
+
+        assert!(!snapshot.managed_profile_root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_environment_snapshot_does_not_manage_symlinked_profile_directory() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path();
+        init_root(root).unwrap();
+        let mut document = load_profile_document(root).unwrap();
+        document.profiles.push(profile_store::StoredProfile {
+            id: "account-001".to_string(),
+            name: "账号".to_string(),
+            tags: vec![],
+            notes: String::new(),
+            status: "active".to_string(),
+            account_platforms: vec![],
+            accent_color: None,
+            import_source: None,
+            created_at: "2026-01-01T00:00:00.000Z".to_string(),
+            updated_at: "2026-01-01T00:00:00.000Z".to_string(),
+            last_opened_at: None,
+        });
+        save_profile_document(root, &document).unwrap();
+        let profile_dir = profile_store::profile_dir(root, "account-001");
+        let linked_profile_dir = root.join("linked-account-001");
+        std::fs::rename(&profile_dir, &linked_profile_dir).unwrap();
+        symlink(&linked_profile_dir, &profile_dir).unwrap();
+
+        let snapshot = profile_environment_snapshot_from_processes(
+            root,
+            "account-001",
+            Path::new("/Applications/Google Chrome.app"),
+            std::iter::empty(),
+        );
+
+        assert!(!snapshot.managed_profile_root);
     }
 
     #[test]
