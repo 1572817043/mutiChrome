@@ -1283,6 +1283,21 @@ function App() {
     }
   }
 
+  async function copyRuntimeTabDetails(tabs: Array<{ title: string; url: string }>) {
+    try {
+      if (!navigator.clipboard?.writeText) {
+        setMessage("当前环境不能复制到剪贴板");
+        return;
+      }
+      await navigator.clipboard.writeText(
+        tabs.map((tab) => `标题：${tab.title}\n网址：${tab.url}`).join("\n\n")
+      );
+      setMessage("已复制全部标签页标题和网址");
+    } catch (error) {
+      setMessage(errorMessage(error));
+    }
+  }
+
   async function revealEditingProfile() {
     if (!editingProfile) {
       return;
@@ -3300,6 +3315,7 @@ function App() {
               onReadTabs={runtimeTabs.readTabs}
               onCopyUrl={(url) => void copyRuntimeTabUrl(url)}
               onCopyAllUrls={(urls) => void copyRuntimeTabUrls(urls)}
+              onCopyAllTabDetails={(tabs) => void copyRuntimeTabDetails(tabs)}
               onSaveAsUrlDraft={startCreatingUrlLibraryItemFromRuntimeTab}
               onSaveAsProjectDraft={startCreatingProjectFromRuntimeTabs}
               loading={runtimeTabs.loading}

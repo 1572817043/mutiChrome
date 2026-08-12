@@ -10,6 +10,9 @@ interface RuntimeTabsPanelProps {
   onReadTabs: () => void | Promise<void>;
   onCopyUrl?: (url: string) => void | Promise<void>;
   onCopyAllUrls?: (urls: string[]) => void | Promise<void>;
+  onCopyAllTabDetails?: (
+    tabs: Array<Pick<RuntimeTabsPanelRow, "title" | "url">>
+  ) => void | Promise<void>;
   onSaveAsUrlDraft?: (
     tab: Pick<RuntimeTabsPanelRow, "title" | "rawTitle" | "url">
   ) => void;
@@ -28,6 +31,7 @@ export function RuntimeTabsPanel({
   onReadTabs,
   onCopyUrl,
   onCopyAllUrls,
+  onCopyAllTabDetails,
   onSaveAsUrlDraft,
   onSaveAsProjectDraft,
   loading = false
@@ -62,6 +66,20 @@ export function RuntimeTabsPanel({
           >
             <Copy size={14} />
             {`复制全部 ${model.rows.length} 个标签页网址`}
+          </button>
+        ) : null}
+        {model.rows.length > 0 && onCopyAllTabDetails ? (
+          <button
+            className="secondary-button compact"
+            type="button"
+            onClick={() =>
+              void onCopyAllTabDetails(
+                model.rows.map((row) => ({ title: row.title, url: row.url }))
+              )
+            }
+          >
+            <Copy size={14} />
+            {`复制全部 ${model.rows.length} 个标签页标题和网址`}
           </button>
         ) : null}
         {draftableRows.length > 0 && onSaveAsProjectDraft ? (
