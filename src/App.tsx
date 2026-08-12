@@ -33,6 +33,7 @@ import { BulkActionBar } from "./bulk-actions/BulkActionBar";
 import {
   cloneProjectForDraft,
   createProject,
+  createProjectUrl,
   duplicateProject,
   projectOpenUrls,
   updateProject
@@ -1521,6 +1522,44 @@ function App() {
   async function createNewProject() {
     const now = new Date().toISOString();
     const project = createProject(projects, selectedIds, now);
+    setActiveView("projects");
+    setEditingProjectId(null);
+    setEditingProjectDraft(null);
+    setNewProfileDraft(null);
+    setNewProjectDraft(project);
+  }
+
+  function startCreatingProjectFromRuntimeTabs(
+    tabs: Array<{ title: string; rawTitle?: string; url: string }>
+  ) {
+    if (!editingProfile) {
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const urls = tabs.reduce(
+      (current, tab) => [
+        ...current,
+        createProjectUrl(current, {
+          name: (tab.rawTitle ?? tab.title).trim() || displayUrlLabel(tab.url),
+          url: tab.url,
+          notes: ""
+        })
+      ],
+      [] as ProjectUrl[]
+    );
+    const project = updateProject(
+      createProject(projects, [], now),
+      {
+        name: `来自 ${editingProfile.name} 的标签页`,
+        urls,
+        notes: "",
+        profileIds: []
+      },
+      now
+    );
+
+    closeEditor();
     setActiveView("projects");
     setEditingProjectId(null);
     setEditingProjectDraft(null);
@@ -3252,6 +3291,7 @@ function App() {
               onCopyUrl={(url) => void copyRuntimeTabUrl(url)}
               onCopyAllUrls={(urls) => void copyRuntimeTabUrls(urls)}
               onSaveAsUrlDraft={startCreatingUrlLibraryItemFromRuntimeTab}
+              onSaveAsProjectDraft={startCreatingProjectFromRuntimeTabs}
               loading={runtimeTabs.loading}
             />
           }

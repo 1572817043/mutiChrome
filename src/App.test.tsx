@@ -1172,6 +1172,124 @@ describe("App launcher layout", () => {
     );
   });
 
+  test("运行中的账号可以将标签页预填为未持久化的项目草稿", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(profileApi, "snapshotBrowserSessions").mockResolvedValue([
+      browserSessionSnapshot("account-001", true),
+      browserSessionSnapshot("account-002", false)
+    ]);
+    vi.spyOn(profileApi, "listRuntimeTabs").mockResolvedValue([
+      {
+        targetId: "project-draft-first",
+        type: "page",
+        url: "https://example.com/first",
+        title: "项目主页",
+        webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/page/project-draft-first",
+        checkedAt: 1000
+      },
+      {
+        targetId: "project-draft-empty-title",
+        type: "page",
+        url: "https://example.com/second?source=runtime",
+        title: " ",
+        webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/page/project-draft-empty-title",
+        checkedAt: 1000
+      },
+      {
+        targetId: "project-draft-literal-title",
+        type: "page",
+        url: "https://example.com/first",
+        title: "未命名标签页",
+        webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/page/project-draft-literal-title",
+        checkedAt: 1000
+      }
+    ]);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "编辑 主号" }));
+    const accountDialog = await screen.findByRole("dialog", { name: "编辑 主号" });
+    await user.click(within(accountDialog).getByRole("button", { name: "读取标签页" }));
+    await user.click(within(accountDialog).getByRole("button", { name: "存为项目草稿" }));
+
+    expect(screen.queryByRole("dialog", { name: "编辑 主号" })).toBeNull();
+    const projectDialog = await screen.findByRole("dialog", { name: "新建项目" });
+    expect((within(projectDialog).getByLabelText("项目名称") as HTMLInputElement).value).toBe(
+      "来自 主号 的标签页"
+    );
+    expect((within(projectDialog).getByLabelText("网址名称 1") as HTMLInputElement).value).toBe(
+      "项目主页"
+    );
+    expect((within(projectDialog).getByLabelText("项目网址") as HTMLInputElement).value).toBe(
+      "https://example.com/first"
+    );
+    expect((within(projectDialog).getByLabelText("网址名称 2") as HTMLInputElement).value).toBe(
+      "example.com/second?source=runtime"
+    );
+    expect((within(projectDialog).getByLabelText("项目网址 2") as HTMLInputElement).value).toBe(
+      "https://example.com/second?source=runtime"
+    );
+    expect((within(projectDialog).getByLabelText("网址名称 3") as HTMLInputElement).value).toBe(
+      "未命名标签页"
+    );
+    expect((within(projectDialog).getByLabelText("项目网址 3") as HTMLInputElement).value).toBe(
+      "https://example.com/first"
+    );
+    expect(
+      within(projectDialog).getByRole("button", { name: "绑定账号 主号 account-001" })
+        .getAttribute("aria-pressed")
+    ).toBe("false");
+    expect(savedDocument().projects).toEqual([]);
+
+    await user.click(within(projectDialog).getByRole("button", { name: "取消新建项目" }));
+
+    expect(screen.queryByRole("dialog", { name: "新建项目" })).toBeNull();
+    expect(savedDocument().projects).toEqual([]);
+  });
+
+  test("运行中的账号从标签页保存项目草稿时才写入且不绑定账号", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(profileApi, "snapshotBrowserSessions").mockResolvedValue([
+      browserSessionSnapshot("account-001", true),
+      browserSessionSnapshot("account-002", false)
+    ]);
+    vi.spyOn(profileApi, "listRuntimeTabs").mockResolvedValue([
+      {
+        targetId: "project-draft-save",
+        type: "page",
+        url: "https://example.com/save",
+        title: "保存项目标签页",
+        webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/page/project-draft-save",
+        checkedAt: 1000
+      }
+    ]);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "编辑 主号" }));
+    const accountDialog = await screen.findByRole("dialog", { name: "编辑 主号" });
+    await user.click(within(accountDialog).getByRole("button", { name: "读取标签页" }));
+    await user.click(within(accountDialog).getByRole("button", { name: "存为项目草稿" }));
+    const projectDialog = await screen.findByRole("dialog", { name: "新建项目" });
+
+    expect(savedDocument().projects).toEqual([]);
+    await user.click(within(projectDialog).getByRole("button", { name: "保存项目" }));
+
+    expect(await screen.findByText("已创建 来自 主号 的标签页")).toBeTruthy();
+    expect(savedDocument().projects[0]).toMatchObject({
+      name: "来自 主号 的标签页",
+      url: "https://example.com/save",
+      profileIds: [],
+      notes: ""
+    });
+    expect(savedDocument().projects[0]?.urls).toEqual([
+      {
+        id: "url-001",
+        name: "保存项目标签页",
+        url: "https://example.com/save",
+        notes: ""
+      }
+    ]);
+  });
+
   test("运行账号缺少调试端口时不允许编辑弹窗读取标签页", async () => {
     const user = userEvent.setup();
     const snapshotSpy = vi

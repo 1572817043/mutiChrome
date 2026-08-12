@@ -9,6 +9,9 @@ interface RuntimeTabsPanelProps {
   onSaveAsUrlDraft?: (
     tab: Pick<RuntimeTabsPanelRow, "title" | "rawTitle" | "url">
   ) => void;
+  onSaveAsProjectDraft?: (
+    tabs: Array<Pick<RuntimeTabsPanelRow, "title" | "rawTitle" | "url">>
+  ) => void;
   loading?: boolean;
 }
 
@@ -22,6 +25,7 @@ export function RuntimeTabsPanel({
   onCopyUrl,
   onCopyAllUrls,
   onSaveAsUrlDraft,
+  onSaveAsProjectDraft,
   loading = false
 }: RuntimeTabsPanelProps) {
   const buttonDisabled = loading || !model.canReadTabs;
@@ -53,6 +57,24 @@ export function RuntimeTabsPanel({
           >
             <Copy size={14} />
             {`复制全部 ${model.rows.length} 个标签页网址`}
+          </button>
+        ) : null}
+        {model.rows.length > 0 && onSaveAsProjectDraft ? (
+          <button
+            className="secondary-button compact"
+            type="button"
+            onClick={() =>
+              onSaveAsProjectDraft(
+                model.rows.map((row) => ({
+                  title: row.title,
+                  rawTitle: row.rawTitle,
+                  url: row.url
+                }))
+              )
+            }
+          >
+            <Plus size={14} />
+            存为项目草稿
           </button>
         ) : null}
       </div>
