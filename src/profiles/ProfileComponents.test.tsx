@@ -4,6 +4,7 @@ import type { ChromeProfile } from "../types";
 import { BatchCreateProfilesDialog } from "./BatchCreateProfilesDialog";
 import { DeleteConfirmDialog } from "./DeleteConfirmDialog";
 import { EditProfileDialog } from "./EditProfileDialog";
+import { ProfileEnvironmentPanel } from "./ProfileEnvironmentPanel";
 import { ProfileCard } from "./ProfileCard";
 
 function profile(overrides: Partial<ChromeProfile> = {}): ChromeProfile {
@@ -132,6 +133,46 @@ describe("账号展示组件", () => {
 
     rerender(<EditProfileDialog {...props} mode="create" />);
     expect(screen.queryByText("运行时标签页面板")).toBeNull();
+  });
+
+  test("环境隔离概览只呈现只读状态和手动刷新入口", () => {
+    render(
+      <ProfileEnvironmentPanel
+        snapshot={{
+          profileId: "account-001",
+          profileDir: "/tmp/multichrome/profiles/account-001",
+          directoryStatus: "ready",
+          managedProfileRoot: true,
+          registered: true,
+          browserPath: "/Applications/Google Chrome.app",
+          browserAvailable: true,
+          running: true,
+          healthIssues: []
+        }}
+        loading={false}
+        error={null}
+        onRefresh={vi.fn()}
+      />
+    );
+
+    expect(screen.getByRole("heading", { name: "本地环境" })).toBeTruthy();
+    expect(screen.getByText("受管 Profile 目录")).toBeTruthy();
+    expect(screen.getByText("已登记")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "刷新本地环境" })).toBeTruthy();
+    expect(screen.queryByText(/CDP|DevTools|端口/)).toBeNull();
+  });
+
+  test("环境隔离概览展示读取错误", () => {
+    render(
+      <ProfileEnvironmentPanel
+        snapshot={null}
+        loading={false}
+        error="无法读取本地环境"
+        onRefresh={vi.fn()}
+      />
+    );
+
+    expect(screen.getByRole("alert").textContent).toContain("无法读取本地环境");
   });
 
   test("批量新建弹窗预览和删除确认文案保持不变", () => {

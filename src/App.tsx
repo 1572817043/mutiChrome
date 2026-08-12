@@ -104,7 +104,9 @@ import {
   type DeleteMode
 } from "./profiles/DeleteConfirmDialog";
 import { EditProfileDialog } from "./profiles/EditProfileDialog";
+import { ProfileEnvironmentPanel } from "./profiles/ProfileEnvironmentPanel";
 import { ProfileCard, type CardDensity } from "./profiles/ProfileCard";
+import { useProfileEnvironmentSnapshot } from "./profiles/useProfileEnvironmentSnapshot";
 import {
   type ImportPersistResult,
   importCandidateStatusText,
@@ -421,6 +423,11 @@ function App() {
     selectedProfile: editingProfile,
     selectedProfileCount: editingProfile ? 1 : 0,
     session: editingProfile ? browserSessionsById[editingProfile.id] ?? null : null
+  });
+  const profileEnvironment = useProfileEnvironmentSnapshot({
+    rootPath,
+    selectedProfile: editingProfile,
+    browserPath: settings.browserPath
   });
 
   const visibleProfiles = useMemo(() => {
@@ -3482,6 +3489,14 @@ function App() {
               onSaveSelectedAsUrlDrafts={startCreatingUrlLibraryItemsFromRuntimeTabs}
               onSaveSelectedAsProjectDraft={startCreatingProjectFromRuntimeTabs}
               loading={runtimeTabs.loading}
+            />
+          }
+          environmentPanel={
+            <ProfileEnvironmentPanel
+              snapshot={profileEnvironment.snapshot}
+              loading={profileEnvironment.loading}
+              error={profileEnvironment.error}
+              onRefresh={() => void profileEnvironment.refresh()}
             />
           }
           onClose={closeEditor}

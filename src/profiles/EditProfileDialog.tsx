@@ -19,6 +19,7 @@ interface EditProfileDialogProps {
   onDeleteWithData?: () => void;
   onSave?: () => Promise<void>;
   runtimeTabsPanel?: ReactNode;
+  environmentPanel?: ReactNode;
   onClose: () => void;
 }
 
@@ -36,6 +37,7 @@ export function EditProfileDialog({
   onDeleteWithData,
   onSave,
   runtimeTabsPanel,
+  environmentPanel,
   onClose
 }: EditProfileDialogProps) {
   const titleId = "edit-profile-title";
@@ -151,6 +153,8 @@ export function EditProfileDialog({
               </div>
 
               {runtimeTabsPanel}
+
+              {environmentPanel}
 
               <div className="danger-zone">
                 <div>

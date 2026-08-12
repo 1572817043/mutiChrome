@@ -90,6 +90,25 @@ export interface BrowserRuntimeNavigationResult {
   navigatedAt: number;
 }
 
+export interface ProfileEnvironmentSnapshot {
+  profileId: string;
+  profileDir: string;
+  directoryStatus: "ready" | "missing" | "not-directory" | "empty" | "unreadable";
+  managedProfileRoot: boolean;
+  registered: boolean;
+  browserPath: string;
+  browserAvailable: boolean;
+  running: boolean;
+  healthIssues: Array<{
+    severity: "warning" | "error";
+    code: string;
+    title: string;
+    detail: string;
+    path: string | null;
+    profileId: string | null;
+  }>;
+}
+
 const ROOT_KEY = "multichrome.rootPath";
 const DOCUMENT_KEY = "multichrome.profileDocument";
 const BACKUP_PREFIX = "multichrome.profileBackup.";
@@ -375,6 +394,33 @@ export const profileApi = {
     }
 
     return 0;
+  },
+
+  async getProfileEnvironmentSnapshot(
+    rootPath: string,
+    profileId: string,
+    browserPath?: string
+  ): Promise<ProfileEnvironmentSnapshot> {
+    if (isTauriRuntime()) {
+      return invoke<ProfileEnvironmentSnapshot>("profile_environment_snapshot", {
+        rootPath,
+        profileId,
+        browserPath
+      });
+    }
+
+    const path = profilePath(rootPath, profileId);
+    return {
+      profileId,
+      profileDir: path,
+      directoryStatus: "missing",
+      managedProfileRoot: false,
+      registered: false,
+      browserPath: normalizeBrowserPath(browserPath),
+      browserAvailable: false,
+      running: false,
+      healthIssues: []
+    };
   },
 
   async openProfile(

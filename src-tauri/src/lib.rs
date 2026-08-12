@@ -9,7 +9,7 @@ use profile_store::{
     restore_full_profile_backup, restore_profile_backup, save_profile_document, BrowserLaunchEvent,
     FullProfileBackupPreview, FullProfileBackupResult, FullProfileRestorePreview,
     ProfileBackupResult, ProfileDocument, ProfileImportCandidate, ProfileMarker, RootHealthReport,
-    RootRepairResult, RootStatus,
+    RootHealthIssue, RootHealthSeverity, RootRepairResult, RootStatus,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -82,6 +82,30 @@ struct BrowserSessionSnapshot {
     checked_at: u64,
 }
 
+#[derive(Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProfileEnvironmentSnapshot {
+    profile_id: String,
+    profile_dir: String,
+    directory_status: ProfileEnvironmentDirectoryStatus,
+    managed_profile_root: bool,
+    registered: bool,
+    browser_path: String,
+    browser_available: bool,
+    running: bool,
+    health_issues: Vec<RootHealthIssue>,
+}
+
+#[derive(Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum ProfileEnvironmentDirectoryStatus {
+    Ready,
+    Missing,
+    NotDirectory,
+    Empty,
+    Unreadable,
+}
+
 use browser_runtime::{RuntimeTabNavigationResult, TabSnapshot};
 
 #[derive(Debug, Eq, PartialEq)]
@@ -116,6 +140,7 @@ pub fn run() {
             open_profile,
             list_running_profiles,
             snapshot_browser_sessions,
+            profile_environment_snapshot,
             list_runtime_tabs,
             navigate_runtime_tab,
             focus_profile_window,
@@ -346,6 +371,32 @@ fn snapshot_browser_sessions(
         list_chrome_windows,
         browser_runtime::probe_cdp_version,
         current_time_millis(),
+    ))
+}
+
+#[tauri::command]
+fn profile_environment_snapshot(
+    root_path: String,
+    profile_id: String,
+    browser_path: Option<String>,
+) -> Result<ProfileEnvironmentSnapshot, String> {
+    let root_path = PathBuf::from(root_path);
+    let _ = profile_store::validated_profile_dir(&root_path, &profile_id)?;
+    let browser_path = configured_browser_path(browser_path);
+    let output = Command::new("ps")
+        .args(["-axo", "pid=,command="])
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err("读取 Chrome 运行状态失败".to_string());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(profile_environment_snapshot_from_processes(
+        &root_path,
+        &profile_id,
+        &browser_path,
+        stdout.lines(),
     ))
 }
 
@@ -777,6 +828,186 @@ where
             debug_port: process.debug_port,
         })
         .collect()
+}
+
+fn profile_environment_snapshot_from_processes<'a, I>(
+    root_path: &Path,
+    profile_id: &str,
+    browser_path: &Path,
+    process_lines: I,
+) -> ProfileEnvironmentSnapshot
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let profile_dir = profile_store::profile_dir(root_path, profile_id);
+    let registered = load_profile_document(root_path)
+        .map(|document| document.profiles.into_iter().any(|profile| profile.id == profile_id))
+        .unwrap_or(false);
+    let running = running_profile_processes_from_processes(root_path, process_lines)
+        .into_iter()
+        .any(|process| process.profile_id == profile_id);
+
+    let profiles_root = root_path.join("profiles");
+    ProfileEnvironmentSnapshot {
+        profile_id: profile_id.to_string(),
+        profile_dir: profile_dir.to_string_lossy().to_string(),
+        directory_status: profile_environment_directory_status(&profile_dir),
+        managed_profile_root: registered
+            && profiles_root.is_dir()
+            && profile_dir.parent() == Some(profiles_root.as_path()),
+        registered,
+        browser_path: browser_path.to_string_lossy().to_string(),
+        browser_available: browser_path.exists(),
+        running,
+        health_issues: profile_environment_health_issues(
+            root_path,
+            profile_id,
+            &profile_dir,
+            registered,
+        ),
+    }
+}
+
+fn profile_environment_directory_status(path: &Path) -> ProfileEnvironmentDirectoryStatus {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            ProfileEnvironmentDirectoryStatus::Missing
+        }
+        Err(_) => ProfileEnvironmentDirectoryStatus::Unreadable,
+        Ok(metadata) if !metadata.is_dir() => ProfileEnvironmentDirectoryStatus::NotDirectory,
+        Ok(_) => match std::fs::read_dir(path) {
+            Ok(mut entries) => {
+                if entries.next().is_none() {
+                    ProfileEnvironmentDirectoryStatus::Empty
+                } else {
+                    ProfileEnvironmentDirectoryStatus::Ready
+                }
+            }
+            Err(_) => ProfileEnvironmentDirectoryStatus::Unreadable,
+        },
+    }
+}
+
+fn profile_environment_health_issues(
+    root_path: &Path,
+    profile_id: &str,
+    profile_dir: &Path,
+    registered: bool,
+) -> Vec<RootHealthIssue> {
+    let mut issues = Vec::new();
+    if !root_path.is_dir() {
+        issues.push(environment_health_issue(
+            RootHealthSeverity::Error,
+            "root_missing",
+            "根目录不可用",
+            "当前根目录不存在或不是文件夹。",
+            Some(root_path),
+            None,
+        ));
+        return issues;
+    }
+    if !root_path.join("profiles").is_dir() {
+        issues.push(environment_health_issue(
+            RootHealthSeverity::Error,
+            "profiles_dir_missing",
+            "Profile 目录缺失",
+            "profiles 文件夹不存在，账号配置目录无法定位。",
+            Some(&root_path.join("profiles")),
+            None,
+        ));
+    }
+    if load_profile_document(root_path).is_err() {
+        issues.push(environment_health_issue(
+            RootHealthSeverity::Error,
+            "profile_document_unavailable",
+            "账号索引不可用",
+            "无法读取账号索引，无法确认该账号是否已登记。",
+            Some(&root_path.join("app-data/profiles.json")),
+            None,
+        ));
+    }
+    if load_profile_document(root_path).is_ok() && !registered {
+        issues.push(environment_health_issue(
+            RootHealthSeverity::Warning,
+            "profile_not_registered",
+            "账号未登记",
+            "当前账号不在根目录的账号索引中。",
+            None,
+            Some(profile_id),
+        ));
+        return issues;
+    }
+    if !registered {
+        return issues;
+    }
+    if let Some(issue) = profile_environment_directory_issue(
+        profile_environment_directory_status(profile_dir),
+        profile_dir,
+        profile_id,
+    ) {
+        issues.push(issue);
+    }
+    issues
+}
+
+fn environment_health_issue(
+    severity: RootHealthSeverity,
+    code: &str,
+    title: &str,
+    detail: &str,
+    path: Option<&Path>,
+    profile_id: Option<&str>,
+) -> RootHealthIssue {
+    RootHealthIssue {
+        severity,
+        code: code.to_string(),
+        title: title.to_string(),
+        detail: detail.to_string(),
+        path: path.map(|value| value.to_string_lossy().to_string()),
+        profile_id: profile_id.map(ToString::to_string),
+    }
+}
+
+fn profile_environment_directory_issue(
+    status: ProfileEnvironmentDirectoryStatus,
+    profile_dir: &Path,
+    profile_id: &str,
+) -> Option<RootHealthIssue> {
+    let (severity, code, title, detail) = match status {
+        ProfileEnvironmentDirectoryStatus::Ready => return None,
+        ProfileEnvironmentDirectoryStatus::Missing => (
+            RootHealthSeverity::Error,
+            "profile_dir_missing",
+            "Profile 文件夹缺失",
+            "该账号已登记，但本地 Profile 文件夹不存在。",
+        ),
+        ProfileEnvironmentDirectoryStatus::NotDirectory => (
+            RootHealthSeverity::Error,
+            "profile_path_not_directory",
+            "Profile 路径不是文件夹",
+            "该账号的 Profile 路径存在，但不是文件夹。",
+        ),
+        ProfileEnvironmentDirectoryStatus::Empty => (
+            RootHealthSeverity::Warning,
+            "profile_dir_empty",
+            "Profile 文件夹为空",
+            "该账号的 Profile 文件夹目前为空。",
+        ),
+        ProfileEnvironmentDirectoryStatus::Unreadable => (
+            RootHealthSeverity::Error,
+            "profile_dir_unreadable",
+            "Profile 文件夹无法读取",
+            "无法读取该账号的 Profile 文件夹，请检查磁盘权限或外置盘状态。",
+        ),
+    };
+    Some(environment_health_issue(
+        severity,
+        code,
+        title,
+        detail,
+        Some(profile_dir),
+        Some(profile_id),
+    ))
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -2666,6 +2897,119 @@ mod tests {
         handle.join().unwrap();
 
         assert_eq!(error, "CDP 连接失败");
+    }
+
+    #[test]
+    fn profile_environment_snapshot_reports_only_safe_local_state() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path();
+        let profile_dir = profile_store::profile_dir(root, "account-001");
+        let process_line = format!(
+            "123 /Applications/Google Chrome --user-data-dir={}",
+            profile_dir.to_string_lossy()
+        );
+
+        let snapshot = profile_environment_snapshot_from_processes(
+            root,
+            "account-001",
+            Path::new("/Applications/Google Chrome.app"),
+            [process_line.as_str()],
+        );
+
+        assert_eq!(snapshot.profile_id, "account-001");
+        assert!(!snapshot.managed_profile_root);
+        assert!(snapshot.running);
+        assert_eq!(snapshot.directory_status, ProfileEnvironmentDirectoryStatus::Missing);
+        assert!(snapshot
+            .health_issues
+            .iter()
+            .any(|issue| issue.code == "profiles_dir_missing"));
+        assert!(!snapshot
+            .health_issues
+            .iter()
+            .any(|issue| issue.code == "profile_dir_missing"));
+    }
+
+    #[test]
+    fn profile_environment_snapshot_distinguishes_unregistered_and_registered_profiles() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path();
+        init_root(root).unwrap();
+
+        let orphan = profile_environment_snapshot_from_processes(
+            root,
+            "orphan-001",
+            Path::new("/Applications/Google Chrome.app"),
+            std::iter::empty(),
+        );
+        assert!(!orphan.registered);
+        assert!(!orphan.managed_profile_root);
+        assert!(orphan
+            .health_issues
+            .iter()
+            .any(|issue| issue.code == "profile_not_registered"));
+        assert!(!orphan
+            .health_issues
+            .iter()
+            .any(|issue| issue.code == "profile_dir_missing"));
+
+        let mut document = load_profile_document(root).unwrap();
+        document.profiles.push(profile_store::StoredProfile {
+            id: "account-001".to_string(),
+            name: "账号".to_string(),
+            tags: vec![],
+            notes: String::new(),
+            status: "active".to_string(),
+            account_platforms: vec![],
+            accent_color: None,
+            import_source: None,
+            created_at: "2026-01-01T00:00:00.000Z".to_string(),
+            updated_at: "2026-01-01T00:00:00.000Z".to_string(),
+            last_opened_at: None,
+        });
+        save_profile_document(root, &document).unwrap();
+        let profile_dir = profile_store::profile_dir(root, "account-001");
+        std::fs::write(profile_dir.join("Local State"), "{}").unwrap();
+
+        let registered = profile_environment_snapshot_from_processes(
+            root,
+            "account-001",
+            Path::new("/Applications/Google Chrome.app"),
+            std::iter::empty(),
+        );
+        assert!(registered.registered);
+        assert!(registered.managed_profile_root);
+        assert_eq!(registered.directory_status, ProfileEnvironmentDirectoryStatus::Ready);
+        assert!(!registered
+            .health_issues
+            .iter()
+            .any(|issue| issue.code == "profile_not_registered"));
+    }
+
+    #[test]
+    fn unreadable_environment_directory_is_an_error_not_ready() {
+        let issue = profile_environment_directory_issue(
+            ProfileEnvironmentDirectoryStatus::Unreadable,
+            Path::new("/tmp/multichrome/profiles/account-001"),
+            "account-001",
+        )
+        .unwrap();
+
+        assert_eq!(issue.code, "profile_dir_unreadable");
+        assert_eq!(issue.severity, RootHealthSeverity::Error);
+    }
+
+    #[test]
+    fn profile_environment_snapshot_rejects_invalid_profile_id_before_reading_processes() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let error = profile_environment_snapshot(
+            temp_dir.path().to_string_lossy().to_string(),
+            "../account-001".to_string(),
+            None,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "账号 ID 只能包含字母、数字、短横线和下划线");
     }
 
     fn serve_cdp_response(response: String) -> (u16, thread::JoinHandle<()>) {
