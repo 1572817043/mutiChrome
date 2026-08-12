@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, test, vi } from "vitest";
 import type { RuntimeTabsPanelModel } from "./runtimeTabs";
@@ -21,6 +21,107 @@ function createModel(
 }
 
 describe("RuntimeTabsPanel", () => {
+  test("已选标签页按当前顺序复制所有 scheme、标题和重复项", async () => {
+    const user = userEvent.setup();
+    const onCopySelectedUrls = vi.fn();
+    const onCopySelectedTabDetails = vi.fn();
+    render(
+      <RuntimeTabsPanel
+        model={createModel({
+          rows: [
+            { targetId: "chrome", title: "内部页", url: "chrome://newtab/", checkedAt: 1 },
+            { targetId: "first", title: "第一页", url: "https://example.com/a", checkedAt: 1 },
+            { targetId: "duplicate", title: "重复页", url: "https://example.com/a", checkedAt: 1 }
+          ]
+        })}
+        onReadTabs={vi.fn()}
+        onCopySelectedUrls={onCopySelectedUrls}
+        onCopySelectedTabDetails={onCopySelectedTabDetails}
+      />
+    );
+
+    await user.click(screen.getByRole("checkbox", { name: "选择标签页 重复页 https://example.com/a" }));
+    await user.click(screen.getByRole("checkbox", { name: "选择标签页 内部页 chrome://newtab/" }));
+    expect(screen.getByText("已选 2/3")).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "复制已选 2 个标签页网址" }));
+    await user.click(screen.getByRole("button", { name: "复制已选 2 个标签页标题和网址" }));
+
+    expect(onCopySelectedUrls).toHaveBeenCalledWith([
+      "chrome://newtab/",
+      "https://example.com/a"
+    ]);
+    expect(onCopySelectedTabDetails).toHaveBeenCalledWith([
+      { title: "内部页", url: "chrome://newtab/" },
+      { title: "重复页", url: "https://example.com/a" }
+    ]);
+  });
+
+  test("全选、清空和成功读取都会清空内部选择，读取失败保留选择", async () => {
+    const user = userEvent.setup();
+    const rows = [
+      { targetId: "same-target", title: "第一行", url: "https://example.com/first", checkedAt: 1 },
+      { targetId: "target-2", title: "第二行", url: "https://example.com/second", checkedAt: 1 }
+    ];
+    const onReadTabs = vi.fn().mockResolvedValue(true);
+    const { rerender } = render(
+      <RuntimeTabsPanel model={createModel({ rows })} onReadTabs={onReadTabs} />
+    );
+
+    await user.click(screen.getByRole("button", { name: "全选" }));
+    expect(screen.getByText("已选 2/2")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "清空" }));
+    expect(screen.getByText("已选 0/2")).toBeTruthy();
+    await user.click(screen.getByRole("checkbox", { name: "选择标签页 第一行 https://example.com/first" }));
+    await user.click(screen.getByRole("button", { name: "读取标签页" }));
+    await waitFor(() => expect(screen.getByText("已选 0/2")).toBeTruthy());
+
+    rerender(
+      <RuntimeTabsPanel
+        model={createModel({ rows: [{ ...rows[0], title: "同 ID 新快照" }, rows[1]] })}
+        onReadTabs={vi.fn().mockResolvedValue(false)}
+      />
+    );
+    await user.click(screen.getByRole("checkbox", { name: "选择标签页 同 ID 新快照 https://example.com/first" }));
+    await user.click(screen.getByRole("button", { name: "读取标签页" }));
+    await waitFor(() => expect(screen.getByText("已选 1/2")).toBeTruthy());
+  });
+
+  test("已选草稿只交给 http(s) 行，并在没有可保存网址时禁用且提示", async () => {
+    const user = userEvent.setup();
+    const onSaveSelectedAsUrlDrafts = vi.fn();
+    const onSaveSelectedAsProjectDraft = vi.fn();
+    render(
+      <RuntimeTabsPanel
+        model={createModel({
+          rows: [
+            { targetId: "internal", title: "内部页", rawTitle: "内部页", url: "chrome://newtab/", checkedAt: 1 },
+            { targetId: "web", title: "网页", rawTitle: "网页", url: "https://example.com", checkedAt: 1 }
+          ]
+        })}
+        onReadTabs={vi.fn()}
+        onSaveSelectedAsUrlDrafts={onSaveSelectedAsUrlDrafts}
+        onSaveSelectedAsProjectDraft={onSaveSelectedAsProjectDraft}
+      />
+    );
+
+    await user.click(screen.getByRole("checkbox", { name: "选择标签页 内部页 chrome://newtab/" }));
+    const urlDraftButton = screen.getByRole("button", { name: "存为已选 0 个网址草稿" });
+    expect((urlDraftButton as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText("已选标签页没有可保存的 http/https 网址")).toBeTruthy();
+
+    await user.click(screen.getByRole("checkbox", { name: "选择标签页 网页 https://example.com" }));
+    await user.click(screen.getByRole("button", { name: "存为已选 1 个网址草稿" }));
+    await user.click(screen.getByRole("button", { name: "存为已选项目草稿" }));
+
+    expect(onSaveSelectedAsUrlDrafts).toHaveBeenCalledWith([
+      { title: "网页", rawTitle: "网页", url: "https://example.com" }
+    ]);
+    expect(onSaveSelectedAsProjectDraft).toHaveBeenCalledWith([
+      { title: "网页", rawTitle: "网页", url: "https://example.com" }
+    ]);
+  });
+
   test("只将保持原始顺序和重复项的 http(s) 标签页交给批量网址草稿", async () => {
     const user = userEvent.setup();
     const onSaveAllAsUrlDrafts = vi.fn();

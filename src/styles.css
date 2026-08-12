@@ -2241,9 +2241,22 @@ button:disabled {
   list-style: none;
 }
 
+.runtime-tabs-selection {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  color: #637269;
+  font-size: 12px;
+}
+
+.runtime-tabs-selection-hint {
+  color: #9d6a25;
+}
+
 .runtime-tabs-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
   min-width: 0;
@@ -2251,6 +2264,15 @@ button:disabled {
   border: 1px solid #dfe8e1;
   border-radius: 6px;
   background: #f8faf8;
+}
+
+.runtime-tabs-row-select {
+  display: flex;
+  align-items: center;
+}
+
+.runtime-tabs-row-select input {
+  margin: 0;
 }
 
 .runtime-tabs-row-actions {
@@ -3304,8 +3326,13 @@ button:disabled {
 
 :root[data-theme="dark"] .runtime-tabs-status,
 :root[data-theme="dark"] .runtime-tabs-row-main span,
-:root[data-theme="dark"] .runtime-tabs-row code {
+:root[data-theme="dark"] .runtime-tabs-row code,
+:root[data-theme="dark"] .runtime-tabs-selection {
   color: #a1a1aa;
+}
+
+:root[data-theme="dark"] .runtime-tabs-selection-hint {
+  color: #e4b77b;
 }
 
 :root[data-theme="dark"] .runtime-tabs-row {
