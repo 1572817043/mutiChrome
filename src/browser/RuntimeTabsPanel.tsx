@@ -26,6 +26,11 @@ function shortTargetId(targetId: string): string {
   return targetId.length > 8 ? `${targetId.slice(0, 8)}…` : targetId;
 }
 
+function formatSnapshotTime(checkedAt: number): string {
+  const date = new Date(checkedAt);
+  return Number.isNaN(date.getTime()) ? String(checkedAt) : date.toLocaleString("zh-CN");
+}
+
 export function RuntimeTabsPanel({
   model,
   onReadTabs,
@@ -47,6 +52,9 @@ export function RuntimeTabsPanel({
           <div className="runtime-tabs-status">
             <span>CDP 状态：{model.cdpStatusLabel}</span>
             <span>调试端口：{model.debugPortLabel}</span>
+            {model.rows.length > 0 ? (
+              <span>当前快照：{formatSnapshotTime(model.rows[0].checkedAt)}（非实时）</span>
+            ) : null}
           </div>
         </div>
         <button
