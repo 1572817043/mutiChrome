@@ -20,6 +20,8 @@ V0.4 基础可用性已完成第一段：账号卡片支持颜色标识、标准
 
 当前补充：Browser Runtime 稳定性 PR #66 已限制只有 http/https 标签页可进入网址或项目草稿，避免 Chrome 内部页和空白页被错误保存为 HTTPS 地址；标签展示与复制仍保留全部已读取 URL。
 
+当前补充：Browser Runtime 产品化 PR #67 已支持复制当前已读取标签页的标题和网址，保留原顺序、重复项和全部 URL scheme，不包含 CDP WebSocket 地址。
+
 优化 PR #18 已完成第一段树干瘦身：分支 `codex/api-normalization-domain-model`，PR `https://github.com/1572817043/mutiChrome/pull/18`，commit `0c72c4b`。本轮只把 `src/api.ts` 里的 profile document、settings、profiles、projects、urlLibrary 归一化和空文档构造外移到 `src/domain/profileDocumentModel.ts`，`api.ts` 保留 `DEFAULT_BROWSER_PATH` 与 `normalizeSettings` 兼容导出并继续负责 Tauri/browser preview API 包装；不改 UI、Rust、样式或运行时功能。新增 `src/domain/profileDocumentModel.test.ts` 覆盖空 document、legacy `favoriteUrls -> urlLibrary`、已有 `urlLibrary` 优先、profile `accountPlatforms/importSource` 和 project legacy URL/interval fallback。阶段验证通过：`rtk npm test -- src/domain/profileDocumentModel.test.ts src/api.test.ts` 为 6 passed，`rtk npm test` 为 262 passed，`rtk npm run build` 通过，`rtk git diff --check --cached` 通过。Spec review 和 code quality review 均已通过；畸形持久化数组继续保持旧实现错误语义，不在本优化 PR 改变兼容策略。
 
 优化 PR #19 已完成第二段树干瘦身：分支 `codex/settings-dialog-prop-groups`，PR `https://github.com/1572817043/mutiChrome/pull/19`，commit `1af1400`。本轮只把 `SettingsDialogProps` 从 44 个平铺字段收敛为 `rootSettings`、`health`、`lightBackup`、`fullBackup`、`runtimeDiagnostics` 和 `onClose` 6 个顶层 props；`App.tsx` 单一调用点改为按职责组装状态和 handler，`SettingsDialog` 内部仍按原 UI、文案、禁用条件和点击行为执行；不改 CSS、Rust 或业务功能。`SettingsDialog.test.tsx` 的 helper 改为分组覆盖，并修正局部分组 override 的 TypeScript 类型表达。阶段验证通过：`rtk npm test -- src/settings/SettingsDialog.test.tsx` 为 13 passed，`rtk npm test -- src/App.test.tsx -t "设置|开发诊断|根目录|备份"` 为 30 passed，`rtk npm test` 为 262 passed，`rtk npm run build` 通过，`rtk git diff --check` 通过。Spec review 和 code quality review 均已通过。
