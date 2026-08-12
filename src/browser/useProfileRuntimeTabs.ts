@@ -33,7 +33,7 @@ export interface UseProfileRuntimeTabsOptions {
 export interface UseProfileRuntimeTabsResult {
   model: RuntimeTabsPanelModel;
   loading: boolean;
-  readTabs: () => Promise<void>;
+  readTabs: () => Promise<boolean>;
   reset: () => void;
 }
 
@@ -118,9 +118,9 @@ export function useProfileRuntimeTabs({
     [selectedProfile, selectedProfileCount, session, state]
   );
 
-  async function readTabs(): Promise<void> {
+  async function readTabs(): Promise<boolean> {
     if (!model.canReadTabs || !selectedProfile) {
-      return;
+      return false;
     }
 
     const requestId = requestIdRef.current + 1;
@@ -145,14 +145,16 @@ export function useProfileRuntimeTabs({
     try {
       const tabs = await listRuntimeTabs(requestContext.rootPath, profileId);
       if (!isCurrent()) {
-        return;
+        return false;
       }
       setState({ status: "succeeded", tabs, error: null });
+      return true;
     } catch (error) {
       if (!isCurrent()) {
-        return;
+        return false;
       }
       setState({ status: "failed", tabs: [], error: errorMessage(error) });
+      return false;
     }
   }
 

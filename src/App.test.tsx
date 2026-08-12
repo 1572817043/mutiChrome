@@ -914,6 +914,81 @@ describe("App launcher layout", () => {
     listTabsSpy.mockRestore();
   });
 
+  test("运行中的账号可以复制已选标签页的所有 scheme、标题和网址", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    vi.spyOn(profileApi, "snapshotBrowserSessions").mockResolvedValue([
+      browserSessionSnapshot("account-001", true), browserSessionSnapshot("account-002", false)
+    ]);
+    vi.spyOn(profileApi, "listRuntimeTabs").mockResolvedValue([
+      { targetId: "selected-internal", type: "page", url: "chrome://newtab/", title: "内部页", webSocketDebuggerUrl: null, checkedAt: 1000 },
+      { targetId: "selected-web", type: "page", url: "https://example.com/selected", title: "网页", webSocketDebuggerUrl: null, checkedAt: 1000 }
+    ]);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "编辑 主号" }));
+    const dialog = await screen.findByRole("dialog", { name: "编辑 主号" });
+    await user.click(within(dialog).getByRole("button", { name: "读取标签页" }));
+    await user.click(within(dialog).getByRole("checkbox", { name: "选择标签页 网页 https://example.com/selected" }));
+    await user.click(within(dialog).getByRole("checkbox", { name: "选择标签页 内部页 chrome://newtab/" }));
+    await user.click(within(dialog).getByRole("button", { name: "复制已选 2 个标签页网址" }));
+
+    expect(writeText).toHaveBeenLastCalledWith("chrome://newtab/\nhttps://example.com/selected");
+    expect(await screen.findByText("已复制已选标签页网址")).toBeTruthy();
+    await user.click(within(dialog).getByRole("button", { name: "复制已选 2 个标签页标题和网址" }));
+    expect(writeText).toHaveBeenLastCalledWith(
+      "标题：内部页\n网址：chrome://newtab/\n\n标题：网页\n网址：https://example.com/selected"
+    );
+    expect(await screen.findByText("已复制已选标签页标题和网址")).toBeTruthy();
+  });
+
+  test("复制已选标签页失败时沿用剪贴板错误", async () => {
+    const user = userEvent.setup();
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText: vi.fn().mockRejectedValue(new Error("已选剪贴板拒绝")) },
+      configurable: true
+    });
+    vi.spyOn(profileApi, "snapshotBrowserSessions").mockResolvedValue([
+      browserSessionSnapshot("account-001", true), browserSessionSnapshot("account-002", false)
+    ]);
+    vi.spyOn(profileApi, "listRuntimeTabs").mockResolvedValue([
+      { targetId: "selected-error", type: "page", url: "https://example.com/error", title: "错误页", webSocketDebuggerUrl: null, checkedAt: 1000 }
+    ]);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "编辑 主号" }));
+    const dialog = await screen.findByRole("dialog", { name: "编辑 主号" });
+    await user.click(within(dialog).getByRole("button", { name: "读取标签页" }));
+    await user.click(within(dialog).getByRole("checkbox", { name: "选择标签页 错误页 https://example.com/error" }));
+    await user.click(within(dialog).getByRole("button", { name: "复制已选 1 个标签页网址" }));
+
+    expect(await screen.findByText("已选剪贴板拒绝")).toBeTruthy();
+  });
+
+  test("已选标签页存为网址草稿后取消不会写入", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(profileApi, "snapshotBrowserSessions").mockResolvedValue([
+      browserSessionSnapshot("account-001", true), browserSessionSnapshot("account-002", false)
+    ]);
+    vi.spyOn(profileApi, "listRuntimeTabs").mockResolvedValue([
+      { targetId: "selected-draft", type: "page", url: "https://example.com/selected-draft", title: "已选草稿", webSocketDebuggerUrl: null, checkedAt: 1000 }
+    ]);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "编辑 主号" }));
+    const accountDialog = await screen.findByRole("dialog", { name: "编辑 主号" });
+    await user.click(within(accountDialog).getByRole("button", { name: "读取标签页" }));
+    await user.click(within(accountDialog).getByRole("checkbox", { name: "选择标签页 已选草稿 https://example.com/selected-draft" }));
+    await user.click(within(accountDialog).getByRole("button", { name: "存为已选 1 个网址草稿" }));
+
+    const draftDialog = await screen.findByRole("dialog", { name: "存为全部网址草稿" });
+    expect(savedDocument().settings.urlLibrary).toEqual([]);
+    await user.click(within(draftDialog).getByRole("button", { name: "取消" }));
+    expect(screen.queryByRole("dialog", { name: "存为全部网址草稿" })).toBeNull();
+    expect(savedDocument().settings.urlLibrary).toEqual([]);
+  });
+
   test("运行中的账号复制标签页网址时不支持剪贴板会提示既有文案", async () => {
     const user = userEvent.setup();
     Object.defineProperty(navigator, "clipboard", {

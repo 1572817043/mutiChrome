@@ -102,10 +102,12 @@ describe("useProfileRuntimeTabs", () => {
       }
     );
 
+    let result = false;
     await act(async () => {
-      await hook.result.current.readTabs();
+      result = await hook.result.current.readTabs();
     });
 
+    expect(result).toBe(true);
     expect(hook.result.current.model.rows[0]?.targetId).toBe("target-1");
   });
 
@@ -120,7 +122,7 @@ describe("useProfileRuntimeTabs", () => {
       errorMessage: null
     });
 
-    let readPromise: Promise<void> = Promise.resolve();
+    let readPromise: Promise<boolean> = Promise.resolve(false);
     act(() => {
       readPromise = hook.result.current.readTabs();
     });
@@ -156,11 +158,13 @@ describe("useProfileRuntimeTabs", () => {
       session: createSession({ cdpStatus: "missing-port", debugPort: null })
     });
 
+    let result = true;
     await act(async () => {
-      await hook.result.current.readTabs();
+      result = await hook.result.current.readTabs();
     });
 
     expect(listRuntimeTabs).not.toHaveBeenCalled();
+    expect(result).toBe(false);
     expect(hook.result.current.model.canReadTabs).toBe(false);
   });
 
@@ -173,14 +177,16 @@ describe("useProfileRuntimeTabs", () => {
       .mockResolvedValueOnce([createTab({ targetId: "target-2" })]);
     const hook = renderRuntimeTabs(listRuntimeTabs);
 
+    let failedReadResult = true;
     await act(async () => {
-      await hook.result.current.readTabs();
+      failedReadResult = await hook.result.current.readTabs();
     });
     expect(hook.result.current.model).toMatchObject({
       canReadTabs: true,
       rows: [],
       errorMessage: "连接超时"
     });
+    expect(failedReadResult).toBe(false);
 
     await act(async () => {
       await hook.result.current.readTabs();
@@ -215,7 +221,7 @@ describe("useProfileRuntimeTabs", () => {
     });
     expect(hook.result.current.model.rows).toEqual([]);
 
-    let newReadPromise: Promise<void> = Promise.resolve();
+    let newReadPromise: Promise<boolean> = Promise.resolve(false);
     act(() => {
       newReadPromise = hook.result.current.readTabs();
     });
@@ -231,8 +237,9 @@ describe("useProfileRuntimeTabs", () => {
     const listRuntimeTabs = vi.fn().mockReturnValue(request.promise);
     const hook = renderRuntimeTabs(listRuntimeTabs);
 
+    let staleReadPromise: Promise<boolean> = Promise.resolve(true);
     act(() => {
-      void hook.result.current.readTabs();
+      staleReadPromise = hook.result.current.readTabs();
     });
     hook.rerender({
       rootPath: "/root-a",
@@ -249,7 +256,7 @@ describe("useProfileRuntimeTabs", () => {
     });
     await act(async () => {
       request.resolve([createTab({ targetId: "stale-count" })]);
-      await Promise.resolve();
+      await staleReadPromise;
     });
     expect(hook.result.current.model.rows).toEqual([]);
   });
@@ -259,8 +266,9 @@ describe("useProfileRuntimeTabs", () => {
     const listRuntimeTabs = vi.fn().mockReturnValue(request.promise);
     const hook = renderRuntimeTabs(listRuntimeTabs);
 
+    let staleReadPromise: Promise<boolean> = Promise.resolve(true);
     act(() => {
-      void hook.result.current.readTabs();
+      staleReadPromise = hook.result.current.readTabs();
     });
     hook.rerender({
       rootPath: "/root-a",
@@ -277,9 +285,10 @@ describe("useProfileRuntimeTabs", () => {
     });
     await act(async () => {
       request.resolve([createTab({ targetId: "stale-session" })]);
-      await Promise.resolve();
+      await staleReadPromise;
     });
     expect(hook.result.current.model.rows).toEqual([]);
+    expect(await staleReadPromise).toBe(false);
   });
 
   test("再次读取进入 loading 时清空已有 rows 和 error", async () => {
@@ -297,7 +306,7 @@ describe("useProfileRuntimeTabs", () => {
     });
     expect(hook.result.current.model.errorMessage).toBe("首次读取失败");
 
-    let retryPromise: Promise<void> = Promise.resolve();
+    let retryPromise: Promise<boolean> = Promise.resolve(false);
     act(() => {
       retryPromise = hook.result.current.readTabs();
     });
@@ -319,16 +328,18 @@ describe("useProfileRuntimeTabs", () => {
     const listRuntimeTabs = vi.fn().mockReturnValue(request.promise);
     const hook = renderRuntimeTabs(listRuntimeTabs);
 
+    let readPromise: Promise<boolean> = Promise.resolve(true);
     act(() => {
-      void hook.result.current.readTabs();
+      readPromise = hook.result.current.readTabs();
     });
     hook.unmount();
     await act(async () => {
       request.resolve([createTab()]);
-      await Promise.resolve();
+      await readPromise;
     });
 
     expect(listRuntimeTabs).toHaveBeenCalledTimes(1);
+    expect(await readPromise).toBe(false);
   });
 
   test("reset 清空 tabs 和 error 并恢复 idle", async () => {
