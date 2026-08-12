@@ -99,6 +99,88 @@ describe("RuntimeTabsPanel", () => {
     expect(screen.getByText("target-1…")).toBeTruthy();
   });
 
+  test("有标签页时显示首行快照时间并标明非实时", () => {
+    const checkedAt = Date.UTC(2026, 7, 12, 12, 34, 56);
+    render(
+      <RuntimeTabsPanel
+        model={createModel({
+          rows: [
+            {
+              targetId: "target-1",
+              title: "示例页面",
+              url: "https://example.com/page",
+              checkedAt
+            }
+          ]
+        })}
+        onReadTabs={vi.fn()}
+      />
+    );
+
+    expect(
+      screen.getByText(`当前快照：${new Date(checkedAt).toLocaleString("zh-CN")}（非实时）`)
+    ).toBeTruthy();
+  });
+
+  test("多行标签页只显示首行的一次快照时间", () => {
+    const firstCheckedAt = Date.UTC(2026, 7, 12, 12, 34, 56);
+    const secondCheckedAt = Date.UTC(2026, 7, 12, 13, 34, 56);
+    render(
+      <RuntimeTabsPanel
+        model={createModel({
+          rows: [
+            { targetId: "target-1", title: "第一行", url: "https://example.com/first", checkedAt: firstCheckedAt },
+            { targetId: "target-2", title: "第二行", url: "https://example.com/second", checkedAt: secondCheckedAt }
+          ]
+        })}
+        onReadTabs={vi.fn()}
+      />
+    );
+
+    const firstSnapshot = `当前快照：${new Date(firstCheckedAt).toLocaleString("zh-CN")}（非实时）`;
+    expect(screen.getAllByText(firstSnapshot)).toHaveLength(1);
+    expect(
+      screen.queryByText(`当前快照：${new Date(secondCheckedAt).toLocaleString("zh-CN")}（非实时）`)
+    ).toBeNull();
+  });
+
+  test("没有标签页时不显示快照时间", () => {
+    const { rerender } = render(
+      <RuntimeTabsPanel model={createModel()} onReadTabs={vi.fn()} />
+    );
+
+    expect(screen.queryByText(/当前快照：/)).toBeNull();
+
+    rerender(
+      <RuntimeTabsPanel
+        model={createModel({ errorMessage: "连接超时" })}
+        onReadTabs={vi.fn()}
+        loading
+      />
+    );
+    expect(screen.queryByText(/当前快照：/)).toBeNull();
+  });
+
+  test("无效快照时间安全回退为原始值", () => {
+    render(
+      <RuntimeTabsPanel
+        model={createModel({
+          rows: [
+            {
+              targetId: "target-1",
+              title: "示例页面",
+              url: "https://example.com/page",
+              checkedAt: Number.NaN
+            }
+          ]
+        })}
+        onReadTabs={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText("当前快照：NaN（非实时）")).toBeTruthy();
+  });
+
   test("每个已读取标签页都有独立的复制网址按钮", () => {
     render(
       <RuntimeTabsPanel
