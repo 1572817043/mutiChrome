@@ -155,6 +155,10 @@ import {
   UrlLibraryEditDialog,
   UrlLibraryView
 } from "./url-library/UrlLibraryView";
+import {
+  UrlLibraryBatchDraftDialog,
+  type UrlLibraryBatchDraft
+} from "./url-library/UrlLibraryBatchDraftDialog";
 import type {
   AccountPlatform,
   AirdropProject,
@@ -226,6 +230,9 @@ function App() {
     string | null
   >(null);
   const [urlLibraryEditorOpen, setUrlLibraryEditorOpen] = useState(false);
+  const [runtimeUrlLibraryDrafts, setRuntimeUrlLibraryDrafts] = useState<
+    UrlLibraryBatchDraft[] | null
+  >(null);
   const [pendingUrlDeleteId, setPendingUrlDeleteId] = useState<string | null>(null);
   const [pendingUrlDeleteCreatedAt, setPendingUrlDeleteCreatedAt] = useState<
     string | null
@@ -561,6 +568,7 @@ function App() {
       settingsOpen ||
         pendingUrlDeleteId ||
         urlLibraryEditorOpen ||
+        runtimeUrlLibraryDrafts ||
         newProjectDraft ||
         editingProjectId ||
         batchProfileDialogOpen ||
@@ -589,6 +597,7 @@ function App() {
     fullRestoreConfirmOpen,
     pendingUrlDeleteId,
     urlLibraryEditorOpen,
+    runtimeUrlLibraryDrafts,
     newProjectDraft,
     editingProjectId,
     batchProfileDialogOpen,
@@ -649,6 +658,7 @@ function App() {
     setEditingUrlLibraryCreatedAt(null);
     setPendingUrlDeleteCreatedAt(null);
     setUrlLibraryEditorOpen(false);
+    setRuntimeUrlLibraryDrafts(null);
     setPendingUrlDeleteId(null);
     setPendingDelete(null);
     setPendingBatchDelete(null);
@@ -916,6 +926,7 @@ function App() {
     setNewProfileDraft(null);
     setNewProjectDraft(null);
     setPendingProjectDeleteId(null);
+    setRuntimeUrlLibraryDrafts(null);
     setPendingDelete(null);
     setSelectedIds([]);
     setBulkTag("");
@@ -1354,6 +1365,10 @@ function App() {
     }
     if (urlLibraryEditorOpen) {
       cancelUrlLibraryEdit();
+      return;
+    }
+    if (runtimeUrlLibraryDrafts) {
+      setRuntimeUrlLibraryDrafts(null);
       return;
     }
     if (settingsOpen) {
@@ -1950,6 +1965,29 @@ function App() {
     setUrlLibraryEditorOpen(true);
   }
 
+  function startCreatingUrlLibraryItemsFromRuntimeTabs(
+    tabs: Array<{ title: string; rawTitle?: string; url: string }>
+  ) {
+    const drafts = tabs
+      .filter((tab) => isDraftableRuntimeTabUrl(tab.url))
+      .map((tab) => ({
+        name: (tab.rawTitle ?? tab.title).trim() || displayUrlLabel(tab.url),
+        url: tab.url
+      }));
+    if (drafts.length === 0) {
+      return;
+    }
+
+    closeEditor();
+    setEditingUrlLibraryId(null);
+    setEditingUrlLibraryCreatedAt(null);
+    setUrlLibraryDraft(createUrlLibraryDraft());
+    setPendingUrlDeleteId(null);
+    setPendingUrlDeleteCreatedAt(null);
+    setUrlLibraryEditorOpen(false);
+    setRuntimeUrlLibraryDrafts(drafts);
+  }
+
   function cancelUrlLibraryEdit() {
     setEditingUrlLibraryId(null);
     setEditingUrlLibraryCreatedAt(null);
@@ -2023,6 +2061,56 @@ function App() {
     setPendingUrlDeleteCreatedAt(null);
     setUrlLibraryDraft(createUrlLibraryDraft());
     setUrlLibraryEditorOpen(false);
+  }
+
+  async function saveRuntimeUrlLibraryDrafts() {
+    if (!runtimeUrlLibraryDrafts || runtimeUrlLibraryDrafts.length === 0) {
+      return;
+    }
+
+    const currentLibrary = settings.urlLibrary ?? [];
+    const knownUrls = new Set(currentLibrary.map((item) => item.url));
+    const entries: Array<Pick<UrlLibraryItem, "name" | "url" | "tags" | "notes">> = [];
+
+    for (const draft of runtimeUrlLibraryDrafts) {
+      const rawUrl = draft.url.trim();
+      if (!rawUrl) {
+        setMessage("请先填写网址");
+        return;
+      }
+      const launchUrl = normalizeLaunchUrl(rawUrl);
+      const hasNonWebScheme = /^[a-z][a-z0-9+.-]*:/i.test(rawUrl) && !/^https?:/i.test(rawUrl);
+      if (hasNonWebScheme || !isDraftableRuntimeTabUrl(launchUrl)) {
+        setMessage("仅支持 http 或 https 网址");
+        return;
+      }
+      if (knownUrls.has(launchUrl)) {
+        setMessage("网址已存在");
+        return;
+      }
+      knownUrls.add(launchUrl);
+      entries.push({
+        name: draft.name.trim() || displayUrlLabel(launchUrl),
+        url: launchUrl,
+        tags: [],
+        notes: ""
+      });
+    }
+
+    const now = new Date().toISOString();
+    const createdItems = entries.reduce((created, entry) => (
+      [...created, createUrlLibraryItem(entry, [...currentLibrary, ...created], now)]
+    ), [] as UrlLibraryItem[]);
+    const nextSettings = normalizeSettings({
+      ...settings,
+      urlLibrary: [...createdItems, ...currentLibrary]
+    });
+    try {
+      await persist(profiles, `已保存 ${createdItems.length} 个网址`, nextSettings);
+      setRuntimeUrlLibraryDrafts(null);
+    } catch (error) {
+      setMessage(errorMessage(error));
+    }
   }
 
   async function copyUrlFromLibrary(url: string) {
@@ -3317,6 +3405,7 @@ function App() {
               onCopyAllUrls={(urls) => void copyRuntimeTabUrls(urls)}
               onCopyAllTabDetails={(tabs) => void copyRuntimeTabDetails(tabs)}
               onSaveAsUrlDraft={startCreatingUrlLibraryItemFromRuntimeTab}
+              onSaveAllAsUrlDrafts={startCreatingUrlLibraryItemsFromRuntimeTabs}
               onSaveAsProjectDraft={startCreatingProjectFromRuntimeTabs}
               loading={runtimeTabs.loading}
             />
@@ -3351,6 +3440,15 @@ function App() {
           }
           onSave={() => void saveUrlLibraryDraft()}
           onClose={cancelUrlLibraryEdit}
+        />
+      ) : null}
+
+      {runtimeUrlLibraryDrafts ? (
+        <UrlLibraryBatchDraftDialog
+          drafts={runtimeUrlLibraryDrafts}
+          onChange={setRuntimeUrlLibraryDrafts}
+          onSave={() => void saveRuntimeUrlLibraryDrafts()}
+          onClose={() => setRuntimeUrlLibraryDrafts(null)}
         />
       ) : null}
 
