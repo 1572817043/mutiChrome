@@ -59,6 +59,7 @@ import {
 } from "./browserOperations";
 import { useBrowserOperations } from "./browser/operations/useBrowserOperations";
 import { RuntimeTabsPanel } from "./browser/RuntimeTabsPanel";
+import { isDraftableRuntimeTabUrl } from "./browser/runtimeTabs";
 import { useProfileRuntimeTabs } from "./browser/useProfileRuntimeTabs";
 import { isSessionRunning, profileSessionStatus } from "./browserSessions";
 import {
@@ -1536,8 +1537,13 @@ function App() {
       return;
     }
 
+    const draftableTabs = tabs.filter((tab) => isDraftableRuntimeTabUrl(tab.url));
+    if (draftableTabs.length === 0) {
+      return;
+    }
+
     const now = new Date().toISOString();
-    const urls = tabs.reduce(
+    const urls = draftableTabs.reduce(
       (current, tab) => [
         ...current,
         createProjectUrl(current, {
@@ -1911,6 +1917,10 @@ function App() {
     rawTitle?: string;
     url: string;
   }) {
+    if (!isDraftableRuntimeTabUrl(url)) {
+      return;
+    }
+
     closeEditor();
     setEditingUrlLibraryId(null);
     setEditingUrlLibraryCreatedAt(null);

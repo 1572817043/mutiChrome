@@ -1,5 +1,9 @@
 import { Copy, Plus, RefreshCw } from "lucide-react";
-import type { RuntimeTabsPanelModel, RuntimeTabsPanelRow } from "./runtimeTabs";
+import {
+  isDraftableRuntimeTabUrl,
+  type RuntimeTabsPanelModel,
+  type RuntimeTabsPanelRow
+} from "./runtimeTabs";
 
 interface RuntimeTabsPanelProps {
   model: RuntimeTabsPanelModel;
@@ -29,6 +33,7 @@ export function RuntimeTabsPanel({
   loading = false
 }: RuntimeTabsPanelProps) {
   const buttonDisabled = loading || !model.canReadTabs;
+  const draftableRows = model.rows.filter((row) => isDraftableRuntimeTabUrl(row.url));
 
   return (
     <section className="runtime-tabs-panel" aria-labelledby="runtime-tabs-title">
@@ -59,13 +64,13 @@ export function RuntimeTabsPanel({
             {`复制全部 ${model.rows.length} 个标签页网址`}
           </button>
         ) : null}
-        {model.rows.length > 0 && onSaveAsProjectDraft ? (
+        {draftableRows.length > 0 && onSaveAsProjectDraft ? (
           <button
             className="secondary-button compact"
             type="button"
             onClick={() =>
               onSaveAsProjectDraft(
-                model.rows.map((row) => ({
+                draftableRows.map((row) => ({
                   title: row.title,
                   rawTitle: row.rawTitle,
                   url: row.url
@@ -110,7 +115,7 @@ export function RuntimeTabsPanel({
                     <Copy size={14} />
                   </button>
                 ) : null}
-                {onSaveAsUrlDraft ? (
+                {onSaveAsUrlDraft && isDraftableRuntimeTabUrl(row.url) ? (
                   <button
                     className="icon-button compact"
                     type="button"

@@ -4,7 +4,7 @@ import type {
   BrowserSessionSnapshot
 } from "../api";
 import type { ChromeProfile } from "../types";
-import { buildRuntimeTabsPanelModel } from "./runtimeTabs";
+import { buildRuntimeTabsPanelModel, isDraftableRuntimeTabUrl } from "./runtimeTabs";
 
 const profile: ChromeProfile = {
   id: "profile-1",
@@ -66,6 +66,13 @@ function createInput(
 }
 
 describe("buildRuntimeTabsPanelModel", () => {
+  it("仅 http 或 https 标签页 URL 可以存为草稿", () => {
+    expect(isDraftableRuntimeTabUrl("https://example.com")).toBe(true);
+    expect(isDraftableRuntimeTabUrl("http://example.com")).toBe(true);
+    expect(isDraftableRuntimeTabUrl("chrome://newtab/")).toBe(false);
+    expect(isDraftableRuntimeTabUrl("about:blank")).toBe(false);
+  });
+
   it("允许读取可用 session，并格式化标签页 fallback", () => {
     const model = buildRuntimeTabsPanelModel(
       createInput({

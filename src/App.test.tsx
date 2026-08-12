@@ -1290,6 +1290,110 @@ describe("App launcher layout", () => {
     ]);
   });
 
+  test("Runtime 非 http(s) 标签页不能进入网址草稿或项目草稿", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(profileApi, "snapshotBrowserSessions").mockResolvedValue([
+      browserSessionSnapshot("account-001", true),
+      browserSessionSnapshot("account-002", false)
+    ]);
+    vi.spyOn(profileApi, "listRuntimeTabs").mockResolvedValue([
+      {
+        targetId: "chrome-newtab",
+        type: "page",
+        url: "chrome://newtab/",
+        title: "新标签页",
+        webSocketDebuggerUrl: null,
+        checkedAt: 1000
+      },
+      {
+        targetId: "about-blank",
+        type: "page",
+        url: "about:blank",
+        title: "空白页",
+        webSocketDebuggerUrl: null,
+        checkedAt: 1000
+      }
+    ]);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "编辑 主号" }));
+    const accountDialog = await screen.findByRole("dialog", { name: "编辑 主号" });
+    await user.click(within(accountDialog).getByRole("button", { name: "读取标签页" }));
+
+    expect(
+      within(accountDialog).queryByRole("button", {
+        name: "存为网址草稿 新标签页 chrome://newtab/"
+      })
+    ).toBeNull();
+    expect(within(accountDialog).queryByRole("button", { name: "存为项目草稿" })).toBeNull();
+    expect(savedDocument().settings.urlLibrary).toEqual([]);
+    expect(savedDocument().projects).toEqual([]);
+  });
+
+  test("Runtime 混合标签页保存项目时只持久化 http(s) URL", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(profileApi, "snapshotBrowserSessions").mockResolvedValue([
+      browserSessionSnapshot("account-001", true),
+      browserSessionSnapshot("account-002", false)
+    ]);
+    vi.spyOn(profileApi, "listRuntimeTabs").mockResolvedValue([
+      {
+        targetId: "chrome-newtab",
+        type: "page",
+        url: "chrome://newtab/",
+        title: "新标签页",
+        webSocketDebuggerUrl: null,
+        checkedAt: 1000
+      },
+      {
+        targetId: "valid-first",
+        type: "page",
+        url: "https://example.com/first",
+        title: "第一页",
+        webSocketDebuggerUrl: null,
+        checkedAt: 1000
+      },
+      {
+        targetId: "about-blank",
+        type: "page",
+        url: "about:blank",
+        title: "空白页",
+        webSocketDebuggerUrl: null,
+        checkedAt: 1000
+      },
+      {
+        targetId: "valid-duplicate",
+        type: "page",
+        url: "https://example.com/first",
+        title: "重复页",
+        webSocketDebuggerUrl: null,
+        checkedAt: 1000
+      }
+    ]);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "编辑 主号" }));
+    const accountDialog = await screen.findByRole("dialog", { name: "编辑 主号" });
+    await user.click(within(accountDialog).getByRole("button", { name: "读取标签页" }));
+    await user.click(within(accountDialog).getByRole("button", { name: "存为项目草稿" }));
+    const projectDialog = await screen.findByRole("dialog", { name: "新建项目" });
+
+    expect((within(projectDialog).getByLabelText("项目网址") as HTMLInputElement).value).toBe(
+      "https://example.com/first"
+    );
+    expect((within(projectDialog).getByLabelText("项目网址 2") as HTMLInputElement).value).toBe(
+      "https://example.com/first"
+    );
+    expect(within(projectDialog).queryByLabelText("项目网址 3")).toBeNull();
+
+    await user.click(within(projectDialog).getByRole("button", { name: "保存项目" }));
+
+    expect(savedDocument().projects[0]?.urls.map((projectUrl: any) => projectUrl.url)).toEqual([
+      "https://example.com/first",
+      "https://example.com/first"
+    ]);
+  });
+
   test("运行账号缺少调试端口时不允许编辑弹窗读取标签页", async () => {
     const user = userEvent.setup();
     const snapshotSpy = vi
