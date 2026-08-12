@@ -233,6 +233,9 @@ function App() {
   const [runtimeUrlLibraryDrafts, setRuntimeUrlLibraryDrafts] = useState<
     UrlLibraryBatchDraft[] | null
   >(null);
+  const [runtimeUrlLibrarySaving, setRuntimeUrlLibrarySaving] = useState(false);
+  const runtimeUrlLibrarySavingRef = useRef(false);
+  const runtimeUrlLibrarySaveTokenRef = useRef(0);
   const [pendingUrlDeleteId, setPendingUrlDeleteId] = useState<string | null>(null);
   const [pendingUrlDeleteCreatedAt, setPendingUrlDeleteCreatedAt] = useState<
     string | null
@@ -625,6 +628,7 @@ function App() {
   }
 
   async function commitLoadedRoot(path: string, loaded: LoadedRootData) {
+    invalidateRuntimeUrlLibrarySave();
     clearLaunchConfirmationRefresh();
     dataSafetySettings.resetDataSafetyState();
     resetForLoadedRoot();
@@ -919,6 +923,7 @@ function App() {
   }
 
   function resetUiForRestoredDocument() {
+    invalidateRuntimeUrlLibrarySave();
     setEditingId(null);
     setEditingProfileDraft(null);
     setEditingProjectId(null);
@@ -1368,6 +1373,9 @@ function App() {
       return;
     }
     if (runtimeUrlLibraryDrafts) {
+      if (runtimeUrlLibrarySavingRef.current) {
+        return;
+      }
       setRuntimeUrlLibraryDrafts(null);
       return;
     }
@@ -2064,7 +2072,11 @@ function App() {
   }
 
   async function saveRuntimeUrlLibraryDrafts() {
-    if (!runtimeUrlLibraryDrafts || runtimeUrlLibraryDrafts.length === 0) {
+    if (
+      runtimeUrlLibrarySavingRef.current ||
+      !runtimeUrlLibraryDrafts ||
+      runtimeUrlLibraryDrafts.length === 0
+    ) {
       return;
     }
 
@@ -2098,6 +2110,7 @@ function App() {
     }
 
     const now = new Date().toISOString();
+    const targetRootPath = getProfileDocumentSnapshot().rootPath;
     const createdItems = entries.reduce((created, entry) => (
       [...created, createUrlLibraryItem(entry, [...currentLibrary, ...created], now)]
     ), [] as UrlLibraryItem[]);
@@ -2105,12 +2118,39 @@ function App() {
       ...settings,
       urlLibrary: [...createdItems, ...currentLibrary]
     });
+    const saveToken = runtimeUrlLibrarySaveTokenRef.current;
+    runtimeUrlLibrarySavingRef.current = true;
+    setRuntimeUrlLibrarySaving(true);
     try {
-      await persist(profiles, `已保存 ${createdItems.length} 个网址`, nextSettings);
-      setRuntimeUrlLibraryDrafts(null);
+      const persisted = await persist(
+        profiles,
+        `已保存 ${createdItems.length} 个网址`,
+        nextSettings
+      );
+      if (runtimeUrlLibrarySaveTokenRef.current !== saveToken) {
+        return;
+      }
+      if (persisted && getProfileDocumentSnapshot().rootPath === targetRootPath) {
+        setRuntimeUrlLibraryDrafts(null);
+      } else {
+        setMessage("保存未完成，请重试");
+      }
     } catch (error) {
-      setMessage(errorMessage(error));
+      if (runtimeUrlLibrarySaveTokenRef.current === saveToken) {
+        setMessage(errorMessage(error));
+      }
+    } finally {
+      if (runtimeUrlLibrarySaveTokenRef.current === saveToken) {
+        runtimeUrlLibrarySavingRef.current = false;
+        setRuntimeUrlLibrarySaving(false);
+      }
     }
+  }
+
+  function invalidateRuntimeUrlLibrarySave() {
+    runtimeUrlLibrarySaveTokenRef.current += 1;
+    runtimeUrlLibrarySavingRef.current = false;
+    setRuntimeUrlLibrarySaving(false);
   }
 
   async function copyUrlFromLibrary(url: string) {
@@ -3448,7 +3488,12 @@ function App() {
           drafts={runtimeUrlLibraryDrafts}
           onChange={setRuntimeUrlLibraryDrafts}
           onSave={() => void saveRuntimeUrlLibraryDrafts()}
-          onClose={() => setRuntimeUrlLibraryDrafts(null)}
+          onClose={() => {
+            if (!runtimeUrlLibrarySavingRef.current) {
+              setRuntimeUrlLibraryDrafts(null);
+            }
+          }}
+          saving={runtimeUrlLibrarySaving}
         />
       ) : null}
 
