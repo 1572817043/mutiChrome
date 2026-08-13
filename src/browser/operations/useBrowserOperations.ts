@@ -68,6 +68,14 @@ export function useBrowserOperations({
     setBrowserOperations(nextOperations);
   }, []);
 
+  const clearProfileOpenOperations = useCallback(() => {
+    const nextOperations = browserOperationsRef.current.filter(
+      (operation) => operation.type !== "profile-open"
+    );
+    browserOperationsRef.current = nextOperations;
+    setBrowserOperations(nextOperations);
+  }, []);
+
   const startWindowOperation = useCallback(
     (action: string, profilesToOperate: ChromeProfile[]): BrowserOperation => {
       const operation = startBrowserOperation(
@@ -118,7 +126,14 @@ export function useBrowserOperations({
   );
 
   const finishProfileOpenOperation = useCallback(
-    (operation: BrowserOperation, result: BrowserLaunchResult) => {
+    (
+      operation: BrowserOperation,
+      result: BrowserLaunchResult,
+      shouldFinish?: () => boolean
+    ) => {
+      if (shouldFinish && !shouldFinish()) {
+        return;
+      }
       upsertBrowserOperation(
         finishBrowserOperation(operation, result.ok ? "succeeded" : "failed", {
           ok: result.ok,
@@ -130,7 +145,14 @@ export function useBrowserOperations({
   );
 
   const failProfileOpenOperation = useCallback(
-    (operation: BrowserOperation, error: unknown) => {
+    (
+      operation: BrowserOperation,
+      error: unknown,
+      shouldFinish?: () => boolean
+    ) => {
+      if (shouldFinish && !shouldFinish()) {
+        return;
+      }
       upsertBrowserOperation(
         finishBrowserOperation(operation, "failed", {
           ok: false,
@@ -270,6 +292,7 @@ export function useBrowserOperations({
   return {
     browserOperations,
     clearWindowActionOperations,
+    clearProfileOpenOperations,
     startWindowOperation,
     finishWindowOperation,
     startProfileOpenOperation,

@@ -200,6 +200,10 @@ interface RootLifecycleScope {
   token: number;
 }
 
+interface ProfileOpenLifecycleScope extends RootLifecycleScope {
+  profileId: string;
+}
+
 interface LoadedRootData extends RootSettingsLoadedData {
   launchEvents: BrowserLaunchEvent[];
 }
@@ -405,6 +409,7 @@ function App() {
   const {
     browserOperations,
     clearWindowActionOperations,
+    clearProfileOpenOperations,
     startWindowOperation,
     finishWindowOperation,
     startProfileOpenOperation,
@@ -805,6 +810,7 @@ function App() {
     const token = rootLifecycleTokenRef.current;
     rootSwitchPendingTokenRef.current = token;
     clearWindowActionOperations(ROOT_LIFECYCLE_WINDOW_ACTIONS);
+    clearProfileOpenOperations();
     if (
       windowActionLockRef.current &&
       ROOT_LIFECYCLE_WINDOW_ACTIONS.includes(
@@ -834,6 +840,10 @@ function App() {
       rootLifecycleTokenRef.current === scope.token &&
       getProfileDocumentSnapshot().rootPath === scope.rootPath
     );
+  }
+
+  function profileOpenLifecycleKey(scope: ProfileOpenLifecycleScope) {
+    return `${scope.token}:${scope.rootPath}:${scope.profileId}`;
   }
 
   async function withWindowActionLock(
@@ -1118,13 +1128,24 @@ function App() {
   async function updateProfileById(
     profileId: string,
     patch: Partial<ChromeProfile>,
-    nextMessage: string
+    nextMessage: string,
+    shouldCommit?: () => boolean
   ) {
+    if (shouldCommit && !shouldCommit()) {
+      return false;
+    }
     const now = new Date().toISOString();
     const nextProfiles = profiles.map((profile) =>
       profile.id === profileId ? updateProfile(profile, patch, now) : profile
     );
-    await persist(nextProfiles, nextMessage);
+    return persist(
+      nextProfiles,
+      nextMessage,
+      undefined,
+      undefined,
+      undefined,
+      shouldCommit
+    );
   }
 
   async function updateEditingProfileDraft(patch: Partial<ChromeProfile>) {
@@ -1164,12 +1185,12 @@ function App() {
     results: BrowserLaunchResult[],
     profileById: ReadonlyMap<string, ChromeProfile>,
     sourceLabel: string,
-    launchUrl: string
-  ) {
-    const scope: RootLifecycleScope = {
+    launchUrl: string,
+    scope: RootLifecycleScope = {
       rootPath,
       token: rootLifecycleTokenRef.current
-    };
+    }
+  ) {
     if (results.length === 0 || !isCurrentRootLifecycleScope(scope)) {
       return;
     }
@@ -1209,7 +1230,18 @@ function App() {
   }
 
   async function openProfile(profile: ChromeProfile) {
-    if (launchingProfileIdsRef.current.has(profile.id)) {
+    if (rootSwitchPendingTokenRef.current !== null) {
+      setMessage("配置根目录正在切换，请稍候");
+      return;
+    }
+    const scope: ProfileOpenLifecycleScope = {
+      rootPath,
+      token: rootLifecycleTokenRef.current,
+      profileId: profile.id
+    };
+    const launchKey = profileOpenLifecycleKey(scope);
+    const isCurrent = () => isCurrentRootLifecycleScope(scope);
+    if (launchingProfileIdsRef.current.has(launchKey)) {
       setMessage(`${profile.name} 正在启动，请稍等`);
       return;
     }
@@ -1219,17 +1251,25 @@ function App() {
 
     const operation = startProfileOpenOperation("账号启动", profile);
     let operationFinished = false;
-    launchingProfileIdsRef.current.add(profile.id);
+    launchingProfileIdsRef.current.add(launchKey);
 
     try {
-      const result = await launchChromeProfile(profile, DEFAULT_PROFILE_LAUNCH_URL);
-      finishProfileOpenOperation(operation, result);
+      const result = await launchChromeProfile(
+        profile,
+        DEFAULT_PROFILE_LAUNCH_URL,
+        isCurrent
+      );
+      if (!isCurrent()) {
+        return;
+      }
+      finishProfileOpenOperation(operation, result, isCurrent);
       operationFinished = true;
       recordLaunchResults(
         [result],
         new Map([[profile.id, profile]]),
         "账号",
-        DEFAULT_PROFILE_LAUNCH_URL
+        DEFAULT_PROFILE_LAUNCH_URL,
+        scope
       );
       if (!result.ok) {
         setMessage(result.message);
@@ -1238,15 +1278,19 @@ function App() {
       await updateProfileById(
         profile.id,
         { lastOpenedAt: new Date().toISOString() },
-        `已启动 ${profile.name}`
+        `已启动 ${profile.name}`,
+        isCurrent
       );
     } catch (error) {
+      if (!isCurrent()) {
+        return;
+      }
       if (!operationFinished) {
-        failProfileOpenOperation(operation, error);
+        failProfileOpenOperation(operation, error, isCurrent);
       }
       setMessage(errorMessage(error));
     } finally {
-      launchingProfileIdsRef.current.delete(profile.id);
+      launchingProfileIdsRef.current.delete(launchKey);
     }
   }
 
@@ -1308,6 +1352,16 @@ function App() {
       setMessage("请先设置登录网址");
       return;
     }
+    if (rootSwitchPendingTokenRef.current !== null) {
+      setMessage("配置根目录正在切换，请稍候");
+      return;
+    }
+    const scope: ProfileOpenLifecycleScope = {
+      rootPath,
+      token: rootLifecycleTokenRef.current,
+      profileId: profile.id
+    };
+    const isCurrent = () => isCurrentRootLifecycleScope(scope);
     if (!canStartBrowserOperationForProfiles([profile])) {
       return;
     }
@@ -1315,14 +1369,18 @@ function App() {
     const operation = startProfileOpenOperation(`平台 ${platformLabel}`, profile);
     let operationFinished = false;
     try {
-      const result = await launchChromeProfile(profile, launchUrl);
-      finishProfileOpenOperation(operation, result);
+      const result = await launchChromeProfile(profile, launchUrl, isCurrent);
+      if (!isCurrent()) {
+        return;
+      }
+      finishProfileOpenOperation(operation, result, isCurrent);
       operationFinished = true;
       recordLaunchResults(
         [result],
         new Map([[profile.id, profile]]),
         `平台 ${platformLabel}`,
-        launchUrl
+        launchUrl,
+        scope
       );
       if (!result.ok) {
         setMessage(result.message);
@@ -1331,11 +1389,15 @@ function App() {
       await updateProfileById(
         profile.id,
         { lastOpenedAt: new Date().toISOString() },
-        `已打开 ${platformLabel}`
+        `已打开 ${platformLabel}`,
+        isCurrent
       );
     } catch (error) {
+      if (!isCurrent()) {
+        return;
+      }
       if (!operationFinished) {
-        failProfileOpenOperation(operation, error);
+        failProfileOpenOperation(operation, error, isCurrent);
       }
       setMessage(errorMessage(error));
     }
