@@ -6,6 +6,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,6 +166,64 @@ pub struct FullProfileRestorePreview {
     pub new_profile_ids: Vec<String>,
     pub overwrite_profile_ids: Vec<String>,
     pub total_bytes: u64,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingFullRestoreStatus {
+    pub state: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FullRestoreJournal {
+    schema_version: u8,
+    transaction_dir: String,
+    restored_profile_ids: Vec<String>,
+    original_document: Vec<u8>,
+    phase: String,
+}
+
+const RESTORE_JOURNAL_FILE: &str = "restore-journal.json";
+const PENDING_RESTORE_ERROR: &str = "检测到未完成的完整恢复，请先处理";
+const ROOT_MUTATION_BUSY_ERROR: &str = "该根目录已有写操作正在进行，请稍后重试";
+
+static ACTIVE_ROOT_MUTATIONS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+
+pub struct RootMutationGuard(PathBuf);
+
+impl Drop for RootMutationGuard {
+    fn drop(&mut self) {
+        if let Some(active) = ACTIVE_ROOT_MUTATIONS.get() {
+            if let Ok(mut active) = active.lock() {
+                active.remove(&self.0);
+            }
+        }
+    }
+}
+
+pub fn acquire_root_mutation(root: &Path) -> Result<RootMutationGuard, String> {
+    let key = root_mutation_key(root)?;
+    let mut active = ACTIVE_ROOT_MUTATIONS
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .map_err(|_| "根目录写锁不可用".to_string())?;
+    if !active.insert(key.clone()) {
+        return Err(ROOT_MUTATION_BUSY_ERROR.to_string());
+    }
+    Ok(RootMutationGuard(key))
+}
+
+fn root_mutation_key(root: &Path) -> Result<PathBuf, String> {
+    if root.exists() {
+        return root.canonicalize().map_err(|error| error.to_string());
+    }
+    if root.is_absolute() {
+        return Ok(root.to_path_buf());
+    }
+    std::env::current_dir()
+        .map(|current_dir| current_dir.join(root))
+        .map_err(|error| error.to_string())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -338,6 +397,12 @@ fn restore_failpoint(_point: RestoreFailpoint) -> Result<(), String> {
 }
 
 pub fn init_root(root: &Path) -> Result<RootStatus, String> {
+    reject_pending_full_restore(root)?;
+    let _guard = acquire_root_mutation(root)?;
+    init_root_unchecked(root)
+}
+
+fn init_root_unchecked(root: &Path) -> Result<RootStatus, String> {
     let app_data_path = ensure_real_app_data_dir(root)?;
     let document_path = managed_app_data_file(&app_data_path, "profiles.json")?;
     ensure_real_profiles_dir(root)?;
@@ -384,8 +449,10 @@ pub fn load_profile_document(root: &Path) -> Result<ProfileDocument, String> {
 }
 
 pub fn create_profile_backup(root: &Path) -> Result<ProfileBackupResult, String> {
+    reject_pending_full_restore(root)?;
+    let _guard = acquire_root_mutation(root)?;
     let document = load_profile_document(root)?;
-    let backups_dir = ensure_profile_backups_dir(root)?;
+    let backups_dir = ensure_profile_backups_dir_unchecked(root)?;
     let backup_path = backups_dir.join(format!("profiles-{}.json", timestamp_millis()));
     let json = serde_json::to_string_pretty(&document).map_err(|error| error.to_string())?;
     fs::write(&backup_path, format!("{json}\n")).map_err(|error| error.to_string())?;
@@ -397,8 +464,10 @@ pub fn create_profile_backup(root: &Path) -> Result<ProfileBackupResult, String>
 }
 
 pub fn restore_profile_backup(root: &Path, backup_path: &Path) -> Result<ProfileDocument, String> {
+    reject_pending_full_restore(root)?;
+    let _guard = acquire_root_mutation(root)?;
     let document = read_document(backup_path)?;
-    save_profile_document(root, &document)?;
+    save_profile_document_unchecked(root, &document)?;
     Ok(document)
 }
 
@@ -406,6 +475,8 @@ pub fn create_full_profile_backup(
     root: &Path,
     requested_profile_ids: &[String],
 ) -> Result<FullProfileBackupResult, String> {
+    reject_pending_full_restore(root)?;
+    let _guard = acquire_root_mutation(root)?;
     let document = load_profile_document(root)?;
     let selected_profiles = select_profiles_for_backup(&document, requested_profile_ids)?;
     let profile_ids = selected_profiles
@@ -414,8 +485,8 @@ pub fn create_full_profile_backup(
         .collect::<Vec<_>>();
     let profile_dirs = resolve_profile_dirs(root, &profile_ids)?;
     let backup_document = filtered_document_for_profiles(&document, &profile_ids);
-    let backup_path =
-        ensure_profile_backups_dir(root)?.join(format!("full-profiles-{}", timestamp_millis()));
+    let backup_path = ensure_profile_backups_dir_unchecked(root)?
+        .join(format!("full-profiles-{}", timestamp_millis()));
 
     fs::create_dir_all(backup_path.join("profiles")).map_err(|error| error.to_string())?;
     for (profile_id, source) in profile_ids.iter().zip(profile_dirs) {
@@ -471,7 +542,9 @@ pub fn preview_full_profile_backup(
     }
 
     Ok(FullProfileBackupPreview {
-        destination_dir: real_profile_backups_dir(root)?.to_string_lossy().to_string(),
+        destination_dir: real_profile_backups_dir(root)?
+            .to_string_lossy()
+            .to_string(),
         profile_count: profile_ids.len(),
         profile_ids,
         total_bytes,
@@ -523,6 +596,9 @@ pub fn restore_full_profile_backup(
     backup_path: &Path,
     overwrite_existing: bool,
 ) -> Result<ProfileDocument, String> {
+    reject_pending_full_restore(root)?;
+    let _guard = acquire_root_mutation(root)?;
+    reject_pending_full_restore(root)?;
     real_profile_backups_dir(root)?;
     let backup_dir = resolve_full_profile_backup_dir(backup_path)?;
     let backup_document = read_full_profile_backup_document(&backup_dir)?;
@@ -546,6 +622,7 @@ pub fn restore_full_profile_backup(
         .collect::<Vec<_>>();
     let merged_document = merge_restored_document(current_document, backup_document);
     restore_full_profile_transaction(
+        root,
         &profiles_dir,
         &document_path,
         &original_document,
@@ -557,6 +634,7 @@ pub fn restore_full_profile_backup(
 }
 
 fn restore_full_profile_transaction(
+    root: &Path,
     profiles_dir: &Path,
     document_path: &Path,
     original_document: &[u8],
@@ -569,37 +647,74 @@ fn restore_full_profile_transaction(
         timestamp_millis(),
         ATOMIC_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
-    fs::create_dir(&tx).map_err(|error| error.to_string())?;
     let incoming = tx.join("incoming");
     let previous = tx.join("previous");
     let mut planned_installs = Vec::new();
     let result = (|| {
+        write_full_restore_journal(
+            root,
+            &tx,
+            restored_profile_ids,
+            original_document,
+            "preparing",
+        )?;
+        fs::create_dir(&tx).map_err(|error| error.to_string())?;
+        sync_directory(profiles_dir)?;
         fs::create_dir(&incoming).map_err(|error| error.to_string())?;
         fs::create_dir(&previous).map_err(|error| error.to_string())?;
+        write_full_restore_journal(
+            root,
+            &tx,
+            restored_profile_ids,
+            original_document,
+            "switching",
+        )?;
         for (index, profile_id) in restored_profile_ids.iter().enumerate() {
             let source = backup_dir.join("profiles").join(profile_id);
             restore_failpoint(RestoreFailpoint::StageCopy(index + 1))?;
             copy_directory(&source, &incoming.join(profile_id))?;
         }
         for (index, profile_id) in restored_profile_ids.iter().enumerate() {
+            write_full_restore_journal(
+                root,
+                &tx,
+                restored_profile_ids,
+                original_document,
+                "switching",
+            )?;
             let staged = incoming.join(profile_id);
             let target = profiles_dir.join(profile_id);
             if target.exists() {
-                fs::rename(&target, previous.join(profile_id)).map_err(|error| error.to_string())?;
+                fs::rename(&target, previous.join(profile_id))
+                    .map_err(|error| error.to_string())?;
+                sync_directory(profiles_dir)?;
+                sync_directory(&previous)?;
             }
             planned_installs.push(profile_id.clone());
             fs::rename(&staged, &target).map_err(|error| error.to_string())?;
+            sync_directory(profiles_dir)?;
             restore_failpoint(RestoreFailpoint::InstallAfterRename(index + 1))?;
         }
         restore_failpoint(RestoreFailpoint::IndexWrite)?;
-        let json = serde_json::to_string_pretty(merged_document).map_err(|error| error.to_string())?;
+        let json =
+            serde_json::to_string_pretty(merged_document).map_err(|error| error.to_string())?;
         write_text_file_atomically(document_path, &format!("{json}\n"))?;
+        write_full_restore_journal(
+            root,
+            &tx,
+            restored_profile_ids,
+            original_document,
+            "committed-cleanup-pending",
+        )?;
         Ok(())
     })();
     match result {
         Ok(()) => {
             if restore_failpoint(RestoreFailpoint::PostCommitCleanup).is_ok() {
-                let _ = fs::remove_dir_all(&tx);
+                if fs::remove_dir_all(&tx).is_ok() {
+                    sync_directory(profiles_dir)?;
+                    remove_full_restore_journal(root)?;
+                }
             }
             Ok(())
         }
@@ -612,12 +727,15 @@ fn restore_full_profile_transaction(
                 &planned_installs,
             );
             match rollback {
-                Ok(()) => {
-                    match fs::remove_dir_all(&tx) {
+                Ok(()) => match fs::remove_dir_all(&tx) {
+                    Ok(()) => match remove_full_restore_journal(root) {
                         Ok(()) => Err(error),
-                        Err(cleanup_error) => Err(format!("{error}；清理失败：{cleanup_error}")),
-                    }
-                }
+                        Err(journal_error) => {
+                            Err(format!("{error}；清理 journal 失败：{journal_error}"))
+                        }
+                    },
+                    Err(cleanup_error) => Err(format!("{error}；清理失败：{cleanup_error}")),
+                },
                 Err(rollback_error) => Err(format!("{error}；回滚失败：{rollback_error}")),
             }
         }
@@ -821,6 +939,173 @@ fn merge_restored_document(
     }
 }
 
+pub fn inspect_pending_full_restore(root: &Path) -> Result<PendingFullRestoreStatus, String> {
+    let root_is_real = fs::symlink_metadata(root)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
+    if !root_is_real {
+        return Ok(PendingFullRestoreStatus {
+            state: "manual-inspection-required".to_string(),
+        });
+    }
+    let profiles = root.join("profiles");
+    let profiles_is_real = fs::symlink_metadata(&profiles)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
+    if !profiles_is_real {
+        return Ok(PendingFullRestoreStatus {
+            state: "manual-inspection-required".to_string(),
+        });
+    }
+    let has_orphan_transaction = has_orphan_restore_transaction(&profiles);
+    let app_data = app_data_dir(root);
+    let app_data_metadata = match fs::symlink_metadata(&app_data) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(PendingFullRestoreStatus {
+                state: if has_orphan_transaction {
+                    "manual-inspection-required"
+                } else {
+                    "none"
+                }
+                .to_string(),
+            });
+        }
+        _ => {
+            return Ok(PendingFullRestoreStatus {
+                state: "manual-inspection-required".to_string(),
+            })
+        }
+    };
+    let _ = app_data_metadata;
+    let journal_path = app_data_dir(root).join(RESTORE_JOURNAL_FILE);
+    let metadata = match fs::symlink_metadata(&journal_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(PendingFullRestoreStatus {
+                state: if has_orphan_transaction {
+                    "manual-inspection-required"
+                } else {
+                    "none"
+                }
+                .to_string(),
+            });
+        }
+        Err(_) => {
+            return Ok(PendingFullRestoreStatus {
+                state: "manual-inspection-required".to_string(),
+            })
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Ok(PendingFullRestoreStatus {
+            state: "manual-inspection-required".to_string(),
+        });
+    }
+    let Ok(raw) = fs::read(&journal_path) else {
+        return Ok(PendingFullRestoreStatus {
+            state: "manual-inspection-required".to_string(),
+        });
+    };
+    let Ok(journal) = serde_json::from_slice::<FullRestoreJournal>(&raw) else {
+        return Ok(PendingFullRestoreStatus {
+            state: "manual-inspection-required".to_string(),
+        });
+    };
+    let valid_tx_name = Path::new(&journal.transaction_dir).components().count() == 1
+        && journal.transaction_dir.starts_with(".restore-tx-");
+    let valid_ids = !journal.restored_profile_ids.is_empty()
+        && journal
+            .restored_profile_ids
+            .iter()
+            .all(|id| validate_profile_id(id).is_ok())
+        && journal
+            .restored_profile_ids
+            .iter()
+            .collect::<HashSet<_>>()
+            .len()
+            == journal.restored_profile_ids.len();
+    let tx = root.join("profiles").join(&journal.transaction_dir);
+    let valid_tx = fs::symlink_metadata(&tx)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
+    let valid = journal.schema_version == 1
+        && matches!(journal.phase.as_str(), "preparing" | "switching")
+        && valid_tx_name
+        && valid_ids
+        && !journal.original_document.is_empty()
+        && valid_tx;
+    Ok(PendingFullRestoreStatus {
+        state: if valid {
+            "rollback-available"
+        } else {
+            "manual-inspection-required"
+        }
+        .to_string(),
+    })
+}
+
+fn has_orphan_restore_transaction(profiles_dir: &Path) -> bool {
+    fs::read_dir(profiles_dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".restore-tx-")
+                && fs::symlink_metadata(entry.path())
+                    .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+        })
+}
+
+pub fn reject_pending_full_restore(root: &Path) -> Result<(), String> {
+    let app_data = app_data_dir(root);
+    let journal_exists = fs::symlink_metadata(app_data.join(RESTORE_JOURNAL_FILE)).is_ok();
+    let profiles = root.join("profiles");
+    let orphan_exists = fs::symlink_metadata(&profiles)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+        && has_orphan_restore_transaction(&profiles);
+    if journal_exists || orphan_exists {
+        Err(PENDING_RESTORE_ERROR.to_string())
+    } else {
+        Ok(())
+    }
+}
+
+fn write_full_restore_journal(
+    root: &Path,
+    tx: &Path,
+    restored_profile_ids: &[String],
+    original_document: &[u8],
+    phase: &str,
+) -> Result<(), String> {
+    let app_data = real_app_data_dir(root)?;
+    let path = managed_app_data_file(&app_data, RESTORE_JOURNAL_FILE)?;
+    let transaction_dir = tx
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| name.starts_with(".restore-tx-"))
+        .ok_or_else(|| "恢复事务目录无效".to_string())?;
+    let journal = FullRestoreJournal {
+        schema_version: 1,
+        transaction_dir: transaction_dir.to_string(),
+        restored_profile_ids: restored_profile_ids.to_vec(),
+        original_document: original_document.to_vec(),
+        phase: phase.to_string(),
+    };
+    let json = serde_json::to_string(&journal).map_err(|error| error.to_string())?;
+    write_text_file_atomically(&path, &json)
+}
+
+fn remove_full_restore_journal(root: &Path) -> Result<(), String> {
+    let app_data = real_app_data_dir(root)?;
+    let path = managed_app_data_file(&app_data, RESTORE_JOURNAL_FILE)?;
+    if path.exists() {
+        fs::remove_file(path).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 pub fn check_root_health(root: &Path) -> RootHealthReport {
     let mut issues = Vec::new();
     let mut profile_count = 0;
@@ -854,6 +1139,18 @@ pub fn check_root_health(root: &Path) -> RootHealthReport {
 
     let app_data_path = app_data_dir(root);
     let profiles_path = root.join("profiles");
+    if let Ok(pending_restore) = inspect_pending_full_restore(root) {
+        if pending_restore.state != "none" {
+            issues.push(health_issue(
+                RootHealthSeverity::Error,
+                "restore_transaction_recovery_required",
+                "完整恢复等待处理",
+                "检测到未完成的完整恢复，请先处理。软件不会自动移动或删除恢复数据。",
+                Some(&app_data_path.join(RESTORE_JOURNAL_FILE)),
+                None,
+            ));
+        }
+    }
     let app_data_is_real = match fs::symlink_metadata(&app_data_path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             issues.push(health_issue(
@@ -1047,6 +1344,12 @@ pub fn check_root_health(root: &Path) -> RootHealthReport {
 }
 
 pub fn repair_root_health(root: &Path) -> Result<RootRepairResult, String> {
+    reject_pending_full_restore(root)?;
+    let _guard = acquire_root_mutation(root)?;
+    repair_root_health_unchecked(root)
+}
+
+fn repair_root_health_unchecked(root: &Path) -> Result<RootRepairResult, String> {
     let mut actions = Vec::new();
 
     match fs::symlink_metadata(root) {
@@ -1099,7 +1402,7 @@ pub fn repair_root_health(root: &Path) -> Result<RootRepairResult, String> {
     }
 
     if backups_were_missing {
-        ensure_profile_backups_dir(root)?;
+        ensure_profile_backups_dir_unchecked(root)?;
         actions.push(repair_action(
             "backups_dir_created",
             "已创建备份目录",
@@ -1366,6 +1669,12 @@ fn profile_marker_path(profile_path: &Path) -> PathBuf {
 }
 
 pub fn save_profile_document(root: &Path, document: &ProfileDocument) -> Result<(), String> {
+    reject_pending_full_restore(root)?;
+    let _guard = acquire_root_mutation(root)?;
+    save_profile_document_unchecked(root, document)
+}
+
+fn save_profile_document_unchecked(root: &Path, document: &ProfileDocument) -> Result<(), String> {
     let app_data_path = ensure_real_app_data_dir(root)?;
     let document_path = managed_app_data_file(&app_data_path, "profiles.json")?;
     ensure_real_profiles_dir(root)?;
@@ -1409,6 +1718,8 @@ pub fn save_browser_launch_events(
     root: &Path,
     events: &[BrowserLaunchEvent],
 ) -> Result<(), String> {
+    reject_pending_full_restore(root)?;
+    let _guard = acquire_root_mutation(root)?;
     let app_data_path = ensure_real_app_data_dir(root)?;
     let path = managed_app_data_file(&app_data_path, "launch-events.json")?;
     let events = normalize_browser_launch_events(events.to_vec());
@@ -1424,6 +1735,19 @@ fn normalize_browser_launch_events(mut events: Vec<BrowserLaunchEvent>) -> Vec<B
 }
 
 pub fn ensure_profile_dir(root: &Path, profile_id: &str) -> Result<PathBuf, String> {
+    reject_pending_full_restore(root)?;
+    let _guard = acquire_root_mutation(root)?;
+    ensure_profile_dir_unchecked(root, profile_id)
+}
+
+pub fn ensure_profile_dir_under_root_mutation(
+    root: &Path,
+    profile_id: &str,
+) -> Result<PathBuf, String> {
+    ensure_profile_dir_unchecked(root, profile_id)
+}
+
+fn ensure_profile_dir_unchecked(root: &Path, profile_id: &str) -> Result<PathBuf, String> {
     validate_profile_id(profile_id)?;
     preflight_managed_profile_storage(root)?;
     let profiles_dir = ensure_real_profiles_dir(root)?;
@@ -1435,6 +1759,12 @@ pub fn ensure_profile_dir(root: &Path, profile_id: &str) -> Result<PathBuf, Stri
 }
 
 pub fn ensure_profile_backups_dir(root: &Path) -> Result<PathBuf, String> {
+    reject_pending_full_restore(root)?;
+    let _guard = acquire_root_mutation(root)?;
+    ensure_profile_backups_dir_unchecked(root)
+}
+
+fn ensure_profile_backups_dir_unchecked(root: &Path) -> Result<PathBuf, String> {
     let app_data_path = ensure_real_app_data_dir(root)?;
     let path = managed_app_data_dir(&app_data_path, "backups")?;
     if !path.exists() {
@@ -1448,6 +1778,8 @@ pub fn ensure_profile_backups_dir(root: &Path) -> Result<PathBuf, String> {
 }
 
 pub fn delete_profile_dir(root: &Path, profile_id: &str) -> Result<(), String> {
+    reject_pending_full_restore(root)?;
+    let _guard = acquire_root_mutation(root)?;
     let path = safe_profile_dir(root, profile_id)?;
     if path.exists() {
         fs::remove_dir_all(path).map_err(|error| error.to_string())?;
@@ -1460,6 +1792,8 @@ pub fn copy_profile_dir(
     source_profile_id: &str,
     target_profile_id: &str,
 ) -> Result<(), String> {
+    reject_pending_full_restore(root)?;
+    let _guard = acquire_root_mutation(root)?;
     let source = safe_profile_dir(root, source_profile_id)?;
     let target = safe_profile_dir(root, target_profile_id)?;
     copy_directory(&source, &target)
@@ -1471,6 +1805,8 @@ pub fn import_profile_dir(
     target_profile_id: &str,
     marker: Option<ProfileMarker>,
 ) -> Result<(), String> {
+    reject_pending_full_restore(root)?;
+    let _guard = acquire_root_mutation(root)?;
     let target = safe_profile_dir(root, target_profile_id)?;
     match fs::create_dir(&target) {
         Ok(()) => {}
@@ -1720,17 +2056,34 @@ fn write_bytes_file_atomically(path: &Path, contents: &[u8]) -> Result<(), Strin
         ATOMIC_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed),
     );
 
-    if let Err(error) = fs::write(&temp_path, contents) {
+    let write_result = (|| {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .map_err(|error| error.to_string())?;
+        file.write_all(contents)
+            .map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())
+    })();
+    if let Err(error) = write_result {
         let _ = fs::remove_file(&temp_path);
-        return Err(error.to_string());
+        return Err(error);
     }
 
     if let Err(error) = fs::rename(&temp_path, path) {
         let _ = fs::remove_file(&temp_path);
         return Err(error.to_string());
     }
+    sync_directory(parent)?;
 
     Ok(())
+}
+
+fn sync_directory(path: &Path) -> Result<(), String> {
+    fs::File::open(path)
+        .and_then(|file| file.sync_all())
+        .map_err(|error| error.to_string())
 }
 
 fn atomic_write_temp_path(
@@ -1982,6 +2335,8 @@ fn health_report(
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::mpsc;
+    use std::thread;
 
     #[test]
     fn init_root_creates_app_data_profiles_and_document() {
@@ -2000,6 +2355,86 @@ mod tests {
             document,
             "{\n  \"version\": 1,\n  \"settings\": {\n    \"browserPath\": \"/Applications/Google Chrome.app\",\n    \"favoriteUrls\": [],\n    \"recentUrls\": [],\n    \"urlLibrary\": [],\n    \"theme\": \"light\"\n  },\n  \"profiles\": [],\n  \"projects\": []\n}\n"
         );
+    }
+
+    #[test]
+    fn same_root_save_is_rejected_while_another_mutation_is_active() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        init_root(temp_dir.path()).expect("init root");
+        let original =
+            fs::read(temp_dir.path().join("app-data/profiles.json")).expect("original document");
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let root = temp_dir.path().to_path_buf();
+        let worker = thread::spawn(move || {
+            let _guard = acquire_root_mutation(&root).expect("acquire mutation guard");
+            ready_tx.send(()).expect("signal ready");
+            release_rx.recv().expect("release guard");
+        });
+        ready_rx.recv().expect("wait for guard");
+
+        let error = save_profile_document(
+            temp_dir.path(),
+            &ProfileDocument {
+                version: 1,
+                settings: AppSettings::default(),
+                profiles: vec![test_profile("blocked-account")],
+                projects: Vec::new(),
+            },
+        )
+        .expect_err("same root mutation must be rejected");
+
+        assert_eq!(error, ROOT_MUTATION_BUSY_ERROR);
+        assert_eq!(
+            fs::read(temp_dir.path().join("app-data/profiles.json")).expect("document"),
+            original
+        );
+        assert!(!temp_dir.path().join("profiles/blocked-account").exists());
+        release_tx.send(()).expect("release worker");
+        worker.join().expect("join worker");
+    }
+
+    #[test]
+    fn different_roots_can_mutate_independently() {
+        let first = tempfile::tempdir().expect("first root");
+        let second = tempfile::tempdir().expect("second root");
+        init_root(first.path()).expect("init first");
+        init_root(second.path()).expect("init second");
+        let _guard = acquire_root_mutation(first.path()).expect("lock first root");
+
+        save_profile_document(
+            second.path(),
+            &ProfileDocument {
+                version: 1,
+                settings: AppSettings::default(),
+                profiles: vec![test_profile("second-account")],
+                projects: Vec::new(),
+            },
+        )
+        .expect("second root remains writable");
+
+        assert!(second.path().join("profiles/second-account").is_dir());
+    }
+
+    #[test]
+    fn pending_restore_error_takes_priority_over_busy_root() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        init_root(temp_dir.path()).expect("init root");
+        fs::write(temp_dir.path().join("app-data/restore-journal.json"), b"{}").expect("journal");
+        let _guard = acquire_root_mutation(temp_dir.path()).expect("lock root");
+
+        let error = save_profile_document(
+            temp_dir.path(),
+            &ProfileDocument {
+                version: 1,
+                settings: AppSettings::default(),
+                profiles: Vec::new(),
+                projects: Vec::new(),
+            },
+        )
+        .expect_err("pending restore must reject write");
+
+        assert_eq!(error, PENDING_RESTORE_ERROR);
     }
 
     #[test]
@@ -3011,14 +3446,18 @@ mod tests {
         assert!(target_root.path().join("profiles/account-002").is_dir());
         assert!(!fs::read_dir(target_root.path().join("profiles"))
             .expect("read profiles")
-            .any(|entry| entry.expect("entry").file_name().to_string_lossy().starts_with(".restore-tx-")));
+            .any(|entry| entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".restore-tx-")));
     }
 
     #[test]
     fn full_restore_stage_failure_leaves_profiles_and_document_unchanged() {
         let (source_root, target_root, backup) = full_restore_test_roots();
-        let document_before = fs::read(target_root.path().join("app-data/profiles.json"))
-            .expect("document before");
+        let document_before =
+            fs::read(target_root.path().join("app-data/profiles.json")).expect("document before");
         let old_cookie = target_root.path().join("profiles/account-001/old");
         set_restore_failpoint(Some(RestoreFailpoint::StageCopy(2)));
 
@@ -3029,7 +3468,10 @@ mod tests {
         assert!(error.contains("恢复测试故障"));
         assert_eq!(fs::read(&old_cookie).expect("old profile"), b"old");
         assert!(!target_root.path().join("profiles/account-003").exists());
-        assert_eq!(fs::read(target_root.path().join("app-data/profiles.json")).expect("document"), document_before);
+        assert_eq!(
+            fs::read(target_root.path().join("app-data/profiles.json")).expect("document"),
+            document_before
+        );
         assert!(!has_restore_transaction(target_root.path()));
         drop(source_root);
     }
@@ -3037,8 +3479,8 @@ mod tests {
     #[test]
     fn full_restore_switch_failure_rolls_back_profiles_and_document() {
         let (_source_root, target_root, backup) = full_restore_test_roots();
-        let document_before = fs::read(target_root.path().join("app-data/profiles.json"))
-            .expect("document before");
+        let document_before =
+            fs::read(target_root.path().join("app-data/profiles.json")).expect("document before");
         set_restore_failpoint(Some(RestoreFailpoint::InstallAfterRename(2)));
 
         let error = restore_full_profile_backup(target_root.path(), &backup, true)
@@ -3046,17 +3488,23 @@ mod tests {
         set_restore_failpoint(None);
 
         assert!(error.contains("恢复测试故障"));
-        assert_eq!(fs::read(target_root.path().join("profiles/account-001/old")).expect("old"), b"old");
+        assert_eq!(
+            fs::read(target_root.path().join("profiles/account-001/old")).expect("old"),
+            b"old"
+        );
         assert!(!target_root.path().join("profiles/account-003").exists());
-        assert_eq!(fs::read(target_root.path().join("app-data/profiles.json")).expect("document"), document_before);
+        assert_eq!(
+            fs::read(target_root.path().join("app-data/profiles.json")).expect("document"),
+            document_before
+        );
         assert!(!has_restore_transaction(target_root.path()));
     }
 
     #[test]
     fn full_restore_index_write_failure_rolls_back_profiles_and_document() {
         let (_source_root, target_root, backup) = full_restore_test_roots();
-        let document_before = fs::read(target_root.path().join("app-data/profiles.json"))
-            .expect("document before");
+        let document_before =
+            fs::read(target_root.path().join("app-data/profiles.json")).expect("document before");
         set_restore_failpoint(Some(RestoreFailpoint::IndexWrite));
 
         let error = restore_full_profile_backup(target_root.path(), &backup, true)
@@ -3064,9 +3512,15 @@ mod tests {
         set_restore_failpoint(None);
 
         assert!(error.contains("恢复测试故障"));
-        assert_eq!(fs::read(target_root.path().join("profiles/account-001/old")).expect("old"), b"old");
+        assert_eq!(
+            fs::read(target_root.path().join("profiles/account-001/old")).expect("old"),
+            b"old"
+        );
         assert!(!target_root.path().join("profiles/account-003").exists());
-        assert_eq!(fs::read(target_root.path().join("app-data/profiles.json")).expect("document"), document_before);
+        assert_eq!(
+            fs::read(target_root.path().join("app-data/profiles.json")).expect("document"),
+            document_before
+        );
         assert!(!has_restore_transaction(target_root.path()));
     }
 
@@ -3085,10 +3539,12 @@ mod tests {
     fn full_restore_ignores_backup_directory_not_declared_by_document() {
         let (_source_root, target_root, backup) = full_restore_test_roots();
         fs::create_dir_all(backup.join("profiles/account-002")).expect("extra profile");
-        fs::write(backup.join("profiles/account-002/untrusted"), b"extra")
-            .expect("extra data");
-        fs::write(target_root.path().join("profiles/account-002/original"), b"original")
-            .expect("target data");
+        fs::write(backup.join("profiles/account-002/untrusted"), b"extra").expect("extra data");
+        fs::write(
+            target_root.path().join("profiles/account-002/original"),
+            b"original",
+        )
+        .expect("target data");
 
         restore_full_profile_backup(target_root.path(), &backup, true).expect("restore");
 
@@ -3096,7 +3552,10 @@ mod tests {
             fs::read(target_root.path().join("profiles/account-002/original")).expect("original"),
             b"original"
         );
-        assert!(!target_root.path().join("profiles/account-002/untrusted").exists());
+        assert!(!target_root
+            .path()
+            .join("profiles/account-002/untrusted")
+            .exists());
     }
 
     #[test]
@@ -3108,8 +3567,17 @@ mod tests {
             .expect("committed restore remains successful");
         set_restore_failpoint(None);
 
-        assert!(restored.profiles.iter().any(|profile| profile.id == "account-003"));
+        assert!(restored
+            .profiles
+            .iter()
+            .any(|profile| profile.id == "account-003"));
         assert!(has_restore_transaction(target_root.path()));
+        assert_eq!(
+            inspect_pending_full_restore(target_root.path())
+                .expect("inspect residue")
+                .state,
+            "manual-inspection-required"
+        );
         assert!(check_root_health(target_root.path())
             .issues
             .iter()
@@ -3146,12 +3614,94 @@ mod tests {
             .issues
             .iter()
             .any(|issue| issue.code == "restore_transaction_residue"));
+        assert_eq!(
+            inspect_pending_full_restore(target_root.path())
+                .expect("inspect success")
+                .state,
+            "none"
+        );
+    }
+
+    #[test]
+    fn pending_full_restore_journal_blocks_mutations_but_health_remains_read_only() {
+        let (_source_root, target_root, _backup) = full_restore_test_roots();
+        let app_data = target_root.path().join("app-data");
+        let tx = target_root.path().join("profiles/.restore-tx-test");
+        fs::create_dir(&tx).expect("create transaction");
+        fs::write(
+            app_data.join("restore-journal.json"),
+            r#"{"schemaVersion":1,"transactionDir":".restore-tx-test","restoredProfileIds":["account-001"],"originalDocument":[123],"phase":"switching"}"#,
+        )
+        .expect("write journal");
+
+        assert_eq!(
+            inspect_pending_full_restore(target_root.path())
+                .expect("inspect journal")
+                .state,
+            "rollback-available"
+        );
+        assert!(save_browser_launch_events(target_root.path(), &[])
+            .expect_err("pending restore blocks mutation")
+            .contains("检测到未完成的完整恢复，请先处理"));
+        assert!(check_root_health(target_root.path())
+            .issues
+            .iter()
+            .any(|issue| issue.code == "restore_transaction_recovery_required"));
+    }
+
+    #[test]
+    fn malformed_or_incomplete_restore_journal_requires_manual_inspection() {
+        let (_source_root, target_root, _backup) = full_restore_test_roots();
+        let journal = target_root.path().join("app-data/restore-journal.json");
+        fs::write(&journal, b"not json").expect("write malformed journal");
+        assert_eq!(
+            inspect_pending_full_restore(target_root.path())
+                .expect("inspect malformed")
+                .state,
+            "manual-inspection-required"
+        );
+        fs::write(
+            &journal,
+            r#"{"schemaVersion":1,"transactionDir":".restore-tx-missing","restoredProfileIds":["account-001"],"originalDocument":[123],"phase":"switching"}"#,
+        )
+        .expect("write incomplete journal");
+        assert_eq!(
+            inspect_pending_full_restore(target_root.path())
+                .expect("inspect incomplete")
+                .state,
+            "manual-inspection-required"
+        );
+    }
+
+    #[test]
+    fn orphan_restore_transaction_requires_manual_inspection_without_app_data() {
+        let root = tempfile::tempdir().expect("root");
+        fs::create_dir(root.path().join("profiles")).expect("profiles");
+        fs::create_dir(root.path().join("profiles/.restore-tx-orphan")).expect("transaction");
+
+        assert_eq!(
+            inspect_pending_full_restore(root.path())
+                .expect("inspect orphan without app data")
+                .state,
+            "manual-inspection-required"
+        );
+        assert!(reject_pending_full_restore(root.path()).is_err());
+        assert!(check_root_health(root.path())
+            .issues
+            .iter()
+            .any(|issue| issue.code == "restore_transaction_recovery_required"));
     }
 
     fn has_restore_transaction(root: &Path) -> bool {
         fs::read_dir(root.join("profiles"))
             .expect("read profiles")
-            .any(|entry| entry.expect("entry").file_name().to_string_lossy().starts_with(".restore-tx-"))
+            .any(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".restore-tx-")
+            })
     }
 
     fn full_restore_test_roots() -> (tempfile::TempDir, tempfile::TempDir, PathBuf) {
@@ -3159,16 +3709,29 @@ mod tests {
         let target_root = tempfile::tempdir().expect("target root");
         init_root(source_root.path()).expect("init source");
         init_root(target_root.path()).expect("init target");
-        save_profile_document(source_root.path(), &ProfileDocument {
-            version: 1, settings: AppSettings::default(),
-            profiles: vec![test_profile("account-001"), test_profile("account-003")], projects: Vec::new(),
-        }).expect("save source");
-        save_profile_document(target_root.path(), &ProfileDocument {
-            version: 1, settings: AppSettings::default(),
-            profiles: vec![test_profile("account-001"), test_profile("account-002")], projects: Vec::new(),
-        }).expect("save target");
+        save_profile_document(
+            source_root.path(),
+            &ProfileDocument {
+                version: 1,
+                settings: AppSettings::default(),
+                profiles: vec![test_profile("account-001"), test_profile("account-003")],
+                projects: Vec::new(),
+            },
+        )
+        .expect("save source");
+        save_profile_document(
+            target_root.path(),
+            &ProfileDocument {
+                version: 1,
+                settings: AppSettings::default(),
+                profiles: vec![test_profile("account-001"), test_profile("account-002")],
+                projects: Vec::new(),
+            },
+        )
+        .expect("save target");
         fs::write(source_root.path().join("profiles/account-001/new"), b"new").expect("source one");
-        fs::write(source_root.path().join("profiles/account-003/new"), b"new").expect("source three");
+        fs::write(source_root.path().join("profiles/account-003/new"), b"new")
+            .expect("source three");
         fs::write(target_root.path().join("profiles/account-001/old"), b"old").expect("target old");
         let backup = create_full_profile_backup(source_root.path(), &[]).expect("backup");
         (source_root, target_root, PathBuf::from(backup.path))
@@ -3200,10 +3763,8 @@ mod tests {
             projects: Vec::new(),
         };
         let json = serde_json::to_string_pretty(&document).expect("serialize document");
-        fs::write(temp_dir.path().join("app-data/profiles.json"), json)
-            .expect("write document");
-        fs::write(external_dir.path().join("sentinel"), b"outside")
-            .expect("write sentinel");
+        fs::write(temp_dir.path().join("app-data/profiles.json"), json).expect("write document");
+        fs::write(external_dir.path().join("sentinel"), b"outside").expect("write sentinel");
         fs::remove_dir_all(temp_dir.path().join("profiles")).expect("remove profiles root");
         symlink(external_dir.path(), temp_dir.path().join("profiles")).expect("link profiles root");
 
@@ -3218,7 +3779,9 @@ mod tests {
             save_profile_document(temp_dir.path(), &document),
             repair_root_health(temp_dir.path()).map(|_| ()),
         ] {
-            assert!(result.expect_err("profiles symlink must be rejected").contains("profiles 目录不能是符号链接"));
+            assert!(result
+                .expect_err("profiles symlink must be rejected")
+                .contains("profiles 目录不能是符号链接"));
         }
         assert!(create_full_profile_backup(temp_dir.path(), &[])
             .expect_err("full backup must reject profiles symlink")
@@ -3226,7 +3789,10 @@ mod tests {
         assert!(preview_full_profile_backup(temp_dir.path(), &[])
             .expect_err("full backup preview must reject profiles symlink")
             .contains("profiles 目录不能是符号链接"));
-        assert_eq!(fs::read(external_dir.path().join("sentinel")).expect("read sentinel"), b"outside");
+        assert_eq!(
+            fs::read(external_dir.path().join("sentinel")).expect("read sentinel"),
+            b"outside"
+        );
     }
 
     #[cfg(unix)]
@@ -3245,7 +3811,8 @@ mod tests {
         assert!(health
             .issues
             .iter()
-            .any(|issue| issue.code == "profiles_dir_symlink" && issue.severity == RootHealthSeverity::Error));
+            .any(|issue| issue.code == "profiles_dir_symlink"
+                && issue.severity == RootHealthSeverity::Error));
     }
 
     #[cfg(unix)]
@@ -3276,7 +3843,8 @@ mod tests {
         assert!(health
             .issues
             .iter()
-            .any(|issue| issue.code == "profile_dir_symlink" && issue.severity == RootHealthSeverity::Error));
+            .any(|issue| issue.code == "profile_dir_symlink"
+                && issue.severity == RootHealthSeverity::Error));
     }
 
     #[cfg(unix)]
@@ -3294,8 +3862,7 @@ mod tests {
             projects: Vec::new(),
         };
         save_profile_document(temp_dir.path(), &document).expect("save document");
-        fs::write(external_dir.path().join("sentinel"), b"outside")
-            .expect("write sentinel");
+        fs::write(external_dir.path().join("sentinel"), b"outside").expect("write sentinel");
         fs::remove_dir_all(temp_dir.path().join("profiles/account-001"))
             .expect("remove profile dir");
         symlink(
@@ -3313,7 +3880,9 @@ mod tests {
             import_profile_dir(temp_dir.path(), source.path(), "account-001", None),
             repair_root_health(temp_dir.path()).map(|_| ()),
         ] {
-            assert!(result.expect_err("profile symlink must be rejected").contains("Profile 目录不能是符号链接"));
+            assert!(result
+                .expect_err("profile symlink must be rejected")
+                .contains("Profile 目录不能是符号链接"));
         }
         assert!(create_full_profile_backup(temp_dir.path(), &[])
             .expect_err("full backup must reject profile symlink")
@@ -3321,7 +3890,10 @@ mod tests {
         assert!(preview_full_profile_backup(temp_dir.path(), &[])
             .expect_err("full backup preview must reject profile symlink")
             .contains("Profile 目录不能是符号链接"));
-        assert_eq!(fs::read(external_dir.path().join("sentinel")).expect("read sentinel"), b"outside");
+        assert_eq!(
+            fs::read(external_dir.path().join("sentinel")).expect("read sentinel"),
+            b"outside"
+        );
     }
 
     #[cfg(unix)]
@@ -3366,8 +3938,7 @@ mod tests {
             projects: Vec::new(),
         };
         let json = serde_json::to_string_pretty(&document).expect("serialize document");
-        fs::write(temp_dir.path().join("app-data/profiles.json"), json)
-            .expect("write document");
+        fs::write(temp_dir.path().join("app-data/profiles.json"), json).expect("write document");
         symlink(
             external_dir.path(),
             temp_dir.path().join("profiles/account-002"),
@@ -3395,8 +3966,11 @@ mod tests {
             projects: Vec::new(),
         };
         save_profile_document(temp_dir.path(), &document).expect("save document");
-        fs::write(temp_dir.path().join("profiles/account-001/Local State"), b"profile")
-            .expect("write profile");
+        fs::write(
+            temp_dir.path().join("profiles/account-001/Local State"),
+            b"profile",
+        )
+        .expect("write profile");
         fs::remove_dir_all(temp_dir.path().join("profiles/account-002"))
             .expect("remove profile dir");
         symlink(
@@ -3480,8 +4054,8 @@ mod tests {
 
         let error = save_profile_document(root.path(), &document)
             .expect_err("document symlink must reject save");
-        let repair_error = repair_root_health(root.path())
-            .expect_err("document symlink must reject repair");
+        let repair_error =
+            repair_root_health(root.path()).expect_err("document symlink must reject repair");
         let health = check_root_health(root.path());
 
         assert!(error.contains("profiles.json 不能是符号链接"));
@@ -3517,11 +4091,7 @@ mod tests {
         )
         .expect("save document");
         fs::write(external.path().join("sentinel"), b"outside").expect("write sentinel");
-        symlink(
-            external.path(),
-            root.path().join("app-data/backups"),
-        )
-        .expect("link backups");
+        symlink(external.path(), root.path().join("app-data/backups")).expect("link backups");
 
         for result in [
             create_profile_backup(root.path()).map(|_| ()),
@@ -3542,7 +4112,9 @@ mod tests {
             b"outside"
         );
         assert_eq!(
-            fs::read_dir(external.path()).expect("read external").count(),
+            fs::read_dir(external.path())
+                .expect("read external")
+                .count(),
             1
         );
     }
@@ -3635,11 +4207,8 @@ mod tests {
         .expect("save source");
         let backup = create_full_profile_backup(source_root.path(), &[]).expect("create backup");
         fs::write(external.path().join("sentinel"), b"outside").expect("write sentinel");
-        symlink(
-            external.path(),
-            target_root.path().join("app-data/backups"),
-        )
-        .expect("link backups");
+        symlink(external.path(), target_root.path().join("app-data/backups"))
+            .expect("link backups");
 
         for result in [
             preview_full_profile_restore(target_root.path(), Path::new(&backup.path)).map(|_| ()),
