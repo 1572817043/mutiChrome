@@ -28,6 +28,7 @@ function snapshot(profileId: string): ProfileEnvironmentSnapshot {
     browserPath: "/Applications/Google Chrome.app",
     browserAvailable: true,
     running: false,
+    checkedAt: 1000,
     healthIssues: []
   };
 }
