@@ -639,6 +639,9 @@ describe("App launcher layout", () => {
     const rootBDocument = documentWith([
       profile({ id: "root-b-001", name: "B 根账号" })
     ]);
+    const rootAReturnDocument = documentWith([
+      profile({ id: "account-001", name: "A 根新账号" })
+    ]);
     const snapshotSpy = vi
       .spyOn(profileApi, "snapshotBrowserSessions")
       .mockImplementation(async (_rootPath, profileIds) =>
@@ -663,11 +666,17 @@ describe("App launcher layout", () => {
       writable: true,
       profileCount: 1
     });
-    vi.spyOn(profileApi, "loadProfiles").mockResolvedValue(rootBDocument);
+    vi.spyOn(profileApi, "loadProfiles")
+      .mockResolvedValueOnce(rootBDocument)
+      .mockResolvedValueOnce(rootAReturnDocument);
     const settingsDialog = await openSettingsDialog(user);
     changeRootPathDraft(settingsDialog, "/tmp/root-b");
     await user.click(within(settingsDialog).getByRole("button", { name: "保存设置" }));
     expect(await screen.findByRole("button", { name: "选择 B 根账号" })).toBeTruthy();
+
+    changeRootPathDraft(settingsDialog, "/tmp/root-a-return");
+    await user.click(within(settingsDialog).getByRole("button", { name: "保存设置" }));
+    expect(await screen.findByRole("button", { name: "选择 A 根新账号" })).toBeTruthy();
 
     const oldRootSnapshotCalls = snapshotSpy.mock.calls.filter(
       ([path]) => path === "~/MultiChromeProfiles"
@@ -3572,6 +3581,63 @@ describe("App launcher layout", () => {
     listWindowsSpy.mockRestore();
     setBoundsSpy.mockRestore();
     focusSpy.mockRestore();
+  });
+
+  test("平铺设置边界后切根不会读回、前置或写回旧结果", async () => {
+    const user = userEvent.setup();
+    const pendingSetBounds = deferred<void>();
+    const rootBDocument = documentWith([
+      profile({ id: "root-b-001", name: "B 根账号" })
+    ]);
+    const rootAReturnDocument = documentWith([
+      profile({ id: "account-001", name: "A 根新账号" })
+    ]);
+    vi.spyOn(profileApi, "snapshotBrowserSessions").mockImplementation(
+      async (_rootPath, profileIds) =>
+        profileIds.map((profileId) => browserSessionSnapshot(profileId, true))
+    );
+    const listWindowsSpy = vi.spyOn(profileApi, "listProfileWindows").mockResolvedValue([
+      { index: 1, title: "Chrome", x: 0, y: 0, width: 600, height: 800 }
+    ]);
+    const setBoundsSpy = vi
+      .spyOn(profileApi, "setProfileWindowBounds")
+      .mockReturnValueOnce(pendingSetBounds.promise);
+    const focusSpy = vi.spyOn(profileApi, "focusProfileWindow");
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "选择 抽奖号" }));
+    await openBulkMore(user);
+    await user.click(screen.getByRole("button", { name: "平铺窗口" }));
+    await waitFor(() => expect(setBoundsSpy).toHaveBeenCalledTimes(1));
+
+    vi.spyOn(profileApi, "initProfileRoot").mockResolvedValue({
+      rootExists: true,
+      writable: true,
+      profileCount: 1
+    });
+    vi.spyOn(profileApi, "loadProfiles")
+      .mockResolvedValueOnce(rootBDocument)
+      .mockResolvedValueOnce(rootAReturnDocument);
+    const settingsDialog = await openSettingsDialog(user);
+    changeRootPathDraft(settingsDialog, "/tmp/root-b");
+    await user.click(within(settingsDialog).getByRole("button", { name: "保存设置" }));
+    expect(await screen.findByRole("button", { name: "选择 B 根账号" })).toBeTruthy();
+
+    changeRootPathDraft(settingsDialog, "/tmp/root-a-return");
+    await user.click(within(settingsDialog).getByRole("button", { name: "保存设置" }));
+    expect(await screen.findByRole("button", { name: "选择 A 根新账号" })).toBeTruthy();
+
+    await act(async () => {
+      pendingSetBounds.resolve();
+      await pendingSetBounds.promise;
+    });
+    await flushPromises();
+
+    expect(setBoundsSpy).toHaveBeenCalledTimes(1);
+    expect(listWindowsSpy).toHaveBeenCalledTimes(2);
+    expect(focusSpy).not.toHaveBeenCalled();
+    expect(screen.queryByText("已平铺 1 个窗口")).toBeNull();
   });
 
   test("选择左主右辅后平铺使用对应布局边界", async () => {
