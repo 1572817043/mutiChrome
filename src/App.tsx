@@ -189,9 +189,15 @@ const RUNNING_STATUS_POLL_MS = 5000;
 const LAUNCH_CONFIRMATION_DELAY_MS = 2000;
 const MAX_BROWSER_OPERATIONS = 20;
 const BROWSER_COMMAND_TIMEOUT_MS = 120_000;
+const ROOT_LIFECYCLE_WINDOW_ACTIONS = ["关闭运行账号", "重启运行账号"] as const;
 interface PendingDelete {
   profile: ChromeProfile;
   mode: DeleteMode;
+}
+
+interface RootLifecycleScope {
+  rootPath: string;
+  token: number;
 }
 
 interface LoadedRootData extends RootSettingsLoadedData {
@@ -343,6 +349,9 @@ function App() {
   } = useRootSettings<LoadedRootData>({
     rootPath,
     settings,
+    onBeginRootSwitch: beginRootLifecycleTransition,
+    isCurrentRootSwitch,
+    onFinishRootSwitch: finishRootLifecycleTransition,
     onLoadRoot: loadRoot,
     onReadRootData: readRootData,
     onCommitLoadedRoot: commitLoadedRoot,
@@ -371,7 +380,12 @@ function App() {
     closeDataSafetyDialogs
   } = dataSafetySettings;
   const launchingProfileIdsRef = useRef(new Set<string>());
-  const windowActionLockRef = useRef<string | null>(null);
+  const rootLifecycleTokenRef = useRef(0);
+  const rootSwitchPendingTokenRef = useRef<number | null>(null);
+  const windowActionLockRef = useRef<{
+    action: string;
+    token: number;
+  } | null>(null);
   const bulkOpenCancelledRef = useRef(false);
   const projectOpenCancelledRef = useRef(false);
   const bulkOpenDelayResolveRef = useRef<(() => void) | null>(null);
@@ -390,6 +404,7 @@ function App() {
   });
   const {
     browserOperations,
+    clearWindowActionOperations,
     startWindowOperation,
     finishWindowOperation,
     startProfileOpenOperation,
@@ -685,6 +700,8 @@ function App() {
     setWindowSyncing(false);
     setWindowSyncPreviewing(false);
     setWindowFocusing(false);
+    setWindowQuitting(false);
+    setWindowRestarting(false);
     setOpeningProjectId(null);
     setWindowSyncDetails(null);
     bulkOpenCancelledRef.current = false;
@@ -694,9 +711,12 @@ function App() {
     setProfileSizes({});
   }
 
-  async function loadRoot(path: string) {
+  async function loadRoot(path: string, isCurrent?: () => boolean) {
     setMessage("正在检查配置根目录...");
     const loaded = await readRootData(path);
+    if (isCurrent && !isCurrent()) {
+      return loaded;
+    }
     await commitLoadedRoot(path, loaded);
     return loaded;
   }
@@ -712,7 +732,7 @@ function App() {
   async function refreshRunningProfiles(
     path = rootPath,
     sourceProfiles = profiles,
-    options: { clearOnFailure?: boolean } = {}
+    options: { clearOnFailure?: boolean; isCurrent?: () => boolean } = {}
   ): Promise<BrowserSessionSnapshot[]> {
     if (!path) {
       if (options.clearOnFailure !== false) {
@@ -728,20 +748,30 @@ function App() {
         sourceProfiles.map((profile) => profile.id),
         false
       );
-      if (isLatestBrowserSessionRequest(requestId)) {
+      if (
+        isLatestBrowserSessionRequest(requestId) &&
+        (!options.isCurrent || options.isCurrent())
+      ) {
         applyBrowserSessionSnapshots(snapshots);
       }
       return snapshots;
     } catch {
-      if (isLatestBrowserSessionRequest(requestId) && options.clearOnFailure !== false) {
+      if (
+        isLatestBrowserSessionRequest(requestId) &&
+        options.clearOnFailure !== false &&
+        (!options.isCurrent || options.isCurrent())
+      ) {
         clearBrowserSessionSnapshots();
       }
       return [];
     }
   }
 
-  async function refreshSelectedRunningProfiles() {
-    const snapshots = await refreshRunningProfiles(rootPath, profiles);
+  async function refreshSelectedRunningProfiles(isCurrent?: () => boolean) {
+    const snapshots = await refreshRunningProfiles(rootPath, profiles, { isCurrent });
+    if (isCurrent && !isCurrent()) {
+      return [];
+    }
     const runningIds = new Set(
       snapshots
         .filter(isSessionRunning)
@@ -770,18 +800,68 @@ function App() {
     );
   }
 
-  async function withWindowActionLock(action: string, run: () => Promise<void>): Promise<void> {
+  function beginRootLifecycleTransition() {
+    rootLifecycleTokenRef.current += 1;
+    const token = rootLifecycleTokenRef.current;
+    rootSwitchPendingTokenRef.current = token;
+    clearWindowActionOperations(ROOT_LIFECYCLE_WINDOW_ACTIONS);
+    if (
+      windowActionLockRef.current &&
+      ROOT_LIFECYCLE_WINDOW_ACTIONS.includes(
+        windowActionLockRef.current.action as (typeof ROOT_LIFECYCLE_WINDOW_ACTIONS)[number]
+      ) &&
+      windowActionLockRef.current.token < token
+    ) {
+      windowActionLockRef.current = null;
+    }
+    setWindowQuitting(false);
+    setWindowRestarting(false);
+    return token;
+  }
+
+  function isCurrentRootSwitch(token: number) {
+    return rootSwitchPendingTokenRef.current === token;
+  }
+
+  function finishRootLifecycleTransition(token: number) {
+    if (isCurrentRootSwitch(token)) {
+      rootSwitchPendingTokenRef.current = null;
+    }
+  }
+
+  function isCurrentRootLifecycleScope(scope: RootLifecycleScope) {
+    return (
+      rootLifecycleTokenRef.current === scope.token &&
+      getProfileDocumentSnapshot().rootPath === scope.rootPath
+    );
+  }
+
+  async function withWindowActionLock(
+    action: string,
+    run: (scope: RootLifecycleScope) => Promise<void>,
+    options: { rejectDuringRootSwitch?: boolean } = {}
+  ): Promise<void> {
+    if (options.rejectDuringRootSwitch && rootSwitchPendingTokenRef.current !== null) {
+      setMessage("配置根目录正在切换，请稍候");
+      return;
+    }
     const activeAction = windowActionLockRef.current;
     if (activeAction) {
-      setMessage(`窗口操作“${activeAction}”正在进行，请稍候`);
+      setMessage(`窗口操作“${activeAction.action}”正在进行，请稍候`);
       return;
     }
 
-    windowActionLockRef.current = action;
+    const scope = {
+      rootPath,
+      token: rootLifecycleTokenRef.current
+    };
+    windowActionLockRef.current = { action, token: scope.token };
     try {
-      await run();
+      await run(scope);
     } finally {
-      windowActionLockRef.current = null;
+      if (windowActionLockRef.current?.token === scope.token) {
+        windowActionLockRef.current = null;
+      }
     }
   }
 
@@ -1086,7 +1166,11 @@ function App() {
     sourceLabel: string,
     launchUrl: string
   ) {
-    if (results.length === 0) {
+    const scope: RootLifecycleScope = {
+      rootPath,
+      token: rootLifecycleTokenRef.current
+    };
+    if (results.length === 0 || !isCurrentRootLifecycleScope(scope)) {
       return;
     }
 
@@ -1101,18 +1185,25 @@ function App() {
     const mergedEvents = appendBrowserLaunchEvents(launchEventsRef.current, nextEvents);
     launchEventsRef.current = mergedEvents;
     setLaunchEvents(mergedEvents);
-    queueLaunchEventsSave(rootPath, mergedEvents).catch(() => {
-      setMessage("最近启动记录保存失败，但不会影响浏览器启动");
+    queueLaunchEventsSave(scope, mergedEvents).catch(() => {
+      if (isCurrentRootLifecycleScope(scope)) {
+        setMessage("最近启动记录保存失败，但不会影响浏览器启动");
+      }
     });
   }
 
   function queueLaunchEventsSave(
-    targetRootPath: string,
+    scope: RootLifecycleScope,
     events: BrowserLaunchEvent[]
   ): Promise<void> {
     const saveTask = launchEventsSaveQueueRef.current
       .catch(() => undefined)
-      .then(() => profileApi.saveBrowserLaunchEvents(targetRootPath, events));
+      .then(() => {
+        if (!isCurrentRootLifecycleScope(scope)) {
+          return;
+        }
+        return profileApi.saveBrowserLaunchEvents(scope.rootPath, events);
+      });
     launchEventsSaveQueueRef.current = saveTask.catch(() => undefined);
     return saveTask;
   }
@@ -1161,7 +1252,8 @@ function App() {
 
   async function launchChromeProfile(
     profile: ChromeProfile,
-    launchUrl: string
+    launchUrl: string,
+    isCurrent?: () => boolean
   ): Promise<BrowserLaunchResult> {
     if (!chromeStatus?.available) {
       return browserLaunchFailed(
@@ -1176,10 +1268,16 @@ function App() {
         `${profile.name} 启动`
       );
       const result = browserLaunchSucceeded(profile.id, profileDirectory);
+      if (isCurrent && !isCurrent()) {
+        return result;
+      }
       if (shouldMarkStartingAfterLaunch(result)) {
         markBrowserSessionStarting(profile.id);
         scheduleLaunchConfirmationRefresh(() => {
-          void refreshRunningProfiles(rootPath, profiles, { clearOnFailure: false });
+          void refreshRunningProfiles(rootPath, profiles, {
+            clearOnFailure: false,
+            isCurrent
+          });
         });
       }
       return result;
@@ -2379,9 +2477,16 @@ function App() {
   }
 
   async function quitBrowsersForSelectedProfiles() {
-    await withWindowActionLock("关闭运行账号", async () => {
+    await withWindowActionLock("关闭运行账号", async (scope) => {
+      const isCurrent = () => isCurrentRootLifecycleScope(scope);
+      if (!isCurrent()) {
+        return;
+      }
       invalidateWindowRegistry();
-      const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
+      const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles(isCurrent);
+      if (!isCurrent()) {
+        return;
+      }
       if (freshRunningSelectedProfiles.length === 0) {
         setMessage("没有选中的运行账号");
         return;
@@ -2396,12 +2501,24 @@ function App() {
         let closedCount = 0;
         let failedCount = 0;
         for (const profile of freshRunningSelectedProfiles) {
+          if (!isCurrent()) {
+            return;
+          }
           try {
             await quitProfileBrowserWithTimeout(profile);
+            if (!isCurrent()) {
+              return;
+            }
             closedCount += 1;
           } catch {
+            if (!isCurrent()) {
+              return;
+            }
             failedCount += 1;
           }
+        }
+        if (!isCurrent()) {
+          return;
         }
         const messageParts = [`已关闭 ${closedCount} 个运行账号`];
         if (failedCount > 0) {
@@ -2415,19 +2532,29 @@ function App() {
             profileCount: freshRunningSelectedProfiles.length,
             closedCount,
             failedCount
-          }
+          },
+          isCurrent
         );
-        await refreshRunningProfiles();
+        await refreshRunningProfiles(rootPath, profiles, { isCurrent });
       } finally {
-        setWindowQuitting(false);
+        if (isCurrent()) {
+          setWindowQuitting(false);
+        }
       }
-    });
+    }, { rejectDuringRootSwitch: true });
   }
 
   async function restartBrowsersForSelectedProfiles() {
-    await withWindowActionLock("重启运行账号", async () => {
+    await withWindowActionLock("重启运行账号", async (scope) => {
+      const isCurrent = () => isCurrentRootLifecycleScope(scope);
+      if (!isCurrent()) {
+        return;
+      }
       invalidateWindowRegistry();
-      const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
+      const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles(isCurrent);
+      if (!isCurrent()) {
+        return;
+      }
       if (freshRunningSelectedProfiles.length === 0) {
         setMessage("没有选中的运行账号");
         return;
@@ -2448,10 +2575,26 @@ function App() {
         const launchResults: BrowserLaunchResult[] = [];
 
         for (const profile of freshRunningSelectedProfiles) {
+          if (!isCurrent()) {
+            return;
+          }
           try {
             await quitProfileBrowserWithTimeout(profile);
+            if (!isCurrent()) {
+              return;
+            }
             await new Promise((resolve) => setTimeout(resolve, 300));
-            const result = await launchChromeProfile(profile, DEFAULT_PROFILE_LAUNCH_URL);
+            if (!isCurrent()) {
+              return;
+            }
+            const result = await launchChromeProfile(
+              profile,
+              DEFAULT_PROFILE_LAUNCH_URL,
+              isCurrent
+            );
+            if (!isCurrent()) {
+              return;
+            }
             launchResults.push(result);
             if (result.ok) {
               restartedCount += 1;
@@ -2460,8 +2603,15 @@ function App() {
               failedCount += 1;
             }
           } catch {
+            if (!isCurrent()) {
+              return;
+            }
             failedCount += 1;
           }
+        }
+
+        if (!isCurrent()) {
+          return;
         }
 
         recordLaunchResults(
@@ -2485,7 +2635,13 @@ function App() {
           );
           try {
             await persist(nextProfiles, finalMessage);
+            if (!isCurrent()) {
+              return;
+            }
           } catch (error) {
+            if (!isCurrent()) {
+              return;
+            }
             saveError = error;
           }
         } else {
@@ -2498,18 +2654,24 @@ function App() {
             profileCount: freshRunningSelectedProfiles.length,
             restartedCount,
             failedCount
-          }
+          },
+          isCurrent
         );
+        if (!isCurrent()) {
+          return;
+        }
         if (saveError) {
           setMessage(
             `${finalMessage}；保存打开时间失败：${errorMessage(saveError)}`
           );
         }
-        await refreshRunningProfiles();
+        await refreshRunningProfiles(rootPath, profiles, { isCurrent });
       } finally {
-        setWindowRestarting(false);
+        if (isCurrent()) {
+          setWindowRestarting(false);
+        }
       }
-    });
+    }, { rejectDuringRootSwitch: true });
   }
 
   async function tileWindowsForSelectedProfiles() {

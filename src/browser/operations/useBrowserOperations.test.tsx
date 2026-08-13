@@ -139,6 +139,36 @@ describe("useBrowserOperations", () => {
     expect(onMessage).toHaveBeenCalledWith("主号 正在执行账号启动，请稍后再试");
   });
 
+  test("根切换只移除指定窗口操作，未指定操作保持运行", () => {
+    const { result } = renderHook(() =>
+      useBrowserOperations({
+        rootPath: "/tmp/multichrome",
+        maxOperations: 20,
+        commandTimeoutMs: 120000,
+        onMessage: vi.fn()
+      })
+    );
+    const accountOne = profile("account-001", "主号");
+
+    act(() => {
+      const windowOperation = result.current.startWindowOperation("关闭运行账号", [
+        accountOne
+      ]);
+      result.current.startWindowOperation("检查窗口", [accountOne]);
+      result.current.clearWindowActionOperations(["关闭运行账号", "重启运行账号"]);
+      result.current.finishWindowOperation(windowOperation, "succeeded", {
+        closedCount: 1
+      }, () => false);
+    });
+
+    expect(result.current.browserOperations).toHaveLength(1);
+    expect(result.current.browserOperations[0]).toMatchObject({
+      type: "window-action",
+      sourceLabel: "检查窗口",
+      status: "running"
+    });
+  });
+
   test("浏览器 API 命令使用 rootPath 和超时包装", async () => {
     vi.useFakeTimers();
     const listWindowsSpy = vi

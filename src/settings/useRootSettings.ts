@@ -19,7 +19,10 @@ export interface RootSettingsLoadedData {
 interface UseRootSettingsOptions<TLoadedRoot extends RootSettingsLoadedData> {
   rootPath: string;
   settings: ProfileSettings;
-  onLoadRoot: (path: string) => Promise<unknown>;
+  onBeginRootSwitch: () => number;
+  isCurrentRootSwitch: (token: number) => boolean;
+  onFinishRootSwitch: (token: number) => void;
+  onLoadRoot: (path: string, isCurrent?: () => boolean) => Promise<unknown>;
   onReadRootData: (path: string) => Promise<TLoadedRoot>;
   onCommitLoadedRoot: (path: string, loaded: TLoadedRoot) => Promise<void>;
   onPersistSettings: (settings: ProfileSettings) => Promise<void>;
@@ -29,6 +32,9 @@ interface UseRootSettingsOptions<TLoadedRoot extends RootSettingsLoadedData> {
 export function useRootSettings<TLoadedRoot extends RootSettingsLoadedData>({
   rootPath,
   settings,
+  onBeginRootSwitch,
+  isCurrentRootSwitch,
+  onFinishRootSwitch,
   onLoadRoot,
   onReadRootData,
   onCommitLoadedRoot,
@@ -90,10 +96,26 @@ export function useRootSettings<TLoadedRoot extends RootSettingsLoadedData>({
       return;
     }
 
+    if (nextRootPath === rootPath) {
+      try {
+        await onLoadRoot(nextRootPath);
+      } catch (error) {
+        onMessage(errorMessage(error));
+      }
+      return;
+    }
+
+    const token = onBeginRootSwitch();
     try {
-      await onLoadRoot(nextRootPath);
+      await onLoadRoot(nextRootPath, () => isCurrentRootSwitch(token));
     } catch (error) {
-      onMessage(errorMessage(error));
+      if (isCurrentRootSwitch(token)) {
+        onMessage(errorMessage(error));
+      }
+    } finally {
+      if (isCurrentRootSwitch(token)) {
+        onFinishRootSwitch(token);
+      }
     }
   }
 
@@ -128,8 +150,13 @@ export function useRootSettings<TLoadedRoot extends RootSettingsLoadedData>({
       return;
     }
 
+    const token = onBeginRootSwitch();
+    const isCurrent = () => isCurrentRootSwitch(token);
     try {
       const loaded = await onReadRootData(nextRootPath);
+      if (!isCurrent()) {
+        return;
+      }
       const nextSettings = normalizeSettings({
         ...loaded.settings,
         browserPath: browserPathDraft,
@@ -137,6 +164,9 @@ export function useRootSettings<TLoadedRoot extends RootSettingsLoadedData>({
       });
       const nextDocument = { ...loaded.document, settings: nextSettings };
       await profileApi.saveProfiles(nextRootPath, nextDocument);
+      if (!isCurrent()) {
+        return;
+      }
 
       let chrome = loaded.chrome;
       let chromeDetectionError: unknown = null;
@@ -145,6 +175,9 @@ export function useRootSettings<TLoadedRoot extends RootSettingsLoadedData>({
       } catch (error) {
         chromeDetectionError = error;
       }
+      if (!isCurrent()) {
+        return;
+      }
 
       await onCommitLoadedRoot(nextRootPath, {
         ...loaded,
@@ -152,12 +185,21 @@ export function useRootSettings<TLoadedRoot extends RootSettingsLoadedData>({
         settings: nextSettings,
         chrome
       });
+      if (!isCurrent()) {
+        return;
+      }
       if (chromeDetectionError) {
         setChromeStatus(null);
         onMessage(errorMessage(chromeDetectionError));
       }
     } catch (error) {
-      onMessage(errorMessage(error));
+      if (isCurrent()) {
+        onMessage(errorMessage(error));
+      }
+    } finally {
+      if (isCurrent()) {
+        onFinishRootSwitch(token);
+      }
     }
   }
 

@@ -57,6 +57,17 @@ export function useBrowserOperations({
     [maxOperations]
   );
 
+  const clearWindowActionOperations = useCallback((actions: readonly string[]) => {
+    const nextOperations = browserOperationsRef.current.filter((operation) => {
+      if (operation.type !== "window-action" || operation.target.kind !== "window") {
+        return true;
+      }
+      return !actions.includes(operation.target.action);
+    });
+    browserOperationsRef.current = nextOperations;
+    setBrowserOperations(nextOperations);
+  }, []);
+
   const startWindowOperation = useCallback(
     (action: string, profilesToOperate: ChromeProfile[]): BrowserOperation => {
       const operation = startBrowserOperation(
@@ -78,8 +89,12 @@ export function useBrowserOperations({
     <Summary,>(
       operation: BrowserOperation,
       status: Exclude<BrowserOperationStatus, "queued" | "running">,
-      summary: Summary
+      summary: Summary,
+      shouldFinish?: () => boolean
     ) => {
+      if (shouldFinish && !shouldFinish()) {
+        return;
+      }
       upsertBrowserOperation(finishBrowserOperation(operation, status, summary));
     },
     [upsertBrowserOperation]
@@ -254,6 +269,7 @@ export function useBrowserOperations({
 
   return {
     browserOperations,
+    clearWindowActionOperations,
     startWindowOperation,
     finishWindowOperation,
     startProfileOpenOperation,
