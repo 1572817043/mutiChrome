@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -295,10 +296,9 @@ const MAX_BROWSER_LAUNCH_EVENTS: usize = 30;
 static ATOMIC_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub fn init_root(root: &Path) -> Result<RootStatus, String> {
-    fs::create_dir_all(root.join("app-data")).map_err(|error| error.to_string())?;
+    let app_data_path = ensure_real_app_data_dir(root)?;
+    let document_path = managed_app_data_file(&app_data_path, "profiles.json")?;
     ensure_real_profiles_dir(root)?;
-
-    let document_path = root.join("app-data/profiles.json");
     if !document_path.exists() {
         let document = ProfileDocument {
             version: 1,
@@ -313,7 +313,7 @@ pub fn init_root(root: &Path) -> Result<RootStatus, String> {
     let document = read_document(&document_path)?;
     Ok(RootStatus {
         root_exists: root.exists(),
-        writable: can_write(root),
+        writable: can_write_app_data(&app_data_path),
         profile_count: document.profiles.len(),
     })
 }
@@ -337,7 +337,8 @@ pub fn directory_size(path: &Path) -> Result<u64, String> {
 }
 
 pub fn load_profile_document(root: &Path) -> Result<ProfileDocument, String> {
-    read_document(&document_path(root))
+    let app_data_path = real_app_data_dir(root)?;
+    read_document(&managed_app_data_file(&app_data_path, "profiles.json")?)
 }
 
 pub fn create_profile_backup(root: &Path) -> Result<ProfileBackupResult, String> {
@@ -428,7 +429,7 @@ pub fn preview_full_profile_backup(
     }
 
     Ok(FullProfileBackupPreview {
-        destination_dir: root.join("app-data/backups").to_string_lossy().to_string(),
+        destination_dir: real_profile_backups_dir(root)?.to_string_lossy().to_string(),
         profile_count: profile_ids.len(),
         profile_ids,
         total_bytes,
@@ -439,6 +440,7 @@ pub fn preview_full_profile_restore(
     root: &Path,
     backup_path: &Path,
 ) -> Result<FullProfileRestorePreview, String> {
+    real_profile_backups_dir(root)?;
     let backup_dir = resolve_full_profile_backup_dir(backup_path)?;
     let backup_document = read_full_profile_backup_document(&backup_dir)?;
     let current_document = load_profile_document(root)?;
@@ -479,6 +481,7 @@ pub fn restore_full_profile_backup(
     backup_path: &Path,
     overwrite_existing: bool,
 ) -> Result<ProfileDocument, String> {
+    real_profile_backups_dir(root)?;
     let backup_dir = resolve_full_profile_backup_dir(backup_path)?;
     let backup_document = read_full_profile_backup_document(&backup_dir)?;
     let current_document = load_profile_document(root)?;
@@ -706,27 +709,45 @@ pub fn check_root_health(root: &Path) -> RootHealthReport {
         }
     }
 
-    let app_data_path = root.join("app-data");
+    let app_data_path = app_data_dir(root);
     let profiles_path = root.join("profiles");
-    if !app_data_path.is_dir() {
-        issues.push(health_issue(
-            RootHealthSeverity::Error,
-            "app_data_dir_missing",
-            "索引目录缺失",
-            "app-data 文件夹不存在，账号索引无法读取。",
-            Some(&app_data_path),
-            None,
-        ));
-    } else if !can_write(root) {
-        issues.push(health_issue(
-            RootHealthSeverity::Error,
-            "root_not_writable",
-            "根目录不可写",
-            "无法在 app-data 写入测试文件，请检查磁盘权限或外置盘状态。",
-            Some(root),
-            None,
-        ));
-    }
+    let app_data_is_real = match fs::symlink_metadata(&app_data_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            issues.push(health_issue(
+                RootHealthSeverity::Error,
+                "app_data_dir_symlink",
+                "索引目录不能是符号链接",
+                "app-data 文件夹是符号链接，继续操作可能访问根目录外的数据。请手动恢复为真实文件夹。",
+                Some(&app_data_path),
+                None,
+            ));
+            false
+        }
+        Ok(metadata) if metadata.is_dir() => {
+            if !can_write_app_data(&app_data_path) {
+                issues.push(health_issue(
+                    RootHealthSeverity::Error,
+                    "root_not_writable",
+                    "根目录不可写",
+                    "无法在 app-data 写入测试文件，请检查磁盘权限或外置盘状态。",
+                    Some(root),
+                    None,
+                ));
+            }
+            true
+        }
+        _ => {
+            issues.push(health_issue(
+                RootHealthSeverity::Error,
+                "app_data_dir_missing",
+                "索引目录缺失",
+                "app-data 文件夹不存在，账号索引无法读取。",
+                Some(&app_data_path),
+                None,
+            ));
+            false
+        }
+    };
 
     let profiles_dir_is_real = match fs::symlink_metadata(&profiles_path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -755,16 +776,55 @@ pub fn check_root_health(root: &Path) -> RootHealthReport {
     };
 
     let document_file = document_path(root);
-    if !document_file.exists() {
-        issues.push(health_issue(
-            RootHealthSeverity::Error,
-            "profile_document_missing",
-            "账号索引缺失",
-            "app-data/profiles.json 不存在，软件无法读取账号列表。",
-            Some(&document_file),
-            None,
-        ));
-    } else {
+    let document_is_safe = app_data_is_real
+        && match fs::symlink_metadata(&document_file) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                issues.push(health_issue(
+                    RootHealthSeverity::Error,
+                    "profile_document_symlink",
+                    "账号索引不能是符号链接",
+                    "profiles.json 是符号链接，继续操作可能读写根目录外的数据。请手动恢复为普通文件。",
+                    Some(&document_file),
+                    None,
+                ));
+                false
+            }
+            Ok(metadata) if metadata.is_file() => true,
+            Ok(_) => {
+                issues.push(health_issue(
+                    RootHealthSeverity::Error,
+                    "profile_document_invalid",
+                    "账号索引不是普通文件",
+                    "profiles.json 存在，但不是普通文件。",
+                    Some(&document_file),
+                    None,
+                ));
+                false
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                issues.push(health_issue(
+                    RootHealthSeverity::Error,
+                    "profile_document_missing",
+                    "账号索引缺失",
+                    "app-data/profiles.json 不存在，软件无法读取账号列表。",
+                    Some(&document_file),
+                    None,
+                ));
+                false
+            }
+            Err(error) => {
+                issues.push(health_issue(
+                    RootHealthSeverity::Error,
+                    "profile_document_invalid",
+                    "账号索引不可读取",
+                    &format!("无法读取 profiles.json：{error}"),
+                    Some(&document_file),
+                    None,
+                ));
+                false
+            }
+        };
+    if document_is_safe {
         match read_document(&document_file) {
             Ok(document) => {
                 profile_count = document.profiles.len();
@@ -808,6 +868,35 @@ pub fn check_root_health(root: &Path) -> RootHealthReport {
         }
     }
 
+    if app_data_is_real {
+        let launch_events_file = browser_launch_events_path(root);
+        if fs::symlink_metadata(&launch_events_file)
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            issues.push(health_issue(
+                RootHealthSeverity::Error,
+                "launch_events_symlink",
+                "启动记录不能是符号链接",
+                "launch-events.json 是符号链接，继续操作可能读写根目录外的数据。请手动恢复为普通文件。",
+                Some(&launch_events_file),
+                None,
+            ));
+        }
+        let backups_path = app_data_path.join("backups");
+        if fs::symlink_metadata(&backups_path)
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            issues.push(health_issue(
+                RootHealthSeverity::Error,
+                "backups_dir_symlink",
+                "备份目录不能是符号链接",
+                "backups 文件夹是符号链接，继续操作可能写入根目录外的数据。请手动恢复为真实文件夹。",
+                Some(&backups_path),
+                None,
+            ));
+        }
+    }
+
     if profiles_dir_is_real {
         inspect_profile_directory_entries(&profiles_path, &registered_ids, &mut issues);
     }
@@ -832,9 +921,12 @@ pub fn repair_root_health(root: &Path) -> Result<RootRepairResult, String> {
         }
     }
 
-    let app_data_path = root.join("app-data");
-    if !app_data_path.exists() {
-        fs::create_dir_all(&app_data_path).map_err(|error| error.to_string())?;
+    let app_data_was_missing = matches!(
+        fs::symlink_metadata(app_data_dir(root)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    );
+    let app_data_path = ensure_real_app_data_dir(root)?;
+    if app_data_was_missing {
         actions.push(repair_action(
             "app_data_dir_created",
             "已创建索引目录",
@@ -843,6 +935,9 @@ pub fn repair_root_health(root: &Path) -> Result<RootRepairResult, String> {
             None,
         ));
     }
+    let document_file = managed_app_data_file(&app_data_path, "profiles.json")?;
+    let backups_path = managed_app_data_dir(&app_data_path, "backups")?;
+    let backups_were_missing = !backups_path.exists();
 
     let profiles_path = root.join("profiles");
     let profiles_were_missing = matches!(
@@ -860,9 +955,8 @@ pub fn repair_root_health(root: &Path) -> Result<RootRepairResult, String> {
         ));
     }
 
-    let backups_path = root.join("app-data/backups");
-    if app_data_path.is_dir() && !backups_path.exists() {
-        fs::create_dir_all(&backups_path).map_err(|error| error.to_string())?;
+    if backups_were_missing {
+        ensure_profile_backups_dir(root)?;
         actions.push(repair_action(
             "backups_dir_created",
             "已创建备份目录",
@@ -872,8 +966,7 @@ pub fn repair_root_health(root: &Path) -> Result<RootRepairResult, String> {
         ));
     }
 
-    let document_file = document_path(root);
-    if app_data_path.is_dir() && !document_file.exists() {
+    if !document_file.exists() {
         let document = ProfileDocument {
             version: 1,
             settings: AppSettings::default(),
@@ -1130,7 +1223,8 @@ fn profile_marker_path(profile_path: &Path) -> PathBuf {
 }
 
 pub fn save_profile_document(root: &Path, document: &ProfileDocument) -> Result<(), String> {
-    fs::create_dir_all(root.join("app-data")).map_err(|error| error.to_string())?;
+    let app_data_path = ensure_real_app_data_dir(root)?;
+    let document_path = managed_app_data_file(&app_data_path, "profiles.json")?;
     ensure_real_profiles_dir(root)?;
     let profile_ids = document
         .profiles
@@ -1144,11 +1238,12 @@ pub fn save_profile_document(root: &Path, document: &ProfileDocument) -> Result<
         }
     }
     let json = serde_json::to_string_pretty(document).map_err(|error| error.to_string())?;
-    fs::write(document_path(root), format!("{json}\n")).map_err(|error| error.to_string())
+    fs::write(document_path, format!("{json}\n")).map_err(|error| error.to_string())
 }
 
 pub fn load_browser_launch_events(root: &Path) -> Result<Vec<BrowserLaunchEvent>, String> {
-    let path = browser_launch_events_path(root);
+    let app_data_path = real_app_data_dir(root)?;
+    let path = managed_app_data_file(&app_data_path, "launch-events.json")?;
     if !path.exists() {
         return Ok(Vec::new());
     }
@@ -1171,10 +1266,11 @@ pub fn save_browser_launch_events(
     root: &Path,
     events: &[BrowserLaunchEvent],
 ) -> Result<(), String> {
-    fs::create_dir_all(root.join("app-data")).map_err(|error| error.to_string())?;
+    let app_data_path = ensure_real_app_data_dir(root)?;
+    let path = managed_app_data_file(&app_data_path, "launch-events.json")?;
     let events = normalize_browser_launch_events(events.to_vec());
     let json = serde_json::to_string_pretty(&events).map_err(|error| error.to_string())?;
-    write_text_file_atomically(&browser_launch_events_path(root), &format!("{json}\n"))
+    write_text_file_atomically(&path, &format!("{json}\n"))
 }
 
 fn normalize_browser_launch_events(mut events: Vec<BrowserLaunchEvent>) -> Vec<BrowserLaunchEvent> {
@@ -1186,6 +1282,7 @@ fn normalize_browser_launch_events(mut events: Vec<BrowserLaunchEvent>) -> Vec<B
 
 pub fn ensure_profile_dir(root: &Path, profile_id: &str) -> Result<PathBuf, String> {
     validate_profile_id(profile_id)?;
+    preflight_managed_profile_storage(root)?;
     let profiles_dir = ensure_real_profiles_dir(root)?;
     let path = safe_profile_dir_in(&profiles_dir, profile_id)?;
     if !path.exists() {
@@ -1195,9 +1292,16 @@ pub fn ensure_profile_dir(root: &Path, profile_id: &str) -> Result<PathBuf, Stri
 }
 
 pub fn ensure_profile_backups_dir(root: &Path) -> Result<PathBuf, String> {
-    let path = root.join("app-data/backups");
-    fs::create_dir_all(&path).map_err(|error| error.to_string())?;
-    Ok(path)
+    let app_data_path = ensure_real_app_data_dir(root)?;
+    let path = managed_app_data_dir(&app_data_path, "backups")?;
+    if !path.exists() {
+        match fs::create_dir(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    managed_app_data_dir(&app_data_path, "backups")
 }
 
 pub fn delete_profile_dir(root: &Path, profile_id: &str) -> Result<(), String> {
@@ -1260,6 +1364,7 @@ pub fn validated_profile_dir(root: &Path, profile_id: &str) -> Result<PathBuf, S
 
 fn safe_profile_dir(root: &Path, profile_id: &str) -> Result<PathBuf, String> {
     validate_profile_id(profile_id)?;
+    preflight_managed_profile_storage(root)?;
     let profiles_dir = real_profiles_dir(root)?;
     safe_profile_dir_in(&profiles_dir, profile_id)
 }
@@ -1269,6 +1374,80 @@ fn resolve_profile_dirs(root: &Path, profile_ids: &[String]) -> Result<Vec<PathB
         .iter()
         .map(|profile_id| safe_profile_dir(root, profile_id))
         .collect()
+}
+
+fn app_data_dir(root: &Path) -> PathBuf {
+    root.join("app-data")
+}
+
+fn preflight_managed_profile_storage(root: &Path) -> Result<(), String> {
+    let app_data_path = real_app_data_dir(root)?;
+    managed_app_data_file(&app_data_path, "profiles.json")?;
+    Ok(())
+}
+
+fn real_app_data_dir(root: &Path) -> Result<PathBuf, String> {
+    let path = app_data_dir(root);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err("app-data 目录不能是符号链接".to_string())
+        }
+        Ok(metadata) if metadata.is_dir() => Ok(path),
+        Ok(_) => Err("app-data 路径不是文件夹".to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err("app-data 目录不存在".to_string())
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn ensure_real_app_data_dir(root: &Path) -> Result<PathBuf, String> {
+    let path = app_data_dir(root);
+    match fs::symlink_metadata(&path) {
+        Ok(_) => real_app_data_dir(root),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir_all(root).map_err(|error| error.to_string())?;
+            match fs::create_dir(&path) {
+                Ok(()) => real_app_data_dir(root),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    real_app_data_dir(root)
+                }
+                Err(error) => Err(error.to_string()),
+            }
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn managed_app_data_file(app_data_path: &Path, file_name: &str) -> Result<PathBuf, String> {
+    let path = app_data_path.join(file_name);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(format!("{file_name} 不能是符号链接"))
+        }
+        Ok(metadata) if metadata.is_file() => Ok(path),
+        Ok(_) => Err(format!("{file_name} 不是普通文件")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(path),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn managed_app_data_dir(app_data_path: &Path, dir_name: &str) -> Result<PathBuf, String> {
+    let path = app_data_path.join(dir_name);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(format!("{dir_name} 目录不能是符号链接"))
+        }
+        Ok(metadata) if metadata.is_dir() => Ok(path),
+        Ok(_) => Err(format!("{dir_name} 路径不是文件夹")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(path),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn real_profile_backups_dir(root: &Path) -> Result<PathBuf, String> {
+    let app_data_path = real_app_data_dir(root)?;
+    managed_app_data_dir(&app_data_path, "backups")
 }
 
 fn safe_profile_dir_in(profiles_dir: &Path, profile_id: &str) -> Result<PathBuf, String> {
@@ -1434,12 +1613,33 @@ fn default_theme() -> String {
     "light".to_string()
 }
 
-fn can_write(root: &Path) -> bool {
-    let test_path = root.join("app-data/.write-test");
-    match fs::write(&test_path, b"ok") {
-        Ok(()) => {
+fn can_write_app_data(app_data_path: &Path) -> bool {
+    for _ in 0..4 {
+        let probe_name = format!(
+            ".write-test-{}-{}-{}",
+            std::process::id(),
+            timestamp_millis(),
+            ATOMIC_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed),
+        );
+        if can_write_app_data_with_probe_name(app_data_path, &probe_name) {
+            return true;
+        }
+    }
+    false
+}
+
+fn can_write_app_data_with_probe_name(app_data_path: &Path, probe_name: &str) -> bool {
+    let test_path = app_data_path.join(probe_name);
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&test_path)
+    {
+        Ok(mut file) => {
+            let writable = file.write_all(b"ok").is_ok();
+            drop(file);
             let _ = fs::remove_file(test_path);
-            true
+            writable
         }
         Err(_) => false,
     }
@@ -2887,6 +3087,285 @@ mod tests {
 
         assert!(error.contains("Profile 目录不能是符号链接"));
         assert!(!temp_dir.path().join("app-data/backups").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn app_data_symlink_rejects_root_operations_without_touching_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("root");
+        let external = tempfile::tempdir().expect("external");
+        fs::create_dir(root.path().join("profiles")).expect("create profiles");
+        fs::write(external.path().join("sentinel"), b"outside").expect("write sentinel");
+        symlink(external.path(), root.path().join("app-data")).expect("link app data");
+        let document = ProfileDocument {
+            version: 1,
+            settings: AppSettings::default(),
+            profiles: vec![test_profile("account-001")],
+            projects: Vec::new(),
+        };
+
+        for result in [
+            init_root(root.path()).map(|_| ()),
+            load_profile_document(root.path()).map(|_| ()),
+            save_profile_document(root.path(), &document),
+            ensure_profile_dir(root.path(), "account-001").map(|_| ()),
+            import_profile_dir(root.path(), external.path(), "account-002", None),
+            repair_root_health(root.path()).map(|_| ()),
+            ensure_profile_backups_dir(root.path()).map(|_| ()),
+        ] {
+            assert!(result
+                .expect_err("app-data symlink must be rejected")
+                .contains("app-data 目录不能是符号链接"));
+        }
+        let health = check_root_health(root.path());
+        assert!(!root.path().join("profiles/account-001").exists());
+        assert!(health
+            .issues
+            .iter()
+            .any(|issue| issue.code == "app_data_dir_symlink"));
+        assert_eq!(
+            fs::read(external.path().join("sentinel")).expect("read sentinel"),
+            b"outside"
+        );
+        assert!(!external.path().join("profiles.json").exists());
+        assert!(!external.path().join("backups").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_document_symlink_blocks_save_before_creating_profile_directories() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("root");
+        let external = tempfile::tempdir().expect("external");
+        init_root(root.path()).expect("init root");
+        fs::write(external.path().join("sentinel"), b"outside").expect("write sentinel");
+        fs::remove_file(root.path().join("app-data/profiles.json")).expect("remove document");
+        symlink(
+            external.path().join("sentinel"),
+            root.path().join("app-data/profiles.json"),
+        )
+        .expect("link document");
+        let document = ProfileDocument {
+            version: 1,
+            settings: AppSettings::default(),
+            profiles: vec![test_profile("account-001"), test_profile("account-002")],
+            projects: Vec::new(),
+        };
+
+        let error = save_profile_document(root.path(), &document)
+            .expect_err("document symlink must reject save");
+        let repair_error = repair_root_health(root.path())
+            .expect_err("document symlink must reject repair");
+        let health = check_root_health(root.path());
+
+        assert!(error.contains("profiles.json 不能是符号链接"));
+        assert!(repair_error.contains("profiles.json 不能是符号链接"));
+        assert!(!root.path().join("profiles/account-001").exists());
+        assert!(!root.path().join("profiles/account-002").exists());
+        assert!(health
+            .issues
+            .iter()
+            .any(|issue| issue.code == "profile_document_symlink"));
+        assert_eq!(
+            fs::read(external.path().join("sentinel")).expect("read sentinel"),
+            b"outside"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backups_symlink_rejects_backup_and_preview_without_creating_external_files() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("root");
+        let external = tempfile::tempdir().expect("external");
+        init_root(root.path()).expect("init root");
+        save_profile_document(
+            root.path(),
+            &ProfileDocument {
+                version: 1,
+                settings: AppSettings::default(),
+                profiles: vec![test_profile("account-001")],
+                projects: Vec::new(),
+            },
+        )
+        .expect("save document");
+        fs::write(external.path().join("sentinel"), b"outside").expect("write sentinel");
+        symlink(
+            external.path(),
+            root.path().join("app-data/backups"),
+        )
+        .expect("link backups");
+
+        for result in [
+            create_profile_backup(root.path()).map(|_| ()),
+            create_full_profile_backup(root.path(), &[]).map(|_| ()),
+            preview_full_profile_backup(root.path(), &[]).map(|_| ()),
+        ] {
+            assert!(result
+                .expect_err("backups symlink must reject backup operation")
+                .contains("backups 目录不能是符号链接"));
+        }
+        let health = check_root_health(root.path());
+        assert!(health
+            .issues
+            .iter()
+            .any(|issue| issue.code == "backups_dir_symlink"));
+        assert_eq!(
+            fs::read(external.path().join("sentinel")).expect("read sentinel"),
+            b"outside"
+        );
+        assert_eq!(
+            fs::read_dir(external.path()).expect("read external").count(),
+            1
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn launch_events_symlink_rejects_load_and_save_without_touching_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("root");
+        let external = tempfile::tempdir().expect("external");
+        init_root(root.path()).expect("init root");
+        fs::write(external.path().join("sentinel"), b"outside").expect("write sentinel");
+        symlink(
+            external.path().join("sentinel"),
+            root.path().join("app-data/launch-events.json"),
+        )
+        .expect("link launch events");
+        let events = vec![BrowserLaunchEvent {
+            profile_id: "account-001".to_string(),
+            profile_name: "账号 1".to_string(),
+            source_label: "测试".to_string(),
+            url: "https://example.com".to_string(),
+            ok: true,
+            message: "完成".to_string(),
+            finished_at: 1,
+        }];
+
+        assert!(load_browser_launch_events(root.path())
+            .expect_err("launch events symlink must reject load")
+            .contains("launch-events.json 不能是符号链接"));
+        assert!(save_browser_launch_events(root.path(), &events)
+            .expect_err("launch events symlink must reject save")
+            .contains("launch-events.json 不能是符号链接"));
+        let health = check_root_health(root.path());
+        assert!(health
+            .issues
+            .iter()
+            .any(|issue| issue.code == "launch_events_symlink"));
+        assert_eq!(
+            fs::read(external.path().join("sentinel")).expect("read sentinel"),
+            b"outside"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn init_root_preflights_profile_document_before_creating_profiles_directory() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("root");
+        let external = tempfile::tempdir().expect("external");
+        fs::create_dir(root.path().join("app-data")).expect("create app data");
+        fs::write(external.path().join("sentinel"), b"outside").expect("write sentinel");
+        symlink(
+            external.path().join("sentinel"),
+            root.path().join("app-data/profiles.json"),
+        )
+        .expect("link document");
+
+        let error = init_root(root.path()).expect_err("document symlink must reject init");
+
+        assert!(error.contains("profiles.json 不能是符号链接"));
+        assert!(!root.path().join("profiles").exists());
+        assert_eq!(
+            fs::read(external.path().join("sentinel")).expect("read sentinel"),
+            b"outside"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_restore_operations_preflight_backups_symlink_before_touching_profiles() {
+        use std::os::unix::fs::symlink;
+
+        let source_root = tempfile::tempdir().expect("source root");
+        let target_root = tempfile::tempdir().expect("target root");
+        let external = tempfile::tempdir().expect("external");
+        init_root(source_root.path()).expect("init source");
+        init_root(target_root.path()).expect("init target");
+        save_profile_document(
+            source_root.path(),
+            &ProfileDocument {
+                version: 1,
+                settings: AppSettings::default(),
+                profiles: vec![test_profile("account-001")],
+                projects: Vec::new(),
+            },
+        )
+        .expect("save source");
+        let backup = create_full_profile_backup(source_root.path(), &[]).expect("create backup");
+        fs::write(external.path().join("sentinel"), b"outside").expect("write sentinel");
+        symlink(
+            external.path(),
+            target_root.path().join("app-data/backups"),
+        )
+        .expect("link backups");
+
+        for result in [
+            preview_full_profile_restore(target_root.path(), Path::new(&backup.path)).map(|_| ()),
+            restore_full_profile_backup(target_root.path(), Path::new(&backup.path), true)
+                .map(|_| ()),
+        ] {
+            assert!(result
+                .expect_err("backups symlink must reject restore operation")
+                .contains("backups 目录不能是符号链接"));
+        }
+        assert!(!target_root.path().join("profiles/account-001").exists());
+        assert_eq!(
+            fs::read(external.path().join("sentinel")).expect("read sentinel"),
+            b"outside"
+        );
+        assert_eq!(
+            fs::read_dir(external.path())
+                .expect("read external")
+                .count(),
+            1
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_health_never_follows_a_symlinked_write_probe() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("root");
+        let external = tempfile::tempdir().expect("external");
+        init_root(root.path()).expect("init root");
+        fs::write(external.path().join("sentinel"), b"outside").expect("write sentinel");
+        symlink(
+            external.path().join("sentinel"),
+            root.path().join("app-data/.write-test"),
+        )
+        .expect("link write probe");
+
+        let health = check_root_health(root.path());
+
+        assert_eq!(health.summary.error_count, 0);
+        assert!(!can_write_app_data_with_probe_name(
+            &root.path().join("app-data"),
+            ".write-test"
+        ));
+        assert_eq!(
+            fs::read(external.path().join("sentinel")).expect("read sentinel"),
+            b"outside"
+        );
     }
 
     fn test_profile(id: &str) -> StoredProfile {
