@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import type { ChromeWindowInfo, WindowBounds } from "../../api";
 import type { WindowSyncPlan } from "../../browserWindows";
 import type { ChromeProfile } from "../../types";
@@ -58,6 +58,31 @@ function profile(id: string, name: string): ChromeProfile {
 }
 
 describe("executeWindowSyncPlan", () => {
+  test("设置边界后作用域失效时不读回并返回 cancelled", async () => {
+    const readWindows = vi.fn(async (_profileId: string) => [chromeWindow()]);
+    let current = true;
+
+    await expect(
+      executeWindowSyncPlan(
+        syncPlan(),
+        {
+          setBounds: async () => {
+            current = false;
+          },
+          readWindows
+        },
+        { shouldContinue: () => current }
+      )
+    ).resolves.toMatchObject({
+      syncedCount: 0,
+      unchangedCount: 0,
+      failedCount: 0,
+      entries: [],
+      cancelled: true
+    });
+    expect(readWindows).not.toHaveBeenCalled();
+  });
+
   test("设置并读回匹配时计入 synced 并返回账号 ID", async () => {
     const setBounds = async (_profileId: string, _bounds: WindowBounds) => {};
     const readWindows = async (_profileId: string) => [chromeWindow()];
@@ -208,6 +233,26 @@ describe("executeWindowSyncPlan", () => {
 });
 
 describe("readWindowSyncPlanForProfiles", () => {
+  test("读取主窗口后作用域失效时不读取目标账号并返回 cancelled", async () => {
+    const sourceProfile = profile("account-001", "主号");
+    const targetProfile = profile("account-002", "目标号");
+    const readWindows = vi.fn(async () => {
+      current = false;
+      return [chromeWindow()];
+    });
+    let current = true;
+
+    await expect(
+      readWindowSyncPlanForProfiles(
+        [sourceProfile, targetProfile],
+        sourceProfile,
+        { readWindows, shouldContinue: () => current }
+      )
+    ).resolves.toMatchObject({ cancelled: true });
+    expect(readWindows).toHaveBeenCalledTimes(1);
+    expect(readWindows).toHaveBeenCalledWith(sourceProfile, "读取主窗口");
+  });
+
   test("主账号读取失败时返回 window-error 且不读取目标账号", async () => {
     const sourceProfile = profile("account-001", "主号");
     const targetProfile = profile("account-002", "目标号");

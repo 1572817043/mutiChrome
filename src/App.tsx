@@ -193,7 +193,10 @@ const ROOT_LIFECYCLE_WINDOW_ACTIONS = [
   "检查窗口",
   "前置窗口",
   "关闭运行账号",
-  "重启运行账号"
+  "重启运行账号",
+  "平铺窗口",
+  "预览同步",
+  "同步布局"
 ] as const;
 interface PendingDelete {
   profile: ChromeProfile;
@@ -835,12 +838,16 @@ function App() {
       windowActionLockRef.current = null;
     }
     setWindowInspecting(false);
+    setWindowTiling(false);
+    setWindowSyncing(false);
+    setWindowSyncPreviewing(false);
     setWindowFocusing(false);
     setWindowQuitting(false);
     setWindowRestarting(false);
     setBulkOpenRunning(false);
     setOpeningProjectId(null);
     setLastBulkLaunchRetry(null);
+    invalidateWindowRegistry();
     return token;
   }
 
@@ -2834,9 +2841,16 @@ function App() {
   }
 
   async function tileWindowsForSelectedProfiles() {
-    await withWindowActionLock("平铺窗口", async () => {
+    await withWindowActionLock("平铺窗口", async (scope) => {
+      const isCurrent = () => isCurrentRootLifecycleScope(scope);
+      if (!isCurrent()) {
+        return;
+      }
       invalidateWindowRegistry();
-      const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
+      const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles(isCurrent);
+      if (!isCurrent()) {
+        return;
+      }
 
       if (freshRunningSelectedProfiles.length === 0) {
         setMessage("选中的账号没有运行窗口");
@@ -2854,14 +2868,23 @@ function App() {
         let firstFailedError: unknown = null;
 
         for (const profile of freshRunningSelectedProfiles) {
+          if (!isCurrent()) {
+            return;
+          }
           try {
             const windows = await listProfileWindowsWithTimeout(profile, "检查平铺窗口");
+            if (!isCurrent()) {
+              return;
+            }
             registryInputs.push({
               profileId: profile.id,
               profileName: profile.name,
               windows
             });
           } catch (error) {
+            if (!isCurrent()) {
+              return;
+            }
             failedCount += 1;
             firstFailedError ??= error;
             registryInputs.push({
@@ -2874,6 +2897,9 @@ function App() {
         }
 
         const windowRegistry = buildPrimaryWindowRegistry(registryInputs);
+        if (!isCurrent()) {
+          return;
+        }
         const layoutPlan = buildWindowLayoutPlan(windowRegistry, {
           x: availableScreenLeft(),
           y: availableScreenTop(),
@@ -2904,7 +2930,7 @@ function App() {
               failedCount
             })
           );
-          await refreshRunningProfiles();
+          await refreshRunningProfiles(scope.rootPath, profiles, { isCurrent });
           return;
         }
 
@@ -2923,7 +2949,7 @@ function App() {
               capacityExceeded: true
             })
           );
-          await refreshRunningProfiles();
+          await refreshRunningProfiles(scope.rootPath, profiles, { isCurrent });
           return;
         }
 
@@ -2933,6 +2959,9 @@ function App() {
         const tiledProfiles: ChromeProfile[] = [];
 
         for (const placement of layoutPlan.placements) {
+          if (!isCurrent()) {
+            return;
+          }
           const profile = profileById.get(placement.profileId);
           if (!profile) {
             continue;
@@ -2941,10 +2970,16 @@ function App() {
           try {
             const targetBounds = placement.bounds;
             await setProfileWindowBoundsWithTimeout(profile, targetBounds, "平铺窗口");
+            if (!isCurrent()) {
+              return;
+            }
             const updatedWindows = await listProfileWindowsWithTimeout(
               profile,
               "确认平铺窗口"
             );
+            if (!isCurrent()) {
+              return;
+            }
             if (
               !updatedWindows[0] ||
               !windowMatchesBounds(updatedWindows[0], targetBounds)
@@ -2955,6 +2990,9 @@ function App() {
             tiledCount += 1;
             tiledProfiles.push(profile);
           } catch (error) {
+            if (!isCurrent()) {
+              return;
+            }
             failedCount += 1;
             firstFailedError ??= error;
           }
@@ -2977,8 +3015,12 @@ function App() {
             messageParts.push(`${failedCount} 个失败`);
           }
           const focusResult = await focusWindowsForProfilesInOrder(tiledProfiles, {
-            focusWindow: focusProfileWindowWithTimeout
+            focusWindow: focusProfileWindowWithTimeout,
+            shouldContinue: isCurrent
           });
+          if (!isCurrent() || focusResult.cancelled) {
+            return;
+          }
           if (focusResult.failedCount > 0) {
             focusFailedCount = focusResult.failedCount;
             messageParts.push(`${focusResult.failedCount} 个未能前置`);
@@ -3018,22 +3060,31 @@ function App() {
             focusFailedCount
           })
         );
-        await refreshRunningProfiles();
+        await refreshRunningProfiles(scope.rootPath, profiles, { isCurrent });
       } finally {
-        setWindowTiling(false);
+        if (isCurrent()) {
+          setWindowTiling(false);
+        }
       }
-    });
+    }, { rejectDuringRootSwitch: true });
   }
 
   async function previewSyncLayoutForSelectedProfiles() {
-    await withWindowActionLock("预览同步", async () => {
+    await withWindowActionLock("预览同步", async (scope) => {
+      const isCurrent = () => isCurrentRootLifecycleScope(scope);
+      if (!isCurrent()) {
+        return;
+      }
       invalidateWindowRegistry();
       const requestGeneration = windowRegistryGenerationRef.current;
       const requestContext = {
         rootPath,
         selectedIds: [...selectedIds]
       };
-      const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
+      const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles(isCurrent);
+      if (!isCurrent()) {
+        return;
+      }
       if (freshRunningSelectedProfiles.length < 2) {
         setMessage("至少选择 2 个运行账号才能预览同步布局");
         return;
@@ -3053,34 +3104,49 @@ function App() {
 
       setWindowSyncPreviewing(true);
       try {
-        const { syncPlan } = await readWindowSyncPlanForProfiles(
+        const { syncPlan, cancelled } = await readWindowSyncPlanForProfiles(
           freshRunningSelectedProfiles,
           sourceProfile,
           {
             readWindows: (profile, purpose) =>
-              listProfileWindowsWithTimeout(profile, purpose)
+              listProfileWindowsWithTimeout(profile, purpose),
+            shouldContinue: isCurrent
           }
         );
+        if (!isCurrent() || cancelled) {
+          return;
+        }
         if (isCurrentWindowRegistryRequest(requestGeneration, requestContext)) {
           setWindowSyncDetails(buildWindowSyncPreviewDetails(syncPlan));
         }
       } catch (error) {
-        setMessage(windowAutomationErrorMessage(error));
+        if (isCurrent()) {
+          setMessage(windowAutomationErrorMessage(error));
+        }
       } finally {
-        setWindowSyncPreviewing(false);
+        if (isCurrent()) {
+          setWindowSyncPreviewing(false);
+        }
       }
-    });
+    }, { rejectDuringRootSwitch: true });
   }
 
   async function syncLayoutForSelectedProfiles() {
-    await withWindowActionLock("同步布局", async () => {
+    await withWindowActionLock("同步布局", async (scope) => {
+      const isCurrent = () => isCurrentRootLifecycleScope(scope);
+      if (!isCurrent()) {
+        return;
+      }
       invalidateWindowRegistry();
       const requestGeneration = windowRegistryGenerationRef.current;
       const requestContext = {
         rootPath,
         selectedIds: [...selectedIds]
       };
-      const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
+      const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles(isCurrent);
+      if (!isCurrent()) {
+        return;
+      }
 
       if (freshRunningSelectedProfiles.length < 2) {
         setMessage("至少选择 2 个运行账号才能同步布局");
@@ -3103,15 +3169,19 @@ function App() {
       const operation = startWindowOperation("同步布局", freshRunningSelectedProfiles);
       setWindowSyncing(true);
       try {
-        let { syncPlan, firstFailedError } =
+        let { syncPlan, firstFailedError, cancelled } =
           await readWindowSyncPlanForProfiles(
             freshRunningSelectedProfiles,
             sourceProfile,
             {
               readWindows: (profile, purpose) =>
-                listProfileWindowsWithTimeout(profile, purpose)
+                listProfileWindowsWithTimeout(profile, purpose),
+              shouldContinue: isCurrent
             }
           );
+        if (!isCurrent() || cancelled) {
+          return;
+        }
         if (syncPlan.sourceStatus === "missing-window") {
           if (isCurrentWindowRegistryRequest(requestGeneration, requestContext)) {
             setWindowSyncDetails({
@@ -3130,7 +3200,7 @@ function App() {
               reason: "missing-source-window"
             })
           );
-          await refreshRunningProfiles();
+          await refreshRunningProfiles(scope.rootPath, profiles, { isCurrent });
           return;
         }
         if (syncPlan.sourceStatus === "minimized-window") {
@@ -3151,7 +3221,7 @@ function App() {
               reason: "minimized-source-window"
             })
           );
-          await refreshRunningProfiles();
+          await refreshRunningProfiles(scope.rootPath, profiles, { isCurrent });
           return;
         }
         if (syncPlan.sourceStatus === "window-error") {
@@ -3172,7 +3242,7 @@ function App() {
               reason: "source-window-error"
             })
           );
-          await refreshRunningProfiles();
+          await refreshRunningProfiles(scope.rootPath, profiles, { isCurrent });
           return;
         }
 
@@ -3202,8 +3272,11 @@ function App() {
               return listProfileWindowsWithTimeout(profile, "确认同步布局");
             }
           },
-          { firstFailedError }
+          { firstFailedError, shouldContinue: isCurrent }
         );
+        if (!isCurrent() || syncResult.cancelled) {
+          return;
+        }
         if (isCurrentWindowRegistryRequest(requestGeneration, requestContext)) {
           setWindowSyncDetails({ mode: "result", plan: syncPlan, result: syncResult });
         }
@@ -3236,8 +3309,14 @@ function App() {
           }
           const focusResult = await focusWindowsForProfilesInOrder(
             [...syncedProfiles, sourceProfile],
-            { focusWindow: focusProfileWindowWithTimeout }
+            {
+              focusWindow: focusProfileWindowWithTimeout,
+              shouldContinue: isCurrent
+            }
           );
+          if (!isCurrent() || focusResult.cancelled) {
+            return;
+          }
           if (focusResult.failedCount > 0) {
             focusFailedCount = focusResult.failedCount;
             messageParts.push(`${focusResult.failedCount} 个未能前置`);
@@ -3279,8 +3358,11 @@ function App() {
             focusFailedCount
           })
         );
-        await refreshRunningProfiles();
+        await refreshRunningProfiles(scope.rootPath, profiles, { isCurrent });
       } catch (error) {
+        if (!isCurrent()) {
+          return;
+        }
         setMessage(windowAutomationErrorMessage(error));
         finishWindowOperation(
           operation,
@@ -3291,11 +3373,13 @@ function App() {
             reason: "sync-layout-error"
           })
         );
-        await refreshRunningProfiles();
+        await refreshRunningProfiles(scope.rootPath, profiles, { isCurrent });
       } finally {
-        setWindowSyncing(false);
+        if (isCurrent()) {
+          setWindowSyncing(false);
+        }
       }
-    });
+    }, { rejectDuringRootSwitch: true });
   }
 
   function stopBulkOpenQueue() {

@@ -139,7 +139,7 @@ describe("useBrowserOperations", () => {
     expect(onMessage).toHaveBeenCalledWith("主号 正在执行账号启动，请稍后再试");
   });
 
-  test("根切换清理指定窗口操作时保留平铺和同步 operation", () => {
+  test("根切换清理全部窗口 operation，同时保留非窗口 operation", () => {
     const { result } = renderHook(() =>
       useBrowserOperations({
         rootPath: "/tmp/multichrome",
@@ -157,11 +157,17 @@ describe("useBrowserOperations", () => {
       result.current.startWindowOperation("前置窗口", [accountOne]);
       result.current.startWindowOperation("平铺窗口", [accountOne]);
       result.current.startWindowOperation("同步布局", [accountOne]);
+      result.current.startBulkOpenUrlOperation("批量打开", "https://example.com", [
+        accountOne
+      ]);
       result.current.clearWindowActionOperations([
         "检查窗口",
         "前置窗口",
         "关闭运行账号",
-        "重启运行账号"
+        "重启运行账号",
+        "平铺窗口",
+        "预览同步",
+        "同步布局"
       ]);
       result.current.finishWindowOperation(windowOperation, "succeeded", {
         inspectedCount: 1
@@ -169,8 +175,7 @@ describe("useBrowserOperations", () => {
     });
 
     expect(result.current.browserOperations).toEqual([
-      expect.objectContaining({ sourceLabel: "同步布局", status: "running" }),
-      expect.objectContaining({ sourceLabel: "平铺窗口", status: "running" })
+      expect.objectContaining({ sourceLabel: "批量打开", status: "running" })
     ]);
   });
 

@@ -25,10 +25,12 @@ export interface WindowSyncControllerDependencies {
 
 export interface WindowSyncControllerOptions {
   firstFailedError?: unknown;
+  shouldContinue?: () => boolean;
 }
 
 export interface WindowSyncPlanReaderDependencies {
   readWindows: (profile: ChromeProfile, purpose: string) => Promise<ChromeWindowInfo[]>;
+  shouldContinue?: () => boolean;
 }
 
 export interface WindowSyncControllerResult {
@@ -40,6 +42,7 @@ export interface WindowSyncControllerResult {
   noWindowCount: number;
   minimizedCount: number;
   entries: WindowSyncResultEntry[];
+  cancelled?: boolean;
 }
 
 export interface WindowSyncPreviewDetails {
@@ -61,18 +64,42 @@ export async function readWindowSyncPlanForProfiles(
   profiles: ChromeProfile[],
   sourceProfile: ChromeProfile,
   dependencies: WindowSyncPlanReaderDependencies
-): Promise<{ syncPlan: WindowSyncPlan; firstFailedError: unknown | null }> {
+): Promise<{
+  syncPlan: WindowSyncPlan;
+  firstFailedError: unknown | null;
+  cancelled?: boolean;
+}> {
   const registryInputs: BrowserWindowRegistryInput[] = [];
   let firstFailedError: unknown | null = null;
+  const buildPlan = () =>
+    buildWindowLayoutSyncPlan(
+      buildPrimaryWindowRegistry(registryInputs),
+      sourceProfile.id
+    );
+  const cancelled = () => ({
+    syncPlan: buildPlan(),
+    firstFailedError,
+    cancelled: true as const
+  });
+
+  if (dependencies.shouldContinue && !dependencies.shouldContinue()) {
+    return cancelled();
+  }
 
   try {
     const sourceWindows = await dependencies.readWindows(sourceProfile, "读取主窗口");
+    if (dependencies.shouldContinue && !dependencies.shouldContinue()) {
+      return cancelled();
+    }
     registryInputs.push({
       profileId: sourceProfile.id,
       profileName: sourceProfile.name,
       windows: sourceWindows
     });
   } catch (error) {
+    if (dependencies.shouldContinue && !dependencies.shouldContinue()) {
+      return cancelled();
+    }
     firstFailedError = error;
     registryInputs.push({
       profileId: sourceProfile.id,
@@ -82,8 +109,7 @@ export async function readWindowSyncPlanForProfiles(
     });
   }
 
-  let windowRegistry = buildPrimaryWindowRegistry(registryInputs);
-  let syncPlan = buildWindowLayoutSyncPlan(windowRegistry, sourceProfile.id);
+  let syncPlan = buildPlan();
   if (syncPlan.sourceStatus !== "ready") {
     return { syncPlan, firstFailedError };
   }
@@ -92,15 +118,24 @@ export async function readWindowSyncPlanForProfiles(
     if (profile.id === sourceProfile.id) {
       continue;
     }
+    if (dependencies.shouldContinue && !dependencies.shouldContinue()) {
+      return cancelled();
+    }
 
     try {
       const windows = await dependencies.readWindows(profile, "检查同步窗口");
+      if (dependencies.shouldContinue && !dependencies.shouldContinue()) {
+        return cancelled();
+      }
       registryInputs.push({
         profileId: profile.id,
         profileName: profile.name,
         windows
       });
     } catch (error) {
+      if (dependencies.shouldContinue && !dependencies.shouldContinue()) {
+        return cancelled();
+      }
       firstFailedError ??= error;
       registryInputs.push({
         profileId: profile.id,
@@ -111,8 +146,7 @@ export async function readWindowSyncPlanForProfiles(
     }
   }
 
-  windowRegistry = buildPrimaryWindowRegistry(registryInputs);
-  syncPlan = buildWindowLayoutSyncPlan(windowRegistry, sourceProfile.id);
+  syncPlan = buildPlan();
   return { syncPlan, firstFailedError };
 }
 
@@ -149,11 +183,31 @@ export async function executeWindowSyncPlan(
   let firstFailedError: unknown | null = options.firstFailedError ?? null;
   const syncedProfileIds: string[] = [];
   const entries: WindowSyncResultEntry[] = [];
+  const buildResult = (cancelled = false): WindowSyncControllerResult => ({
+    syncedCount,
+    unchangedCount,
+    failedCount,
+    firstFailedError,
+    syncedProfileIds,
+    noWindowCount: plan.noWindowCount,
+    minimizedCount: plan.minimizedCount,
+    entries,
+    ...(cancelled ? { cancelled: true } : {})
+  });
 
   for (const placement of plan.placements) {
+    if (options.shouldContinue && !options.shouldContinue()) {
+      return buildResult(true);
+    }
     try {
       await dependencies.setBounds(placement.profileId, placement.bounds);
+      if (options.shouldContinue && !options.shouldContinue()) {
+        return buildResult(true);
+      }
       const windows = await dependencies.readWindows(placement.profileId);
+      if (options.shouldContinue && !options.shouldContinue()) {
+        return buildResult(true);
+      }
       if (!windows[0] || !windowMatchesBounds(windows[0], placement.bounds)) {
         unchangedCount += 1;
         entries.push({
@@ -174,6 +228,9 @@ export async function executeWindowSyncPlan(
         error: null
       });
     } catch (error) {
+      if (options.shouldContinue && !options.shouldContinue()) {
+        return buildResult(true);
+      }
       failedCount += 1;
       if (firstFailedError === null) {
         firstFailedError = error;
@@ -187,14 +244,5 @@ export async function executeWindowSyncPlan(
     }
   }
 
-  return {
-    syncedCount,
-    unchangedCount,
-    failedCount,
-    firstFailedError,
-    syncedProfileIds,
-    noWindowCount: plan.noWindowCount,
-    minimizedCount: plan.minimizedCount,
-    entries
-  };
+  return buildResult();
 }
