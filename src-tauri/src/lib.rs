@@ -924,16 +924,32 @@ fn profile_environment_health_issues(
         ));
         return issues;
     }
-    if !root_path.join("profiles").is_dir() {
-        issues.push(environment_health_issue(
-            RootHealthSeverity::Error,
-            "profiles_dir_missing",
-            "Profile 目录缺失",
-            "profiles 文件夹不存在，账号配置目录无法定位。",
-            Some(&root_path.join("profiles")),
-            None,
-        ));
-    }
+    let profiles_root = root_path.join("profiles");
+    let profiles_root_is_real = match std::fs::symlink_metadata(&profiles_root) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            issues.push(environment_health_issue(
+                RootHealthSeverity::Error,
+                "profiles_dir_symlink",
+                "Profile 根目录不能是符号链接",
+                "profiles 文件夹是符号链接，继续操作可能访问根目录外的数据。请手动恢复为真实文件夹。",
+                Some(&profiles_root),
+                None,
+            ));
+            false
+        }
+        Ok(metadata) if metadata.is_dir() => true,
+        _ => {
+            issues.push(environment_health_issue(
+                RootHealthSeverity::Error,
+                "profiles_dir_missing",
+                "Profile 目录缺失",
+                "profiles 文件夹不存在，账号配置目录无法定位。",
+                Some(&profiles_root),
+                None,
+            ));
+            false
+        }
+    };
     if load_profile_document(root_path).is_err() {
         issues.push(environment_health_issue(
             RootHealthSeverity::Error,
@@ -956,6 +972,22 @@ fn profile_environment_health_issues(
         return issues;
     }
     if !registered {
+        return issues;
+    }
+    if !profiles_root_is_real {
+        return issues;
+    }
+    if std::fs::symlink_metadata(profile_dir)
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        issues.push(environment_health_issue(
+            RootHealthSeverity::Error,
+            "profile_dir_symlink",
+            "Profile 文件夹不能是符号链接",
+            "该账号的 Profile 文件夹是符号链接，继续操作可能访问根目录外的数据。请手动恢复为真实文件夹。",
+            Some(profile_dir),
+            Some(profile_id),
+        ));
         return issues;
     }
     if let Some(issue) = profile_environment_directory_issue(
@@ -3065,6 +3097,10 @@ mod tests {
         );
 
         assert!(!snapshot.managed_profile_root);
+        assert!(snapshot
+            .health_issues
+            .iter()
+            .any(|issue| issue.code == "profiles_dir_symlink"));
     }
 
     #[cfg(unix)]
@@ -3103,6 +3139,10 @@ mod tests {
         );
 
         assert!(!snapshot.managed_profile_root);
+        assert!(snapshot
+            .health_issues
+            .iter()
+            .any(|issue| issue.code == "profile_dir_symlink"));
     }
 
     #[test]

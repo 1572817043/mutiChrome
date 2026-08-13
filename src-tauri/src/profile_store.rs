@@ -296,7 +296,7 @@ static ATOMIC_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub fn init_root(root: &Path) -> Result<RootStatus, String> {
     fs::create_dir_all(root.join("app-data")).map_err(|error| error.to_string())?;
-    fs::create_dir_all(root.join("profiles")).map_err(|error| error.to_string())?;
+    ensure_real_profiles_dir(root)?;
 
     let document_path = root.join("app-data/profiles.json");
     if !document_path.exists() {
@@ -369,13 +369,13 @@ pub fn create_full_profile_backup(
         .iter()
         .map(|profile| profile.id.clone())
         .collect::<Vec<_>>();
+    let profile_dirs = resolve_profile_dirs(root, &profile_ids)?;
     let backup_document = filtered_document_for_profiles(&document, &profile_ids);
     let backup_path =
         ensure_profile_backups_dir(root)?.join(format!("full-profiles-{}", timestamp_millis()));
 
     fs::create_dir_all(backup_path.join("profiles")).map_err(|error| error.to_string())?;
-    for profile_id in &profile_ids {
-        let source = safe_profile_dir(root, profile_id)?;
+    for (profile_id, source) in profile_ids.iter().zip(profile_dirs) {
         let destination = backup_path.join("profiles").join(profile_id);
         copy_directory(&source, &destination)?;
     }
@@ -728,16 +728,31 @@ pub fn check_root_health(root: &Path) -> RootHealthReport {
         ));
     }
 
-    if !profiles_path.is_dir() {
-        issues.push(health_issue(
-            RootHealthSeverity::Error,
-            "profiles_dir_missing",
-            "Profile 目录缺失",
-            "profiles 文件夹不存在，Chrome 配置文件夹无法定位。",
-            Some(&profiles_path),
-            None,
-        ));
-    }
+    let profiles_dir_is_real = match fs::symlink_metadata(&profiles_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            issues.push(health_issue(
+                RootHealthSeverity::Error,
+                "profiles_dir_symlink",
+                "Profile 根目录不能是符号链接",
+                "profiles 文件夹是符号链接，继续操作可能访问根目录外的数据。请手动恢复为真实文件夹。",
+                Some(&profiles_path),
+                None,
+            ));
+            false
+        }
+        Ok(metadata) if metadata.is_dir() => true,
+        _ => {
+            issues.push(health_issue(
+                RootHealthSeverity::Error,
+                "profiles_dir_missing",
+                "Profile 目录缺失",
+                "profiles 文件夹不存在，Chrome 配置文件夹无法定位。",
+                Some(&profiles_path),
+                None,
+            ));
+            false
+        }
+    };
 
     let document_file = document_path(root);
     if !document_file.exists() {
@@ -777,7 +792,9 @@ pub fn check_root_health(root: &Path) -> RootHealthReport {
                         ));
                     }
 
-                    inspect_registered_profile(root, &profile.id, &mut issues);
+                    if profiles_dir_is_real {
+                        inspect_registered_profile(root, &profile.id, &mut issues);
+                    }
                 }
             }
             Err(error) => issues.push(health_issue(
@@ -791,7 +808,9 @@ pub fn check_root_health(root: &Path) -> RootHealthReport {
         }
     }
 
-    inspect_profile_directory_entries(&profiles_path, &registered_ids, &mut issues);
+    if profiles_dir_is_real {
+        inspect_profile_directory_entries(&profiles_path, &registered_ids, &mut issues);
+    }
     health_report(root, profile_count, issues)
 }
 
@@ -826,8 +845,12 @@ pub fn repair_root_health(root: &Path) -> Result<RootRepairResult, String> {
     }
 
     let profiles_path = root.join("profiles");
-    if !profiles_path.exists() {
-        fs::create_dir_all(&profiles_path).map_err(|error| error.to_string())?;
+    let profiles_were_missing = matches!(
+        fs::symlink_metadata(&profiles_path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    );
+    let profiles_path = ensure_real_profiles_dir(root)?;
+    if profiles_were_missing {
         actions.push(repair_action(
             "profiles_dir_created",
             "已创建 Profile 目录",
@@ -868,22 +891,23 @@ pub fn repair_root_health(root: &Path) -> Result<RootRepairResult, String> {
         ));
     }
 
-    if profiles_path.is_dir() {
-        if let Ok(document) = load_profile_document(root) {
-            for profile in document.profiles {
-                let Ok(path) = safe_profile_dir(root, &profile.id) else {
-                    continue;
-                };
-                if !path.exists() {
-                    fs::create_dir_all(&path).map_err(|error| error.to_string())?;
-                    actions.push(repair_action(
-                        "profile_dir_created",
-                        "已补建 Profile 文件夹",
-                        "账号索引里存在该账号，已补建缺失的 profile 文件夹。",
-                        Some(&path),
-                        Some(&profile.id),
-                    ));
-                }
+    if let Ok(document) = load_profile_document(root) {
+        let profile_ids = document
+            .profiles
+            .iter()
+            .map(|profile| profile.id.clone())
+            .collect::<Vec<_>>();
+        let profile_dirs = resolve_profile_dirs(root, &profile_ids)?;
+        for (profile, path) in document.profiles.into_iter().zip(profile_dirs) {
+            if !path.exists() {
+                fs::create_dir(&path).map_err(|error| error.to_string())?;
+                actions.push(repair_action(
+                    "profile_dir_created",
+                    "已补建 Profile 文件夹",
+                    "账号索引里存在该账号，已补建缺失的 profile 文件夹。",
+                    Some(&path),
+                    Some(&profile.id),
+                ));
             }
         }
     }
@@ -1107,10 +1131,17 @@ fn profile_marker_path(profile_path: &Path) -> PathBuf {
 
 pub fn save_profile_document(root: &Path, document: &ProfileDocument) -> Result<(), String> {
     fs::create_dir_all(root.join("app-data")).map_err(|error| error.to_string())?;
-    fs::create_dir_all(root.join("profiles")).map_err(|error| error.to_string())?;
-    for profile in &document.profiles {
-        fs::create_dir_all(safe_profile_dir(root, &profile.id)?)
-            .map_err(|error| error.to_string())?;
+    ensure_real_profiles_dir(root)?;
+    let profile_ids = document
+        .profiles
+        .iter()
+        .map(|profile| profile.id.clone())
+        .collect::<Vec<_>>();
+    let profile_dirs = resolve_profile_dirs(root, &profile_ids)?;
+    for path in profile_dirs {
+        if !path.exists() {
+            fs::create_dir(&path).map_err(|error| error.to_string())?;
+        }
     }
     let json = serde_json::to_string_pretty(document).map_err(|error| error.to_string())?;
     fs::write(document_path(root), format!("{json}\n")).map_err(|error| error.to_string())
@@ -1154,8 +1185,12 @@ fn normalize_browser_launch_events(mut events: Vec<BrowserLaunchEvent>) -> Vec<B
 }
 
 pub fn ensure_profile_dir(root: &Path, profile_id: &str) -> Result<PathBuf, String> {
-    let path = safe_profile_dir(root, profile_id)?;
-    fs::create_dir_all(&path).map_err(|error| error.to_string())?;
+    validate_profile_id(profile_id)?;
+    let profiles_dir = ensure_real_profiles_dir(root)?;
+    let path = safe_profile_dir_in(&profiles_dir, profile_id)?;
+    if !path.exists() {
+        fs::create_dir(&path).map_err(|error| error.to_string())?;
+    }
     Ok(path)
 }
 
@@ -1225,7 +1260,61 @@ pub fn validated_profile_dir(root: &Path, profile_id: &str) -> Result<PathBuf, S
 
 fn safe_profile_dir(root: &Path, profile_id: &str) -> Result<PathBuf, String> {
     validate_profile_id(profile_id)?;
-    Ok(profile_dir(root, profile_id))
+    let profiles_dir = real_profiles_dir(root)?;
+    safe_profile_dir_in(&profiles_dir, profile_id)
+}
+
+fn resolve_profile_dirs(root: &Path, profile_ids: &[String]) -> Result<Vec<PathBuf>, String> {
+    profile_ids
+        .iter()
+        .map(|profile_id| safe_profile_dir(root, profile_id))
+        .collect()
+}
+
+fn safe_profile_dir_in(profiles_dir: &Path, profile_id: &str) -> Result<PathBuf, String> {
+    let path = profiles_dir.join(profile_id);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err("Profile 目录不能是符号链接".to_string())
+        }
+        Ok(metadata) if metadata.is_dir() => Ok(path),
+        Ok(_) => Err("Profile 路径不是文件夹".to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(path),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn real_profiles_dir(root: &Path) -> Result<PathBuf, String> {
+    let path = root.join("profiles");
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err("profiles 目录不能是符号链接".to_string())
+        }
+        Ok(metadata) if metadata.is_dir() => Ok(path),
+        Ok(_) => Err("profiles 目录不是文件夹".to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err("profiles 目录不存在".to_string())
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn ensure_real_profiles_dir(root: &Path) -> Result<PathBuf, String> {
+    let path = root.join("profiles");
+    match fs::symlink_metadata(&path) {
+        Ok(_) => real_profiles_dir(root),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir_all(root).map_err(|error| error.to_string())?;
+            match fs::create_dir(&path) {
+                Ok(()) => real_profiles_dir(root),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    real_profiles_dir(root)
+                }
+                Err(error) => Err(error.to_string()),
+            }
+        }
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 fn validate_profile_id(profile_id: &str) -> Result<(), String> {
@@ -1359,6 +1448,14 @@ fn can_write(root: &Path) -> bool {
 fn inspect_registered_profile(root: &Path, profile_id: &str, issues: &mut Vec<RootHealthIssue>) {
     let path = profile_dir(root, profile_id);
     match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => issues.push(health_issue(
+            RootHealthSeverity::Error,
+            "profile_dir_symlink",
+            "Profile 文件夹不能是符号链接",
+            "账号对应的 Profile 文件夹是符号链接，继续操作可能访问根目录外的数据。请手动恢复为真实文件夹。",
+            Some(&path),
+            Some(profile_id),
+        )),
         Ok(metadata) if metadata.is_dir() => {
             if directory_is_empty(&path).unwrap_or(false) {
                 issues.push(health_issue(
@@ -1418,6 +1515,18 @@ fn inspect_profile_directory_entries(
         let path = entry.path();
         let id = entry.file_name().to_string_lossy().to_string();
         match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                if !registered_ids.contains(&id) {
+                    issues.push(health_issue(
+                        RootHealthSeverity::Error,
+                        "profile_dir_symlink",
+                        "Profile 文件夹不能是符号链接",
+                        "profiles 下的 Profile 文件夹是符号链接，继续操作可能访问根目录外的数据。请手动恢复为真实文件夹。",
+                        Some(&path),
+                        Some(&id),
+                    ));
+                }
+            }
             Ok(metadata) if metadata.is_dir() => {
                 if !registered_ids.contains(&id) {
                     issues.push(health_issue(
@@ -2551,6 +2660,233 @@ mod tests {
 
         assert_eq!(backups_dir, temp_dir.path().join("app-data/backups"));
         assert!(backups_dir.is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_operations_reject_a_symlinked_profiles_root_without_touching_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let external_dir = tempfile::tempdir().expect("external dir");
+        init_root(temp_dir.path()).expect("init root");
+        let document = ProfileDocument {
+            version: 1,
+            settings: AppSettings::default(),
+            profiles: vec![test_profile("account-001")],
+            projects: Vec::new(),
+        };
+        let json = serde_json::to_string_pretty(&document).expect("serialize document");
+        fs::write(temp_dir.path().join("app-data/profiles.json"), json)
+            .expect("write document");
+        fs::write(external_dir.path().join("sentinel"), b"outside")
+            .expect("write sentinel");
+        fs::remove_dir_all(temp_dir.path().join("profiles")).expect("remove profiles root");
+        symlink(external_dir.path(), temp_dir.path().join("profiles")).expect("link profiles root");
+
+        let source = tempfile::tempdir().expect("source dir");
+
+        for result in [
+            validated_profile_dir(temp_dir.path(), "account-001").map(|_| ()),
+            ensure_profile_dir(temp_dir.path(), "account-001").map(|_| ()),
+            delete_profile_dir(temp_dir.path(), "account-001"),
+            copy_profile_dir(temp_dir.path(), "account-001", "account-002"),
+            import_profile_dir(temp_dir.path(), source.path(), "account-003", None),
+            save_profile_document(temp_dir.path(), &document),
+            repair_root_health(temp_dir.path()).map(|_| ()),
+        ] {
+            assert!(result.expect_err("profiles symlink must be rejected").contains("profiles 目录不能是符号链接"));
+        }
+        assert!(create_full_profile_backup(temp_dir.path(), &[])
+            .expect_err("full backup must reject profiles symlink")
+            .contains("profiles 目录不能是符号链接"));
+        assert!(preview_full_profile_backup(temp_dir.path(), &[])
+            .expect_err("full backup preview must reject profiles symlink")
+            .contains("profiles 目录不能是符号链接"));
+        assert_eq!(fs::read(external_dir.path().join("sentinel")).expect("read sentinel"), b"outside");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_health_reports_profiles_root_symlinks_as_errors() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let external_dir = tempfile::tempdir().expect("external dir");
+        init_root(temp_dir.path()).expect("init root");
+        fs::remove_dir_all(temp_dir.path().join("profiles")).expect("remove profiles root");
+        symlink(external_dir.path(), temp_dir.path().join("profiles")).expect("link profiles root");
+
+        let health = check_root_health(temp_dir.path());
+
+        assert!(health
+            .issues
+            .iter()
+            .any(|issue| issue.code == "profiles_dir_symlink" && issue.severity == RootHealthSeverity::Error));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_health_reports_profile_directory_symlinks_as_errors() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let external_dir = tempfile::tempdir().expect("external dir");
+        init_root(temp_dir.path()).expect("init root");
+        let document = ProfileDocument {
+            version: 1,
+            settings: AppSettings::default(),
+            profiles: vec![test_profile("account-001")],
+            projects: Vec::new(),
+        };
+        save_profile_document(temp_dir.path(), &document).expect("save document");
+        fs::remove_dir_all(temp_dir.path().join("profiles/account-001"))
+            .expect("remove profile dir");
+        symlink(
+            external_dir.path(),
+            temp_dir.path().join("profiles/account-001"),
+        )
+        .expect("link profile dir");
+
+        let health = check_root_health(temp_dir.path());
+
+        assert!(health
+            .issues
+            .iter()
+            .any(|issue| issue.code == "profile_dir_symlink" && issue.severity == RootHealthSeverity::Error));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_operations_reject_a_symlinked_profile_directory_without_touching_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let external_dir = tempfile::tempdir().expect("external dir");
+        init_root(temp_dir.path()).expect("init root");
+        let document = ProfileDocument {
+            version: 1,
+            settings: AppSettings::default(),
+            profiles: vec![test_profile("account-001")],
+            projects: Vec::new(),
+        };
+        save_profile_document(temp_dir.path(), &document).expect("save document");
+        fs::write(external_dir.path().join("sentinel"), b"outside")
+            .expect("write sentinel");
+        fs::remove_dir_all(temp_dir.path().join("profiles/account-001"))
+            .expect("remove profile dir");
+        symlink(
+            external_dir.path(),
+            temp_dir.path().join("profiles/account-001"),
+        )
+        .expect("link profile dir");
+
+        let source = tempfile::tempdir().expect("source dir");
+        for result in [
+            validated_profile_dir(temp_dir.path(), "account-001").map(|_| ()),
+            ensure_profile_dir(temp_dir.path(), "account-001").map(|_| ()),
+            delete_profile_dir(temp_dir.path(), "account-001"),
+            copy_profile_dir(temp_dir.path(), "account-001", "account-002"),
+            import_profile_dir(temp_dir.path(), source.path(), "account-001", None),
+            repair_root_health(temp_dir.path()).map(|_| ()),
+        ] {
+            assert!(result.expect_err("profile symlink must be rejected").contains("Profile 目录不能是符号链接"));
+        }
+        assert!(create_full_profile_backup(temp_dir.path(), &[])
+            .expect_err("full backup must reject profile symlink")
+            .contains("Profile 目录不能是符号链接"));
+        assert!(preview_full_profile_backup(temp_dir.path(), &[])
+            .expect_err("full backup preview must reject profile symlink")
+            .contains("Profile 目录不能是符号链接"));
+        assert_eq!(fs::read(external_dir.path().join("sentinel")).expect("read sentinel"), b"outside");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_profile_document_preflights_all_profiles_before_creating_any_directory() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let external_dir = tempfile::tempdir().expect("external dir");
+        init_root(temp_dir.path()).expect("init root");
+        symlink(
+            external_dir.path(),
+            temp_dir.path().join("profiles/account-002"),
+        )
+        .expect("link profile dir");
+        let document = ProfileDocument {
+            version: 1,
+            settings: AppSettings::default(),
+            profiles: vec![test_profile("account-001"), test_profile("account-002")],
+            projects: Vec::new(),
+        };
+
+        let error = save_profile_document(temp_dir.path(), &document)
+            .expect_err("symlink must reject whole save");
+
+        assert!(error.contains("Profile 目录不能是符号链接"));
+        assert!(!temp_dir.path().join("profiles/account-001").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repair_root_health_preflights_all_profiles_before_creating_any_directory() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let external_dir = tempfile::tempdir().expect("external dir");
+        init_root(temp_dir.path()).expect("init root");
+        let document = ProfileDocument {
+            version: 1,
+            settings: AppSettings::default(),
+            profiles: vec![test_profile("account-001"), test_profile("account-002")],
+            projects: Vec::new(),
+        };
+        let json = serde_json::to_string_pretty(&document).expect("serialize document");
+        fs::write(temp_dir.path().join("app-data/profiles.json"), json)
+            .expect("write document");
+        symlink(
+            external_dir.path(),
+            temp_dir.path().join("profiles/account-002"),
+        )
+        .expect("link profile dir");
+
+        let error = repair_root_health(temp_dir.path()).expect_err("symlink must reject repair");
+
+        assert!(error.contains("Profile 目录不能是符号链接"));
+        assert!(!temp_dir.path().join("profiles/account-001").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_profile_backup_preflights_all_profiles_before_creating_a_backup_directory() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let external_dir = tempfile::tempdir().expect("external dir");
+        init_root(temp_dir.path()).expect("init root");
+        let document = ProfileDocument {
+            version: 1,
+            settings: AppSettings::default(),
+            profiles: vec![test_profile("account-001"), test_profile("account-002")],
+            projects: Vec::new(),
+        };
+        save_profile_document(temp_dir.path(), &document).expect("save document");
+        fs::write(temp_dir.path().join("profiles/account-001/Local State"), b"profile")
+            .expect("write profile");
+        fs::remove_dir_all(temp_dir.path().join("profiles/account-002"))
+            .expect("remove profile dir");
+        symlink(
+            external_dir.path(),
+            temp_dir.path().join("profiles/account-002"),
+        )
+        .expect("link profile dir");
+
+        let error = create_full_profile_backup(temp_dir.path(), &[])
+            .expect_err("symlink must reject full backup");
+
+        assert!(error.contains("Profile 目录不能是符号链接"));
+        assert!(!temp_dir.path().join("app-data/backups").exists());
     }
 
     fn test_profile(id: &str) -> StoredProfile {
