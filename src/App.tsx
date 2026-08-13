@@ -393,6 +393,7 @@ function App() {
   const bulkOpenCancelledRef = useRef(false);
   const projectOpenCancelledRef = useRef(false);
   const bulkOpenDelayResolveRef = useRef<(() => void) | null>(null);
+  const projectOpenDelayResolveRef = useRef<(() => void) | null>(null);
   const {
     sessionsById: browserSessionsById,
     runningProfileIds,
@@ -410,6 +411,7 @@ function App() {
     browserOperations,
     clearWindowActionOperations,
     clearProfileOpenOperations,
+    clearLaunchQueueOperations,
     startWindowOperation,
     finishWindowOperation,
     startProfileOpenOperation,
@@ -811,6 +813,13 @@ function App() {
     rootSwitchPendingTokenRef.current = token;
     clearWindowActionOperations(ROOT_LIFECYCLE_WINDOW_ACTIONS);
     clearProfileOpenOperations();
+    clearLaunchQueueOperations();
+    bulkOpenCancelledRef.current = true;
+    projectOpenCancelledRef.current = true;
+    bulkOpenDelayResolveRef.current?.();
+    bulkOpenDelayResolveRef.current = null;
+    projectOpenDelayResolveRef.current?.();
+    projectOpenDelayResolveRef.current = null;
     if (
       windowActionLockRef.current &&
       ROOT_LIFECYCLE_WINDOW_ACTIONS.includes(
@@ -822,6 +831,9 @@ function App() {
     }
     setWindowQuitting(false);
     setWindowRestarting(false);
+    setBulkOpenRunning(false);
+    setOpeningProjectId(null);
+    setLastBulkLaunchRetry(null);
     return token;
   }
 
@@ -1899,12 +1911,16 @@ function App() {
     }
 
     projectOpenCancelledRef.current = true;
-    bulkOpenDelayResolveRef.current?.();
-    bulkOpenDelayResolveRef.current = null;
+    projectOpenDelayResolveRef.current?.();
+    projectOpenDelayResolveRef.current = null;
     setMessage("正在停止项目打开...");
   }
 
   async function openProject(project: AirdropProject, projectUrlId?: string) {
+    if (rootSwitchPendingTokenRef.current !== null) {
+      setMessage("配置根目录正在切换，请稍候");
+      return;
+    }
     if (openingProjectId) {
       setMessage("已有项目正在打开");
       return;
@@ -1934,6 +1950,13 @@ function App() {
       return;
     }
 
+    const scope: RootLifecycleScope = {
+      rootPath,
+      token: rootLifecycleTokenRef.current
+    };
+    const isCurrent = () => isCurrentRootLifecycleScope(scope);
+    const isStopped = () => projectOpenCancelledRef.current || !isCurrent();
+
     const intervalMilliseconds =
       normalizeBulkOpenIntervalSeconds(String(project.intervalSeconds)) * 1000;
     const openedIds = new Set<string>();
@@ -1955,14 +1978,20 @@ function App() {
     setOpeningProjectId(project.id);
     try {
       for (const [index, profile] of queuedProfiles.entries()) {
-        if (projectOpenCancelledRef.current) {
+        if (isStopped()) {
           break;
         }
 
         setMessage(`正在打开项目 ${project.name} ${index + 1} / ${queuedProfiles.length}`);
         let projectProfileResult: BrowserLaunchResult | null = null;
         for (const projectUrl of launchUrls) {
-          const result = await launchChromeProfile(profile, projectUrl.url);
+          if (isStopped()) {
+            break;
+          }
+          const result = await launchChromeProfile(profile, projectUrl.url, isCurrent);
+          if (isStopped()) {
+            break;
+          }
           projectProfileResult = result;
           if (!result.ok) {
             break;
@@ -1977,10 +2006,17 @@ function App() {
 
         if (
           index < queuedProfiles.length - 1 &&
-          !projectOpenCancelledRef.current
+          !isStopped()
         ) {
-          await waitForBulkOpenInterval(intervalMilliseconds);
+          await waitForBulkOpenInterval(
+            intervalMilliseconds,
+            projectOpenDelayResolveRef
+          );
         }
+      }
+
+      if (!isCurrent()) {
+        return;
       }
 
       const now = new Date().toISOString();
@@ -2011,7 +2047,7 @@ function App() {
         queuedProfiles.length,
         stopped
       );
-      finishLaunchQueueOperation(runningOperation, launchSummary);
+      finishLaunchQueueOperation(runningOperation, launchSummary, isCurrent);
       const finalMessage = formatProjectLaunchQueueMessage(
         launchSummary,
         project.name,
@@ -2021,13 +2057,23 @@ function App() {
         launchResults,
         profileById,
         `项目 ${project.name}`,
-        launchUrls.length === 1 ? launchUrls[0].url : `${launchUrls.length} 个网址`
+        launchUrls.length === 1 ? launchUrls[0].url : `${launchUrls.length} 个网址`,
+        scope
       );
-      await persist(nextProfiles, finalMessage, nextSettings, nextProjects);
+      await persist(
+        nextProfiles,
+        finalMessage,
+        nextSettings,
+        nextProjects,
+        scope.rootPath,
+        isCurrent
+      );
     } finally {
-      projectOpenCancelledRef.current = false;
-      bulkOpenDelayResolveRef.current = null;
-      setOpeningProjectId(null);
+      if (isCurrent()) {
+        projectOpenCancelledRef.current = false;
+        projectOpenDelayResolveRef.current = null;
+        setOpeningProjectId(null);
+      }
     }
   }
 
@@ -3212,7 +3258,10 @@ function App() {
     setMessage("正在停止批量打开...");
   }
 
-  function waitForBulkOpenInterval(milliseconds: number) {
+  function waitForBulkOpenInterval(
+    milliseconds: number,
+    delayResolveRef: { current: (() => void) | null }
+  ) {
     return new Promise<void>((resolve) => {
       let resolved = false;
       let finish: () => void;
@@ -3222,13 +3271,13 @@ function App() {
         }
 
         resolved = true;
-        if (bulkOpenDelayResolveRef.current === finish) {
-          bulkOpenDelayResolveRef.current = null;
+        if (delayResolveRef.current === finish) {
+          delayResolveRef.current = null;
         }
         resolve();
       };
 
-      bulkOpenDelayResolveRef.current = finish;
+      delayResolveRef.current = finish;
       window.setTimeout(finish, milliseconds);
     });
   }
@@ -3241,6 +3290,10 @@ function App() {
       sourceLabel: string;
     }
   ) {
+    if (rootSwitchPendingTokenRef.current !== null) {
+      setMessage("配置根目录正在切换，请稍候");
+      return;
+    }
     if (queuedProfiles.length === 0) {
       setMessage(options.emptyMessage);
       return;
@@ -3252,6 +3305,13 @@ function App() {
     if (!canStartBrowserOperationForProfiles(queuedProfiles)) {
       return;
     }
+
+    const scope: RootLifecycleScope = {
+      rootPath,
+      token: rootLifecycleTokenRef.current
+    };
+    const isCurrent = () => isCurrentRootLifecycleScope(scope);
+    const isStopped = () => bulkOpenCancelledRef.current || !isCurrent();
 
     const launchUrl = rawLaunchUrl.trim()
       ? normalizeLaunchUrl(rawLaunchUrl)
@@ -3281,12 +3341,15 @@ function App() {
 
     try {
       for (const [index, profile] of queuedProfiles.entries()) {
-        if (bulkOpenCancelledRef.current) {
+        if (isStopped()) {
           break;
         }
 
         setMessage(`正在打开 ${index + 1} / ${queuedProfiles.length}：${profile.name}`);
-        const result = await launchChromeProfile(profile, launchUrl);
+        const result = await launchChromeProfile(profile, launchUrl, isCurrent);
+        if (isStopped()) {
+          break;
+        }
         launchResults.push(result);
         if (result.ok) {
           openedIds.add(profile.id);
@@ -3294,10 +3357,14 @@ function App() {
 
         if (
           index < queuedProfiles.length - 1 &&
-          !bulkOpenCancelledRef.current
+          !isStopped()
         ) {
-          await waitForBulkOpenInterval(intervalMilliseconds);
+          await waitForBulkOpenInterval(intervalMilliseconds, bulkOpenDelayResolveRef);
         }
+      }
+
+      if (!isCurrent()) {
+        return;
       }
 
       const stopped = bulkOpenCancelledRef.current;
@@ -3307,12 +3374,18 @@ function App() {
         queuedProfiles.length,
         stopped
       );
-      finishLaunchQueueOperation(runningOperation, launchSummary);
+      finishLaunchQueueOperation(runningOperation, launchSummary, isCurrent);
       const finalMessage = formatBulkLaunchQueueMessage(launchSummary);
       const profileById = new Map(
         queuedProfiles.map((profile) => [profile.id, profile])
       );
-      recordLaunchResults(launchResults, profileById, options.sourceLabel, launchUrl);
+      recordLaunchResults(
+        launchResults,
+        profileById,
+        options.sourceLabel,
+        launchUrl,
+        scope
+      );
       const retryProfileIds = selectRetryableBrowserLaunchProfileIds(
         launchResults,
         queuedProfileIds
@@ -3337,15 +3410,26 @@ function App() {
               ? settings.recentUrls
               : [launchUrl, ...settings.recentUrls]
         });
-        await persist(nextProfiles, finalMessage, nextSettings);
+        await persist(
+          nextProfiles,
+          finalMessage,
+          nextSettings,
+          undefined,
+          scope.rootPath,
+          isCurrent
+        );
         return;
       }
 
-      setMessage(finalMessage);
+      if (isCurrent()) {
+        setMessage(finalMessage);
+      }
     } finally {
-      bulkOpenCancelledRef.current = false;
-      bulkOpenDelayResolveRef.current = null;
-      setBulkOpenRunning(false);
+      if (isCurrent()) {
+        bulkOpenCancelledRef.current = false;
+        bulkOpenDelayResolveRef.current = null;
+        setBulkOpenRunning(false);
+      }
     }
   }
 
