@@ -27,7 +27,13 @@ function renderRootSettings(
   const onCommitLoadedRoot = vi.fn();
   const onPersistSettings = vi.fn();
   const onMessage = vi.fn();
+  const onBeginRootSwitch = vi.fn(() => 1);
+  const isCurrentRootSwitch = vi.fn(() => true);
+  const onFinishRootSwitch = vi.fn();
   const options = {
+    onBeginRootSwitch,
+    isCurrentRootSwitch,
+    onFinishRootSwitch,
     onLoadRoot,
     onReadRootData,
     onCommitLoadedRoot,
@@ -270,6 +276,50 @@ describe("useRootSettings", () => {
     expect(onMessage).toHaveBeenCalledWith("Chrome missing");
     saveProfilesSpy.mockRestore();
     detectChromeSpy.mockRestore();
+  });
+
+  test("跨 root 检测和保存都会在读取目标根前开启生命周期", async () => {
+    const onBeginRootSwitch = vi.fn(() => 7);
+    const isCurrentRootSwitch = vi.fn(() => true);
+    const onFinishRootSwitch = vi.fn();
+    const onLoadRoot = vi.fn().mockResolvedValue(undefined);
+    const onReadRootData = vi.fn().mockResolvedValue({
+      status: rootStatus(1),
+      document: documentWithSettings(),
+      settings: settings(),
+      chrome: chromeStatus()
+    });
+    const hook = renderRootSettings(
+      "/tmp/committed-root",
+      settings(),
+      {
+        onBeginRootSwitch,
+        isCurrentRootSwitch,
+        onFinishRootSwitch,
+        onLoadRoot,
+        onReadRootData
+      }
+    );
+
+    act(() => {
+      hook.result.current.rootSettings.onRootPathChange("/tmp/next-root");
+    });
+    await act(async () => {
+      await hook.result.current.rootSettings.onApplyRootPath();
+    });
+
+    expect(onBeginRootSwitch.mock.invocationCallOrder[0]).toBeLessThan(
+      onLoadRoot.mock.invocationCallOrder[0]
+    );
+
+    await act(async () => {
+      await hook.result.current.rootSettings.onSaveSettings();
+    });
+
+    expect(onBeginRootSwitch.mock.invocationCallOrder[1]).toBeLessThan(
+      onReadRootData.mock.invocationCallOrder[0]
+    );
+    expect(onFinishRootSwitch).toHaveBeenCalledWith(7);
   });
 
   test("revealRootDirectory 使用 committed rootPath 而不是 draft", async () => {
