@@ -876,6 +876,7 @@ where
             root_path,
             profile_id,
             &profile_dir,
+            browser_path,
             registered,
         ),
     }
@@ -910,9 +911,24 @@ fn profile_environment_health_issues(
     root_path: &Path,
     profile_id: &str,
     profile_dir: &Path,
+    browser_path: &Path,
     registered: bool,
 ) -> Vec<RootHealthIssue> {
     let mut issues = Vec::new();
+    if !browser_path_is_launchable(browser_path) {
+        let detail = format!(
+            "配置的浏览器无法启动。请选择包含真实内部可执行文件的 .app；当前路径：{}。",
+            browser_path.to_string_lossy()
+        );
+        issues.push(environment_health_issue(
+            RootHealthSeverity::Error,
+            "browser_unavailable",
+            "配置浏览器不可用",
+            &detail,
+            Some(browser_path),
+            None,
+        ));
+    }
     if !root_path.is_dir() {
         issues.push(environment_health_issue(
             RootHealthSeverity::Error,
@@ -1664,6 +1680,56 @@ mod tests {
         assert!(!browser_path_is_launchable(&empty_app));
         assert!(!browser_path_is_launchable(&browser_file));
         assert!(browser_path_is_launchable(&temp_dir.path().join("Working Browser.app")));
+    }
+
+    #[test]
+    fn profile_environment_snapshot_reports_unavailable_configured_browser() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path();
+        init_root(root).unwrap();
+        let unavailable_browser = temp_dir.path().join("Empty Browser.app");
+        std::fs::create_dir(&unavailable_browser).unwrap();
+
+        let snapshot = profile_environment_snapshot_from_processes(
+            root,
+            "account-001",
+            &unavailable_browser,
+            std::iter::empty(),
+        );
+
+        let issue = snapshot
+            .health_issues
+            .iter()
+            .find(|issue| issue.code == "browser_unavailable")
+            .expect("无效浏览器路径必须显示健康问题");
+        assert_eq!(issue.severity, RootHealthSeverity::Error);
+        assert_eq!(issue.path.as_deref(), unavailable_browser.to_str());
+        assert!(issue.detail.contains(".app"));
+        assert!(issue.detail.contains("内部可执行文件"));
+        assert!(issue.detail.contains(unavailable_browser.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn profile_environment_snapshot_omits_browser_issue_for_launchable_bundle() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path();
+        init_root(root).unwrap();
+        let browser = temp_dir.path().join("Working Browser.app");
+        let executable = browser.join("Contents/MacOS/Working Browser");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(executable, "").unwrap();
+
+        let snapshot = profile_environment_snapshot_from_processes(
+            root,
+            "account-001",
+            &browser,
+            std::iter::empty(),
+        );
+
+        assert!(!snapshot
+            .health_issues
+            .iter()
+            .any(|issue| issue.code == "browser_unavailable"));
     }
 
     #[test]
