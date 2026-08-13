@@ -8,6 +8,7 @@ import type { ChromeProfile } from "../../types";
 
 export interface WindowRegistryReaderDependencies {
   readWindows: (profile: ChromeProfile, purpose: string) => Promise<ChromeWindowInfo[]>;
+  shouldContinue?: () => boolean;
 }
 
 export interface InspectedWindows {
@@ -18,6 +19,7 @@ export interface InspectedWindows {
 export interface WindowRegistryReadResult {
   entries: BrowserWindowRegistryEntry[];
   inspectedWindows: InspectedWindows[];
+  cancelled?: boolean;
 }
 
 export async function readWindowRegistryForProfiles(
@@ -27,7 +29,21 @@ export async function readWindowRegistryForProfiles(
   const inspectedWindows: InspectedWindows[] = [];
 
   for (const profile of profiles) {
-    const windows = await dependencies.readWindows(profile, "检查窗口");
+    if (dependencies.shouldContinue && !dependencies.shouldContinue()) {
+      return { entries: [], inspectedWindows: [], cancelled: true };
+    }
+    let windows: ChromeWindowInfo[];
+    try {
+      windows = await dependencies.readWindows(profile, "检查窗口");
+    } catch (error) {
+      if (dependencies.shouldContinue && !dependencies.shouldContinue()) {
+        return { entries: [], inspectedWindows: [], cancelled: true };
+      }
+      throw error;
+    }
+    if (dependencies.shouldContinue && !dependencies.shouldContinue()) {
+      return { entries: [], inspectedWindows: [], cancelled: true };
+    }
     inspectedWindows.push({ profile, windows });
   }
 

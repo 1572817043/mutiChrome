@@ -2,12 +2,14 @@ import type { ChromeProfile } from "../../types";
 
 export interface WindowFocusControllerDependencies {
   focusWindow: (profile: ChromeProfile) => Promise<void>;
+  shouldContinue?: () => boolean;
 }
 
 export interface WindowFocusControllerResult {
   focusedCount: number;
   failedCount: number;
   firstFailedError: unknown | null;
+  cancelled?: boolean;
 }
 
 export async function focusWindowsForProfilesInOrder(
@@ -19,10 +21,19 @@ export async function focusWindowsForProfilesInOrder(
   let firstFailedError: unknown | null = null;
 
   for (const profile of profiles) {
+    if (dependencies.shouldContinue && !dependencies.shouldContinue()) {
+      return { focusedCount, failedCount, firstFailedError, cancelled: true };
+    }
     try {
       await dependencies.focusWindow(profile);
+      if (dependencies.shouldContinue && !dependencies.shouldContinue()) {
+        return { focusedCount, failedCount, firstFailedError, cancelled: true };
+      }
       focusedCount += 1;
     } catch (error) {
+      if (dependencies.shouldContinue && !dependencies.shouldContinue()) {
+        return { focusedCount, failedCount, firstFailedError, cancelled: true };
+      }
       failedCount += 1;
       firstFailedError ??= error;
     }
