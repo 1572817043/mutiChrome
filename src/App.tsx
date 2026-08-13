@@ -189,7 +189,12 @@ const RUNNING_STATUS_POLL_MS = 5000;
 const LAUNCH_CONFIRMATION_DELAY_MS = 2000;
 const MAX_BROWSER_OPERATIONS = 20;
 const BROWSER_COMMAND_TIMEOUT_MS = 120_000;
-const ROOT_LIFECYCLE_WINDOW_ACTIONS = ["关闭运行账号", "重启运行账号"] as const;
+const ROOT_LIFECYCLE_WINDOW_ACTIONS = [
+  "检查窗口",
+  "前置窗口",
+  "关闭运行账号",
+  "重启运行账号"
+] as const;
 interface PendingDelete {
   profile: ChromeProfile;
   mode: DeleteMode;
@@ -829,6 +834,8 @@ function App() {
     ) {
       windowActionLockRef.current = null;
     }
+    setWindowInspecting(false);
+    setWindowFocusing(false);
     setWindowQuitting(false);
     setWindowRestarting(false);
     setBulkOpenRunning(false);
@@ -1343,15 +1350,27 @@ function App() {
   }
 
   async function focusProfileWindow(profile: ChromeProfile) {
-    invalidateWindowRegistry();
-    try {
-      await focusProfileWindowWithTimeout(profile);
-      setMessage(`已切换到 ${profile.name}`);
-      await refreshRunningProfiles();
-    } catch (error) {
-      setMessage(windowAutomationErrorMessage(error));
-      await refreshRunningProfiles();
-    }
+    await withWindowActionLock("前置窗口", async (scope) => {
+      const isCurrent = () => isCurrentRootLifecycleScope(scope);
+      if (!isCurrent()) {
+        return;
+      }
+      invalidateWindowRegistry();
+      try {
+        await focusProfileWindowWithTimeout(profile);
+        if (!isCurrent()) {
+          return;
+        }
+        setMessage(`已切换到 ${profile.name}`);
+        await refreshRunningProfiles(scope.rootPath, profiles, { isCurrent });
+      } catch (error) {
+        if (!isCurrent()) {
+          return;
+        }
+        setMessage(windowAutomationErrorMessage(error));
+        await refreshRunningProfiles(scope.rootPath, profiles, { isCurrent });
+      }
+    }, { rejectDuringRootSwitch: true });
   }
 
   async function openAccountPlatform(
@@ -2475,14 +2494,22 @@ function App() {
   }
 
   async function inspectWindowsForSelectedProfiles() {
-    await withWindowActionLock("检查窗口", async () => {
+    await withWindowActionLock("检查窗口", async (scope) => {
+      const isCurrent = () => isCurrentRootLifecycleScope(scope);
+      if (!isCurrent()) {
+        return;
+      }
       invalidateWindowRegistry();
       const requestGeneration = windowRegistryGenerationRef.current;
       const requestContext = {
         rootPath,
         selectedIds: [...selectedIds]
       };
-      const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
+      const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles(isCurrent);
+
+      if (!isCurrent()) {
+        return;
+      }
 
       if (freshRunningSelectedProfiles.length === 0) {
         setMessage("选中的账号没有运行窗口");
@@ -2495,18 +2522,22 @@ function App() {
       const operation = startWindowOperation("检查窗口", freshRunningSelectedProfiles);
       setWindowInspecting(true);
       try {
-        const { entries, inspectedWindows } = await readWindowRegistryForProfiles(
+        const readResult = await readWindowRegistryForProfiles(
           freshRunningSelectedProfiles,
           {
             readWindows: (profile, purpose) =>
-              listProfileWindowsWithTimeout(profile, purpose)
+              listProfileWindowsWithTimeout(profile, purpose),
+            shouldContinue: isCurrent
           }
         );
-        const summaries = inspectedWindows.map(({ profile, windows }) =>
+        if (!isCurrent() || readResult.cancelled) {
+          return;
+        }
+        const summaries = readResult.inspectedWindows.map(({ profile, windows }) =>
           formatWindowInspectionSummary(profile.name, windows)
         );
         if (isCurrentWindowRegistryRequest(requestGeneration, requestContext)) {
-          setWindowRegistryEntries(entries);
+          setWindowRegistryEntries(readResult.entries);
           setWindowRegistryCheckedAt(new Date().toISOString());
         }
         setMessage(`窗口检查：${summaries.join("；")}`);
@@ -2514,8 +2545,11 @@ function App() {
           profileCount: freshRunningSelectedProfiles.length,
           inspectedCount: summaries.length
         }));
-        await refreshRunningProfiles();
+        await refreshRunningProfiles(scope.rootPath, profiles, { isCurrent });
       } catch (error) {
+        if (!isCurrent()) {
+          return;
+        }
         setMessage(windowAutomationErrorMessage(error));
         finishWindowOperation(
           operation,
@@ -2527,17 +2561,27 @@ function App() {
             reason: "inspect-failed"
           })
         );
-        await refreshRunningProfiles();
+        await refreshRunningProfiles(scope.rootPath, profiles, { isCurrent });
       } finally {
-        setWindowInspecting(false);
+        if (isCurrent()) {
+          setWindowInspecting(false);
+        }
       }
-    });
+    }, { rejectDuringRootSwitch: true });
   }
 
   async function focusWindowsForSelectedProfiles() {
-    await withWindowActionLock("前置窗口", async () => {
+    await withWindowActionLock("前置窗口", async (scope) => {
+      const isCurrent = () => isCurrentRootLifecycleScope(scope);
+      if (!isCurrent()) {
+        return;
+      }
       invalidateWindowRegistry();
-      const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles();
+      const freshRunningSelectedProfiles = await refreshSelectedRunningProfiles(isCurrent);
+
+      if (!isCurrent()) {
+        return;
+      }
 
       if (freshRunningSelectedProfiles.length === 0) {
         setMessage("选中的账号没有运行窗口");
@@ -2550,10 +2594,15 @@ function App() {
       const operation = startWindowOperation("前置窗口", freshRunningSelectedProfiles);
       setWindowFocusing(true);
       try {
-        const { focusedCount, failedCount, firstFailedError } =
+        const { focusedCount, failedCount, firstFailedError, cancelled } =
           await focusWindowsForProfilesInOrder(freshRunningSelectedProfiles, {
-            focusWindow: focusProfileWindowWithTimeout
+            focusWindow: focusProfileWindowWithTimeout,
+            shouldContinue: isCurrent
           });
+
+        if (!isCurrent() || cancelled) {
+          return;
+        }
 
         if (focusedCount > 0) {
           const messageParts = [`已前置 ${focusedCount} 个窗口`];
@@ -2577,11 +2626,13 @@ function App() {
             failedCount
           }
         );
-        await refreshRunningProfiles();
+        await refreshRunningProfiles(scope.rootPath, profiles, { isCurrent });
       } finally {
-        setWindowFocusing(false);
+        if (isCurrent()) {
+          setWindowFocusing(false);
+        }
       }
-    });
+    }, { rejectDuringRootSwitch: true });
   }
 
   async function quitBrowsersForSelectedProfiles() {

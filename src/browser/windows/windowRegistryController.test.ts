@@ -3,6 +3,16 @@ import type { ChromeWindowInfo } from "../../api";
 import type { ChromeProfile } from "../../types";
 import { readWindowRegistryForProfiles } from "./windowRegistryController";
 
+function deferred<T>() {
+  let resolve: (value: T | PromiseLike<T>) => void = () => {};
+  let reject: (reason?: unknown) => void = () => {};
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 function profile(id: string, name: string): ChromeProfile {
   return {
     id,
@@ -79,6 +89,59 @@ describe("readWindowRegistryForProfiles", () => {
 
     await expect(readPromise).rejects.toBe(originalError);
     expect(readCalls).toEqual(["account-001", "account-002"]);
+  });
+
+  test("作用域失效后不再读取后续 profile，并标记为 cancelled", async () => {
+    const profiles = [
+      profile("account-001", "主号"),
+      profile("account-002", "后续号")
+    ];
+    const readCalls: string[] = [];
+    let current = true;
+
+    await expect(
+      readWindowRegistryForProfiles(profiles, {
+        readWindows: async (currentProfile) => {
+          readCalls.push(currentProfile.id);
+          current = false;
+          return [windowInfo()];
+        },
+        shouldContinue: () => current
+      })
+    ).resolves.toEqual({
+      entries: [],
+      inspectedWindows: [],
+      cancelled: true
+    });
+    expect(readCalls).toEqual(["account-001"]);
+  });
+
+  test("首个读取挂起后作用域失效再失败时返回 cancelled 且不读取后续 profile", async () => {
+    const profiles = [
+      profile("account-001", "主号"),
+      profile("account-002", "后续号")
+    ];
+    const pendingRead = deferred<ChromeWindowInfo[]>();
+    const readCalls: string[] = [];
+    let current = true;
+    const readPromise = readWindowRegistryForProfiles(profiles, {
+      readWindows: async (currentProfile) => {
+        readCalls.push(currentProfile.id);
+        return pendingRead.promise;
+      },
+      shouldContinue: () => current
+    });
+
+    current = false;
+    const originalError = new Error("读取失败");
+    pendingRead.reject(originalError);
+
+    await expect(readPromise).resolves.toEqual({
+      entries: [],
+      inspectedWindows: [],
+      cancelled: true
+    });
+    expect(readCalls).toEqual(["account-001"]);
   });
 
   test("无窗口、最小化和多窗口字段语义通过 entries 保持", async () => {

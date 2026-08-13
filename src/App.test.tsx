@@ -1542,11 +1542,14 @@ describe("App launcher layout", () => {
     await flushPromises();
   });
 
-  test("根切换不会失效运行中的检查窗口操作", async () => {
+  test("根切换会作废运行中的检查窗口操作，旧完成不会写回新根", async () => {
     const user = userEvent.setup();
     const pendingWindowRead = deferred<Awaited<ReturnType<typeof profileApi.listProfileWindows>>>();
     const rootBDocument = documentWith([
       profile({ id: "root-b-001", name: "B 根账号" })
+    ]);
+    const rootAReturnDocument = documentWith([
+      profile({ id: "root-a-return-001", name: "A 根新账号" })
     ]);
     vi.spyOn(profileApi, "snapshotBrowserSessions").mockImplementation(
       async (_rootPath, profileIds) =>
@@ -1569,13 +1572,20 @@ describe("App launcher layout", () => {
       writable: true,
       profileCount: 1
     });
-    vi.spyOn(profileApi, "loadProfiles").mockResolvedValue(rootBDocument);
+    vi.spyOn(profileApi, "loadProfiles")
+      .mockResolvedValueOnce(rootBDocument)
+      .mockResolvedValueOnce(rootAReturnDocument);
     const settingsDialog = await openSettingsDialog(user);
     changeRootPathDraft(settingsDialog, "/tmp/root-b");
     await user.click(within(settingsDialog).getByRole("button", { name: "保存设置" }));
+    expect(await screen.findByRole("button", { name: "选择 B 根账号" })).toBeTruthy();
 
-    const currentOperations = await screen.findByRole("list", { name: "当前操作记录" });
-    expect(within(currentOperations).getByText("检查窗口")).toBeTruthy();
+    changeRootPathDraft(settingsDialog, "/tmp/root-a-return");
+    await user.click(within(settingsDialog).getByRole("button", { name: "保存设置" }));
+    expect(await screen.findByRole("button", { name: "选择 A 根新账号" })).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "更多操作" }));
+    expect(screen.queryByRole("list", { name: "当前操作记录" })).toBeNull();
 
     await act(async () => {
       pendingWindowRead.resolve([
@@ -1583,6 +1593,169 @@ describe("App launcher layout", () => {
       ]);
       await pendingWindowRead.promise;
     });
+    await flushPromises();
+
+    expect(listWindowsSpy).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("窗口检查：主号")).toBeNull();
+    expect(screen.queryByText("1200x800 @ 0,0")).toBeNull();
+  });
+
+  test("根切换会停止批量前置的后续账号，旧完成不会写回新根", async () => {
+    const user = userEvent.setup();
+    const pendingFocus = deferred<void>();
+    const rootBDocument = documentWith([
+      profile({ id: "root-b-001", name: "B 根账号" })
+    ]);
+    vi.spyOn(profileApi, "snapshotBrowserSessions").mockImplementation(
+      async (_rootPath, profileIds) =>
+        profileIds.map((profileId) => browserSessionSnapshot(profileId, true))
+    );
+    const focusSpy = vi
+      .spyOn(profileApi, "focusProfileWindow")
+      .mockImplementationOnce(() => pendingFocus.promise)
+      .mockResolvedValue();
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "选择 抽奖号" }));
+    await user.click(screen.getByRole("button", { name: "更多操作" }));
+    await user.click(screen.getByRole("button", { name: "前置窗口" }));
+    await waitFor(() => {
+      expect(focusSpy).toHaveBeenCalledWith("~/MultiChromeProfiles", "account-001");
+    });
+
+    vi.spyOn(profileApi, "initProfileRoot").mockResolvedValue({
+      rootExists: true,
+      writable: true,
+      profileCount: 1
+    });
+    vi.spyOn(profileApi, "loadProfiles").mockResolvedValue(rootBDocument);
+    const settingsDialog = await openSettingsDialog(user);
+    changeRootPathDraft(settingsDialog, "/tmp/root-b");
+    await user.click(within(settingsDialog).getByRole("button", { name: "保存设置" }));
+    expect(await screen.findByRole("button", { name: "选择 B 根账号" })).toBeTruthy();
+
+    await act(async () => {
+      pendingFocus.resolve();
+      await pendingFocus.promise;
+    });
+    await flushPromises();
+
+    expect(focusSpy).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("已前置 1 个窗口")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "更多操作" }));
+    expect(screen.queryByRole("list", { name: "最近操作记录" })).toBeNull();
+  });
+
+  test("根切换失败也会作废旧检查窗口完成", async () => {
+    const user = userEvent.setup();
+    const pendingWindowRead = deferred<Awaited<ReturnType<typeof profileApi.listProfileWindows>>>();
+    vi.spyOn(profileApi, "snapshotBrowserSessions").mockImplementation(
+      async (_rootPath, profileIds) =>
+        profileIds.map((profileId) => browserSessionSnapshot(profileId, true))
+    );
+    const listWindowsSpy = vi
+      .spyOn(profileApi, "listProfileWindows")
+      .mockReturnValueOnce(pendingWindowRead.promise);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "更多操作" }));
+    await user.click(screen.getByRole("button", { name: "检查窗口" }));
+    await waitFor(() => expect(listWindowsSpy).toHaveBeenCalledTimes(1));
+
+    vi.spyOn(profileApi, "initProfileRoot").mockRejectedValue(new Error("根目录不可用"));
+    const settingsDialog = await openSettingsDialog(user);
+    changeRootPathDraft(settingsDialog, "/tmp/unavailable-root");
+    await user.click(within(settingsDialog).getByRole("button", { name: "保存设置" }));
+    expect(await screen.findByText("根目录不可用")).toBeTruthy();
+
+    await act(async () => {
+      pendingWindowRead.resolve([
+        { index: 1, title: "Chrome", x: 0, y: 0, width: 1200, height: 800 }
+      ]);
+      await pendingWindowRead.promise;
+    });
+    await flushPromises();
+
+    expect(screen.queryByText("窗口检查：主号")).toBeNull();
+    expect(screen.queryByText("1200x800 @ 0,0")).toBeNull();
+  });
+
+  test("根目录切换等待期间拒绝新的检查窗口动作", async () => {
+    const user = userEvent.setup();
+    const pendingRoot = deferred<{ rootExists: boolean; writable: boolean; profileCount: number }>();
+    const listWindowsSpy = vi.spyOn(profileApi, "listProfileWindows");
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "更多操作" }));
+    const inspectButton = screen.getByRole("button", { name: "检查窗口" });
+    const initRootSpy = vi
+      .spyOn(profileApi, "initProfileRoot")
+      .mockReturnValueOnce(pendingRoot.promise);
+    const settingsDialog = await openSettingsDialog(user);
+    changeRootPathDraft(settingsDialog, "/tmp/pending-root");
+    fireEvent.click(within(settingsDialog).getByRole("button", { name: "保存设置" }));
+    await waitFor(() => expect(initRootSpy).toHaveBeenCalledWith("/tmp/pending-root"));
+
+    fireEvent.click(inspectButton);
+
+    expect(screen.getByRole("status").textContent).toBe("配置根目录正在切换，请稍候");
+    expect(listWindowsSpy).not.toHaveBeenCalled();
+
+    await act(async () => {
+      pendingRoot.resolve({ rootExists: true, writable: true, profileCount: 0 });
+      await pendingRoot.promise;
+    });
+  });
+
+  test("根切换会作废账号卡片前置，旧完成不刷新新根会话", async () => {
+    const user = userEvent.setup();
+    const pendingFocus = deferred<void>();
+    const rootBDocument = documentWith([
+      profile({ id: "root-b-001", name: "B 根账号" })
+    ]);
+    vi.spyOn(profileApi, "listRunningProfiles").mockResolvedValue(["account-001"]);
+    const snapshotSpy = vi.spyOn(profileApi, "snapshotBrowserSessions").mockResolvedValue([
+      browserSessionSnapshot("account-001", true),
+      browserSessionSnapshot("account-002", false)
+    ]);
+    const focusSpy = vi
+      .spyOn(profileApi, "focusProfileWindow")
+      .mockImplementationOnce(() => pendingFocus.promise)
+      .mockResolvedValue();
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "切换到 主号" }));
+    await waitFor(() => {
+      expect(focusSpy).toHaveBeenCalledWith("~/MultiChromeProfiles", "account-001");
+    });
+
+    vi.spyOn(profileApi, "initProfileRoot").mockResolvedValue({
+      rootExists: true,
+      writable: true,
+      profileCount: 1
+    });
+    vi.spyOn(profileApi, "loadProfiles").mockResolvedValue(rootBDocument);
+    const settingsDialog = await openSettingsDialog(user);
+    changeRootPathDraft(settingsDialog, "/tmp/root-b");
+    await user.click(within(settingsDialog).getByRole("button", { name: "保存设置" }));
+    expect(await screen.findByRole("button", { name: "选择 B 根账号" })).toBeTruthy();
+    const oldRootSnapshotCalls = snapshotSpy.mock.calls.filter(
+      ([path]) => path === "~/MultiChromeProfiles"
+    ).length;
+
+    await act(async () => {
+      pendingFocus.resolve();
+      await pendingFocus.promise;
+    });
+    await flushPromises();
+
+    expect(screen.queryByText("已切换到 主号")).toBeNull();
+    expect(
+      snapshotSpy.mock.calls.filter(([path]) => path === "~/MultiChromeProfiles")
+    ).toHaveLength(oldRootSnapshotCalls);
   });
 
   test("根切换提交后 B 根可以启动新关闭，释放 A 不会解锁 B", async () => {

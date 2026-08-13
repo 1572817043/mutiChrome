@@ -139,7 +139,7 @@ describe("useBrowserOperations", () => {
     expect(onMessage).toHaveBeenCalledWith("主号 正在执行账号启动，请稍后再试");
   });
 
-  test("根切换只移除指定窗口操作，未指定操作保持运行", () => {
+  test("根切换清理指定窗口操作时保留平铺和同步 operation", () => {
     const { result } = renderHook(() =>
       useBrowserOperations({
         rootPath: "/tmp/multichrome",
@@ -151,22 +151,27 @@ describe("useBrowserOperations", () => {
     const accountOne = profile("account-001", "主号");
 
     act(() => {
-      const windowOperation = result.current.startWindowOperation("关闭运行账号", [
+      const windowOperation = result.current.startWindowOperation("检查窗口", [
         accountOne
       ]);
-      result.current.startWindowOperation("检查窗口", [accountOne]);
-      result.current.clearWindowActionOperations(["关闭运行账号", "重启运行账号"]);
+      result.current.startWindowOperation("前置窗口", [accountOne]);
+      result.current.startWindowOperation("平铺窗口", [accountOne]);
+      result.current.startWindowOperation("同步布局", [accountOne]);
+      result.current.clearWindowActionOperations([
+        "检查窗口",
+        "前置窗口",
+        "关闭运行账号",
+        "重启运行账号"
+      ]);
       result.current.finishWindowOperation(windowOperation, "succeeded", {
-        closedCount: 1
+        inspectedCount: 1
       }, () => false);
     });
 
-    expect(result.current.browserOperations).toHaveLength(1);
-    expect(result.current.browserOperations[0]).toMatchObject({
-      type: "window-action",
-      sourceLabel: "检查窗口",
-      status: "running"
-    });
+    expect(result.current.browserOperations).toEqual([
+      expect.objectContaining({ sourceLabel: "同步布局", status: "running" }),
+      expect.objectContaining({ sourceLabel: "平铺窗口", status: "running" })
+    ]);
   });
 
   test("根切换移除账号启动 operation，但保留其它 operation", () => {
