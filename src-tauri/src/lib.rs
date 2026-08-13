@@ -270,11 +270,10 @@ fn profile_directory_size(path: String) -> Result<u64, String> {
 #[tauri::command]
 fn detect_chrome(browser_path: Option<String>) -> ChromeStatus {
     let app_path = configured_browser_path(browser_path);
+    let available = browser_path_is_launchable(&app_path);
     ChromeStatus {
-        available: app_path.exists(),
-        app_path: app_path
-            .exists()
-            .then(|| app_path.to_string_lossy().to_string()),
+        available,
+        app_path: available.then(|| app_path.to_string_lossy().to_string()),
     }
 }
 
@@ -288,7 +287,7 @@ fn open_profile(
     let root_path = PathBuf::from(root_path);
     let profile_dir = ensure_profile_dir(&root_path, &profile_id)?;
     let browser = configured_browser_path(browser_path);
-    if !browser.exists() {
+    if !browser_path_is_launchable(&browser) {
         return Err(format!("未检测到浏览器：{}", browser.to_string_lossy()));
     }
 
@@ -778,6 +777,17 @@ fn browser_executable_path(browser: &Path) -> PathBuf {
     }
 }
 
+fn browser_path_is_launchable(browser: &Path) -> bool {
+    if browser
+        .extension()
+        .is_some_and(|extension| extension == "app")
+    {
+        browser_executable_path(browser).is_file()
+    } else {
+        false
+    }
+}
+
 fn running_profile_ids_from_processes<'a, I>(root_path: &Path, process_lines: I) -> Vec<String>
 where
     I: IntoIterator<Item = &'a str>,
@@ -859,7 +869,7 @@ where
             && profile_dir.parent() == Some(profiles_root.as_path()),
         registered,
         browser_path: browser_path.to_string_lossy().to_string(),
-        browser_available: browser_path.exists(),
+        browser_available: browser_path_is_launchable(browser_path),
         running,
         checked_at: current_time_millis(),
         health_issues: profile_environment_health_issues(
@@ -1598,6 +1608,30 @@ mod tests {
         assert_eq!(browser_executable_path(&app_dir), executable);
 
         let _ = std::fs::remove_dir_all(&app_dir);
+    }
+
+    #[test]
+    fn browser_path_is_launchable_requires_an_app_bundle_executable() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let empty_dir = temp_dir.path().join("empty-browser");
+        let empty_app = temp_dir.path().join("Empty Browser.app");
+        let browser_file = temp_dir.path().join("browser-bin");
+        let app_executable = temp_dir
+            .path()
+            .join("Working Browser.app")
+            .join("Contents")
+            .join("MacOS")
+            .join("Working Browser");
+        std::fs::create_dir(&empty_dir).unwrap();
+        std::fs::create_dir(&empty_app).unwrap();
+        std::fs::write(&browser_file, "").unwrap();
+        std::fs::create_dir_all(app_executable.parent().unwrap()).unwrap();
+        std::fs::write(&app_executable, "").unwrap();
+
+        assert!(!browser_path_is_launchable(&empty_dir));
+        assert!(!browser_path_is_launchable(&empty_app));
+        assert!(!browser_path_is_launchable(&browser_file));
+        assert!(browser_path_is_launchable(&temp_dir.path().join("Working Browser.app")));
     }
 
     #[test]
