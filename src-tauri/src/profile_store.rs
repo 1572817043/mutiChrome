@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
@@ -295,6 +297,46 @@ struct DuplicateProfileMeta {
 const MAX_BROWSER_LAUNCH_EVENTS: usize = 30;
 static ATOMIC_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RestoreFailpoint {
+    StageCopy(usize),
+    InstallAfterRename(usize),
+    IndexWrite,
+    Rollback,
+    InstallThenRollback(usize),
+    PostCommitCleanup,
+}
+
+#[cfg(test)]
+thread_local! { static RESTORE_FAILPOINT: Cell<Option<RestoreFailpoint>> = const { Cell::new(None) }; }
+
+#[cfg(test)]
+fn set_restore_failpoint(value: Option<RestoreFailpoint>) {
+    RESTORE_FAILPOINT.with(|failpoint| failpoint.set(value));
+}
+
+#[cfg(test)]
+fn restore_failpoint(point: RestoreFailpoint) -> Result<(), String> {
+    let configured = RESTORE_FAILPOINT.with(|failpoint| failpoint.get());
+    let matches_composite = match (configured, point) {
+        (
+            Some(RestoreFailpoint::InstallThenRollback(index)),
+            RestoreFailpoint::InstallAfterRename(current),
+        ) => index == current,
+        (Some(RestoreFailpoint::InstallThenRollback(_)), RestoreFailpoint::Rollback) => true,
+        _ => false,
+    };
+    if configured == Some(point) || matches_composite {
+        return Err("恢复测试故障".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn restore_failpoint(_point: RestoreFailpoint) -> Result<(), String> {
+    Ok(())
+}
+
 pub fn init_root(root: &Path) -> Result<RootStatus, String> {
     let app_data_path = ensure_real_app_data_dir(root)?;
     let document_path = managed_app_data_file(&app_data_path, "profiles.json")?;
@@ -485,24 +527,125 @@ pub fn restore_full_profile_backup(
     let backup_dir = resolve_full_profile_backup_dir(backup_path)?;
     let backup_document = read_full_profile_backup_document(&backup_dir)?;
     let current_document = load_profile_document(root)?;
+    let app_data_path = real_app_data_dir(root)?;
+    let document_path = managed_app_data_file(&app_data_path, "profiles.json")?;
+    let original_document = fs::read(&document_path).map_err(|error| error.to_string())?;
+    let profiles_dir = real_profiles_dir(root)?;
 
     for profile in &backup_document.profiles {
         validate_full_backup_profile_dir(&backup_dir, &profile.id)?;
-        let target = safe_profile_dir(root, &profile.id)?;
+        let target = safe_profile_dir_in(&profiles_dir, &profile.id)?;
         if target.exists() && !directory_is_empty(&target)? && !overwrite_existing {
             return Err(format!("目标账号 {} 已存在，需要确认覆盖", profile.id));
         }
     }
-
-    for profile in &backup_document.profiles {
-        let source = backup_dir.join("profiles").join(&profile.id);
-        let target = safe_profile_dir(root, &profile.id)?;
-        replace_profile_directory(&source, &target)?;
-    }
-
+    let restored_profile_ids = backup_document
+        .profiles
+        .iter()
+        .map(|profile| profile.id.clone())
+        .collect::<Vec<_>>();
     let merged_document = merge_restored_document(current_document, backup_document);
-    save_profile_document(root, &merged_document)?;
+    restore_full_profile_transaction(
+        &profiles_dir,
+        &document_path,
+        &original_document,
+        &backup_dir,
+        &restored_profile_ids,
+        &merged_document,
+    )?;
     Ok(merged_document)
+}
+
+fn restore_full_profile_transaction(
+    profiles_dir: &Path,
+    document_path: &Path,
+    original_document: &[u8],
+    backup_dir: &Path,
+    restored_profile_ids: &[String],
+    merged_document: &ProfileDocument,
+) -> Result<(), String> {
+    let tx = profiles_dir.join(format!(
+        ".restore-tx-{}-{}",
+        timestamp_millis(),
+        ATOMIC_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&tx).map_err(|error| error.to_string())?;
+    let incoming = tx.join("incoming");
+    let previous = tx.join("previous");
+    let mut planned_installs = Vec::new();
+    let result = (|| {
+        fs::create_dir(&incoming).map_err(|error| error.to_string())?;
+        fs::create_dir(&previous).map_err(|error| error.to_string())?;
+        for (index, profile_id) in restored_profile_ids.iter().enumerate() {
+            let source = backup_dir.join("profiles").join(profile_id);
+            restore_failpoint(RestoreFailpoint::StageCopy(index + 1))?;
+            copy_directory(&source, &incoming.join(profile_id))?;
+        }
+        for (index, profile_id) in restored_profile_ids.iter().enumerate() {
+            let staged = incoming.join(profile_id);
+            let target = profiles_dir.join(profile_id);
+            if target.exists() {
+                fs::rename(&target, previous.join(profile_id)).map_err(|error| error.to_string())?;
+            }
+            planned_installs.push(profile_id.clone());
+            fs::rename(&staged, &target).map_err(|error| error.to_string())?;
+            restore_failpoint(RestoreFailpoint::InstallAfterRename(index + 1))?;
+        }
+        restore_failpoint(RestoreFailpoint::IndexWrite)?;
+        let json = serde_json::to_string_pretty(merged_document).map_err(|error| error.to_string())?;
+        write_text_file_atomically(document_path, &format!("{json}\n"))?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            if restore_failpoint(RestoreFailpoint::PostCommitCleanup).is_ok() {
+                let _ = fs::remove_dir_all(&tx);
+            }
+            Ok(())
+        }
+        Err(error) => {
+            let rollback = rollback_full_profile_transaction(
+                profiles_dir,
+                document_path,
+                original_document,
+                &tx,
+                &planned_installs,
+            );
+            match rollback {
+                Ok(()) => {
+                    match fs::remove_dir_all(&tx) {
+                        Ok(()) => Err(error),
+                        Err(cleanup_error) => Err(format!("{error}；清理失败：{cleanup_error}")),
+                    }
+                }
+                Err(rollback_error) => Err(format!("{error}；回滚失败：{rollback_error}")),
+            }
+        }
+    }
+}
+
+fn rollback_full_profile_transaction(
+    profiles_dir: &Path,
+    document_path: &Path,
+    original_document: &[u8],
+    tx: &Path,
+    planned_installs: &[String],
+) -> Result<(), String> {
+    restore_failpoint(RestoreFailpoint::Rollback)?;
+    let previous = tx.join("previous");
+    for id in planned_installs {
+        let target = profiles_dir.join(id);
+        if target.exists() {
+            fs::remove_dir_all(target).map_err(|error| error.to_string())?;
+        }
+    }
+    for entry in fs::read_dir(&previous).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let id = entry.file_name();
+        let target = profiles_dir.join(&id);
+        fs::rename(entry.path(), target).map_err(|error| error.to_string())?;
+    }
+    write_bytes_file_atomically(document_path, original_document)
 }
 
 fn select_profiles_for_backup(
@@ -1558,6 +1701,10 @@ fn browser_launch_events_path(root: &Path) -> std::path::PathBuf {
 }
 
 fn write_text_file_atomically(path: &Path, contents: &str) -> Result<(), String> {
+    write_bytes_file_atomically(path, contents.as_bytes())
+}
+
+fn write_bytes_file_atomically(path: &Path, contents: &[u8]) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| "无法定位目标文件夹".to_string())?;
@@ -1714,6 +1861,19 @@ fn inspect_profile_directory_entries(
     for entry in entries.flatten() {
         let path = entry.path();
         let id = entry.file_name().to_string_lossy().to_string();
+        if id.starts_with(".restore-tx-") {
+            if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_dir()) {
+                issues.push(health_issue(
+                    RootHealthSeverity::Error,
+                    "restore_transaction_residue",
+                    "完整恢复事务残留",
+                    "发现未完成清理的完整恢复事务，当前数据状态可能不确定。请勿删除，保留供后续恢复工具或人工检查；健康修复不会自动处理。",
+                    Some(&path),
+                    None,
+                ));
+                continue;
+            }
+        }
         match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 if !registered_ids.contains(&id) {
@@ -2849,6 +3009,169 @@ mod tests {
             .join("profiles/account-003/Preferences")
             .is_file());
         assert!(target_root.path().join("profiles/account-002").is_dir());
+        assert!(!fs::read_dir(target_root.path().join("profiles"))
+            .expect("read profiles")
+            .any(|entry| entry.expect("entry").file_name().to_string_lossy().starts_with(".restore-tx-")));
+    }
+
+    #[test]
+    fn full_restore_stage_failure_leaves_profiles_and_document_unchanged() {
+        let (source_root, target_root, backup) = full_restore_test_roots();
+        let document_before = fs::read(target_root.path().join("app-data/profiles.json"))
+            .expect("document before");
+        let old_cookie = target_root.path().join("profiles/account-001/old");
+        set_restore_failpoint(Some(RestoreFailpoint::StageCopy(2)));
+
+        let error = restore_full_profile_backup(target_root.path(), &backup, true)
+            .expect_err("second stage copy fails");
+        set_restore_failpoint(None);
+
+        assert!(error.contains("恢复测试故障"));
+        assert_eq!(fs::read(&old_cookie).expect("old profile"), b"old");
+        assert!(!target_root.path().join("profiles/account-003").exists());
+        assert_eq!(fs::read(target_root.path().join("app-data/profiles.json")).expect("document"), document_before);
+        assert!(!has_restore_transaction(target_root.path()));
+        drop(source_root);
+    }
+
+    #[test]
+    fn full_restore_switch_failure_rolls_back_profiles_and_document() {
+        let (_source_root, target_root, backup) = full_restore_test_roots();
+        let document_before = fs::read(target_root.path().join("app-data/profiles.json"))
+            .expect("document before");
+        set_restore_failpoint(Some(RestoreFailpoint::InstallAfterRename(2)));
+
+        let error = restore_full_profile_backup(target_root.path(), &backup, true)
+            .expect_err("second switch fails");
+        set_restore_failpoint(None);
+
+        assert!(error.contains("恢复测试故障"));
+        assert_eq!(fs::read(target_root.path().join("profiles/account-001/old")).expect("old"), b"old");
+        assert!(!target_root.path().join("profiles/account-003").exists());
+        assert_eq!(fs::read(target_root.path().join("app-data/profiles.json")).expect("document"), document_before);
+        assert!(!has_restore_transaction(target_root.path()));
+    }
+
+    #[test]
+    fn full_restore_index_write_failure_rolls_back_profiles_and_document() {
+        let (_source_root, target_root, backup) = full_restore_test_roots();
+        let document_before = fs::read(target_root.path().join("app-data/profiles.json"))
+            .expect("document before");
+        set_restore_failpoint(Some(RestoreFailpoint::IndexWrite));
+
+        let error = restore_full_profile_backup(target_root.path(), &backup, true)
+            .expect_err("index write fails");
+        set_restore_failpoint(None);
+
+        assert!(error.contains("恢复测试故障"));
+        assert_eq!(fs::read(target_root.path().join("profiles/account-001/old")).expect("old"), b"old");
+        assert!(!target_root.path().join("profiles/account-003").exists());
+        assert_eq!(fs::read(target_root.path().join("app-data/profiles.json")).expect("document"), document_before);
+        assert!(!has_restore_transaction(target_root.path()));
+    }
+
+    #[test]
+    fn full_restore_overwrite_rejection_creates_no_transaction() {
+        let (_source_root, target_root, backup) = full_restore_test_roots();
+
+        let error = restore_full_profile_backup(target_root.path(), &backup, false)
+            .expect_err("overwrite required");
+
+        assert!(error.contains("需要确认覆盖"));
+        assert!(!has_restore_transaction(target_root.path()));
+    }
+
+    #[test]
+    fn full_restore_ignores_backup_directory_not_declared_by_document() {
+        let (_source_root, target_root, backup) = full_restore_test_roots();
+        fs::create_dir_all(backup.join("profiles/account-002")).expect("extra profile");
+        fs::write(backup.join("profiles/account-002/untrusted"), b"extra")
+            .expect("extra data");
+        fs::write(target_root.path().join("profiles/account-002/original"), b"original")
+            .expect("target data");
+
+        restore_full_profile_backup(target_root.path(), &backup, true).expect("restore");
+
+        assert_eq!(
+            fs::read(target_root.path().join("profiles/account-002/original")).expect("original"),
+            b"original"
+        );
+        assert!(!target_root.path().join("profiles/account-002/untrusted").exists());
+    }
+
+    #[test]
+    fn full_restore_post_commit_cleanup_failure_still_returns_success() {
+        let (_source_root, target_root, backup) = full_restore_test_roots();
+        set_restore_failpoint(Some(RestoreFailpoint::PostCommitCleanup));
+
+        let restored = restore_full_profile_backup(target_root.path(), &backup, true)
+            .expect("committed restore remains successful");
+        set_restore_failpoint(None);
+
+        assert!(restored.profiles.iter().any(|profile| profile.id == "account-003"));
+        assert!(has_restore_transaction(target_root.path()));
+        assert!(check_root_health(target_root.path())
+            .issues
+            .iter()
+            .any(|issue| issue.code == "restore_transaction_residue"));
+    }
+
+    #[test]
+    fn full_restore_rollback_failure_keeps_transaction_evidence() {
+        let (_source_root, target_root, backup) = full_restore_test_roots();
+        set_restore_failpoint(Some(RestoreFailpoint::InstallThenRollback(2)));
+        let error = restore_full_profile_backup(target_root.path(), &backup, true)
+            .expect_err("rollback fails");
+        set_restore_failpoint(None);
+
+        assert!(error.contains("回滚失败"));
+        assert!(has_restore_transaction(target_root.path()));
+        let issue = check_root_health(target_root.path())
+            .issues
+            .into_iter()
+            .find(|issue| issue.code == "restore_transaction_residue")
+            .expect("transaction residue health issue");
+        assert_eq!(issue.severity, RootHealthSeverity::Error);
+        assert!(!issue.detail.contains("成功"));
+        assert!(!issue.detail.contains("手动删除"));
+    }
+
+    #[test]
+    fn full_restore_success_has_no_cleanup_pending_health_issue() {
+        let (_source_root, target_root, backup) = full_restore_test_roots();
+
+        restore_full_profile_backup(target_root.path(), &backup, true).expect("restore");
+
+        assert!(!check_root_health(target_root.path())
+            .issues
+            .iter()
+            .any(|issue| issue.code == "restore_transaction_residue"));
+    }
+
+    fn has_restore_transaction(root: &Path) -> bool {
+        fs::read_dir(root.join("profiles"))
+            .expect("read profiles")
+            .any(|entry| entry.expect("entry").file_name().to_string_lossy().starts_with(".restore-tx-"))
+    }
+
+    fn full_restore_test_roots() -> (tempfile::TempDir, tempfile::TempDir, PathBuf) {
+        let source_root = tempfile::tempdir().expect("source root");
+        let target_root = tempfile::tempdir().expect("target root");
+        init_root(source_root.path()).expect("init source");
+        init_root(target_root.path()).expect("init target");
+        save_profile_document(source_root.path(), &ProfileDocument {
+            version: 1, settings: AppSettings::default(),
+            profiles: vec![test_profile("account-001"), test_profile("account-003")], projects: Vec::new(),
+        }).expect("save source");
+        save_profile_document(target_root.path(), &ProfileDocument {
+            version: 1, settings: AppSettings::default(),
+            profiles: vec![test_profile("account-001"), test_profile("account-002")], projects: Vec::new(),
+        }).expect("save target");
+        fs::write(source_root.path().join("profiles/account-001/new"), b"new").expect("source one");
+        fs::write(source_root.path().join("profiles/account-003/new"), b"new").expect("source three");
+        fs::write(target_root.path().join("profiles/account-001/old"), b"old").expect("target old");
+        let backup = create_full_profile_backup(source_root.path(), &[]).expect("backup");
+        (source_root, target_root, PathBuf::from(backup.path))
     }
 
     #[test]
