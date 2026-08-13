@@ -7,11 +7,11 @@ use profile_store::{
     ensure_profile_backups_dir, ensure_profile_dir_under_root_mutation, import_profile_dir,
     init_root, inspect_pending_full_restore, load_profile_document, preview_full_profile_backup,
     preview_full_profile_restore, reject_pending_full_restore, repair_root_health,
-    restore_full_profile_backup, restore_profile_backup, save_profile_document, BrowserLaunchEvent,
-    FullProfileBackupPreview, FullProfileBackupResult, FullProfileRestorePreview,
-    PendingFullRestoreStatus, ProfileBackupResult, ProfileDocument, ProfileImportCandidate,
-    ProfileMarker, RootHealthIssue, RootHealthReport, RootHealthSeverity, RootRepairResult,
-    RootStatus,
+    restore_full_profile_backup, restore_profile_backup, rollback_pending_full_restore,
+    save_profile_document, BrowserLaunchEvent, FullProfileBackupPreview, FullProfileBackupResult,
+    FullProfileRestorePreview, PendingFullRestoreStatus, ProfileBackupResult, ProfileDocument,
+    ProfileImportCandidate, ProfileMarker, RootHealthIssue, RootHealthReport, RootHealthSeverity,
+    RootRepairResult, RootStatus,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -133,6 +133,7 @@ pub fn run() {
             preview_full_profiles_restore,
             restore_full_profiles_backup,
             inspect_pending_full_profiles_restore,
+            rollback_pending_full_profiles_restore,
             reveal_profile_backups_dir,
             init_profile_root,
             load_profiles,
@@ -235,6 +236,11 @@ fn inspect_pending_full_profiles_restore(
     root_path: String,
 ) -> Result<PendingFullRestoreStatus, String> {
     inspect_pending_full_restore(&PathBuf::from(root_path))
+}
+
+#[tauri::command]
+fn rollback_pending_full_profiles_restore(root_path: String) -> Result<(), String> {
+    rollback_pending_full_restore(&PathBuf::from(root_path))
 }
 
 #[tauri::command]

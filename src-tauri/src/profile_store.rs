@@ -184,6 +184,37 @@ struct FullRestoreJournal {
     phase: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FullRestoreJournalV2 {
+    schema_version: u8,
+    transaction_dir: String,
+    nonce: String,
+    original_document: Vec<u8>,
+    merged_document: Vec<u8>,
+    profiles: Vec<FullRestoreJournalProfile>,
+    phase: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FullRestoreJournalProfile {
+    id: String,
+    had_original: bool,
+    state: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RestoreMarker {
+    schema_version: u8,
+    transaction_dir: String,
+    profile_id: String,
+    nonce: String,
+}
+
+const RESTORE_MARKER_FILE: &str = ".multichrome-restore-marker";
+
 const RESTORE_JOURNAL_FILE: &str = "restore-journal.json";
 const PENDING_RESTORE_ERROR: &str = "检测到未完成的完整恢复，请先处理";
 const ROOT_MUTATION_BUSY_ERROR: &str = "该根目录已有写操作正在进行，请稍后重试";
@@ -364,6 +395,10 @@ enum RestoreFailpoint {
     Rollback,
     InstallThenRollback(usize),
     PostCommitCleanup,
+    RollbackAfterProfile(usize),
+    RollbackCleanup,
+    RevertMoveAfterRename,
+    OldMoveAfterRename,
 }
 
 #[cfg(test)]
@@ -649,39 +684,63 @@ fn restore_full_profile_transaction(
     ));
     let incoming = tx.join("incoming");
     let previous = tx.join("previous");
+    let nonce = format!(
+        "{}-{}",
+        timestamp_millis(),
+        ATOMIC_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let merged_json = format!(
+        "{}\n",
+        serde_json::to_string_pretty(merged_document).map_err(|error| error.to_string())?
+    )
+    .into_bytes();
+    let profiles = restored_profile_ids
+        .iter()
+        .map(|id| FullRestoreJournalProfile {
+            id: id.clone(),
+            had_original: profiles_dir.join(id).exists(),
+            state: "pending".into(),
+        })
+        .collect::<Vec<_>>();
+    let mut journal = FullRestoreJournalV2 {
+        schema_version: 2,
+        transaction_dir: tx
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .into(),
+        nonce: nonce.clone(),
+        original_document: original_document.into(),
+        merged_document: merged_json.clone(),
+        profiles,
+        phase: "staging".into(),
+    };
     let mut planned_installs = Vec::new();
     let result = (|| {
-        write_full_restore_journal(
-            root,
-            &tx,
-            restored_profile_ids,
-            original_document,
-            "preparing",
-        )?;
         fs::create_dir(&tx).map_err(|error| error.to_string())?;
         sync_directory(profiles_dir)?;
         fs::create_dir(&incoming).map_err(|error| error.to_string())?;
         fs::create_dir(&previous).map_err(|error| error.to_string())?;
-        write_full_restore_journal(
-            root,
-            &tx,
-            restored_profile_ids,
-            original_document,
-            "switching",
-        )?;
+        persist_full_restore_journal_v2(root, &journal)?;
         for (index, profile_id) in restored_profile_ids.iter().enumerate() {
             let source = backup_dir.join("profiles").join(profile_id);
             restore_failpoint(RestoreFailpoint::StageCopy(index + 1))?;
             copy_directory(&source, &incoming.join(profile_id))?;
+            write_restore_marker(&incoming.join(profile_id), &tx, profile_id, &nonce)?;
         }
         for (index, profile_id) in restored_profile_ids.iter().enumerate() {
-            write_full_restore_journal(
-                root,
-                &tx,
-                restored_profile_ids,
-                original_document,
-                "switching",
-            )?;
+            journal.phase = "switching".into();
+            let entry = journal
+                .profiles
+                .iter_mut()
+                .find(|p| p.id == *profile_id)
+                .expect("profile");
+            entry.state = if entry.had_original {
+                "old-move-intent".into()
+            } else {
+                "install-intent".into()
+            };
+            persist_full_restore_journal_v2(root, &journal)?;
             let staged = incoming.join(profile_id);
             let target = profiles_dir.join(profile_id);
             if target.exists() {
@@ -689,23 +748,38 @@ fn restore_full_profile_transaction(
                     .map_err(|error| error.to_string())?;
                 sync_directory(profiles_dir)?;
                 sync_directory(&previous)?;
+                restore_failpoint(RestoreFailpoint::OldMoveAfterRename)?;
+                journal
+                    .profiles
+                    .iter_mut()
+                    .find(|p| p.id == *profile_id)
+                    .expect("profile")
+                    .state = "old-moved".into();
+                persist_full_restore_journal_v2(root, &journal)?;
             }
+            journal
+                .profiles
+                .iter_mut()
+                .find(|p| p.id == *profile_id)
+                .expect("profile")
+                .state = "install-intent".into();
+            persist_full_restore_journal_v2(root, &journal)?;
             planned_installs.push(profile_id.clone());
             fs::rename(&staged, &target).map_err(|error| error.to_string())?;
             sync_directory(profiles_dir)?;
+            journal
+                .profiles
+                .iter_mut()
+                .find(|p| p.id == *profile_id)
+                .expect("profile")
+                .state = "installed".into();
+            persist_full_restore_journal_v2(root, &journal)?;
             restore_failpoint(RestoreFailpoint::InstallAfterRename(index + 1))?;
         }
         restore_failpoint(RestoreFailpoint::IndexWrite)?;
-        let json =
-            serde_json::to_string_pretty(merged_document).map_err(|error| error.to_string())?;
-        write_text_file_atomically(document_path, &format!("{json}\n"))?;
-        write_full_restore_journal(
-            root,
-            &tx,
-            restored_profile_ids,
-            original_document,
-            "committed-cleanup-pending",
-        )?;
+        write_bytes_file_atomically(document_path, &merged_json)?;
+        journal.phase = "committed-cleanup-pending".into();
+        persist_full_restore_journal_v2(root, &journal)?;
         Ok(())
     })();
     match result {
@@ -1005,33 +1079,9 @@ pub fn inspect_pending_full_restore(root: &Path) -> Result<PendingFullRestoreSta
             state: "manual-inspection-required".to_string(),
         });
     };
-    let Ok(journal) = serde_json::from_slice::<FullRestoreJournal>(&raw) else {
-        return Ok(PendingFullRestoreStatus {
-            state: "manual-inspection-required".to_string(),
-        });
-    };
-    let valid_tx_name = Path::new(&journal.transaction_dir).components().count() == 1
-        && journal.transaction_dir.starts_with(".restore-tx-");
-    let valid_ids = !journal.restored_profile_ids.is_empty()
-        && journal
-            .restored_profile_ids
-            .iter()
-            .all(|id| validate_profile_id(id).is_ok())
-        && journal
-            .restored_profile_ids
-            .iter()
-            .collect::<HashSet<_>>()
-            .len()
-            == journal.restored_profile_ids.len();
-    let tx = root.join("profiles").join(&journal.transaction_dir);
-    let valid_tx = fs::symlink_metadata(&tx)
-        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
-    let valid = journal.schema_version == 1
-        && matches!(journal.phase.as_str(), "preparing" | "switching")
-        && valid_tx_name
-        && valid_ids
-        && !journal.original_document.is_empty()
-        && valid_tx;
+    let valid = serde_json::from_slice::<FullRestoreJournalV2>(&raw)
+        .ok()
+        .is_some_and(|journal| validate_restore_journal_v2(root, &journal).is_ok());
     Ok(PendingFullRestoreStatus {
         state: if valid {
             "rollback-available"
@@ -1040,6 +1090,135 @@ pub fn inspect_pending_full_restore(root: &Path) -> Result<PendingFullRestoreSta
         }
         .to_string(),
     })
+}
+
+fn validate_restore_journal_v2(root: &Path, journal: &FullRestoreJournalV2) -> Result<(), String> {
+    if journal.schema_version != 2
+        || !matches!(
+            journal.phase.as_str(),
+            "staging" | "switching" | "rolling-back" | "rollback-cleanup-pending"
+        )
+        || journal.nonce.trim().is_empty()
+        || Path::new(&journal.transaction_dir).components().count() != 1
+        || !journal.transaction_dir.starts_with(".restore-tx-")
+        || journal.profiles.is_empty()
+    {
+        return Err("恢复 journal 无效".into());
+    }
+    let original: ProfileDocument =
+        serde_json::from_slice(&journal.original_document).map_err(|_| "恢复原始索引无效")?;
+    let merged: ProfileDocument =
+        serde_json::from_slice(&journal.merged_document).map_err(|_| "恢复合并索引无效")?;
+    let ids = journal
+        .profiles
+        .iter()
+        .map(|p| p.id.as_str())
+        .collect::<HashSet<_>>();
+    if ids.len() != journal.profiles.len()
+        || journal.profiles.iter().any(|p| {
+            validate_profile_id(&p.id).is_err()
+                || !matches!(
+                    p.state.as_str(),
+                    "pending"
+                        | "old-move-intent"
+                        | "old-moved"
+                        | "install-intent"
+                        | "installed"
+                        | "rollback-intent"
+                        | "revert-move-intent"
+                        | "reverted"
+                )
+        })
+    {
+        return Err("恢复账号无效".into());
+    }
+    let tx = real_tx_dir(root, &journal.transaction_dir)?;
+    let incoming = real_child_dir(&tx, "incoming")?;
+    let previous = real_child_dir(&tx, "previous")?;
+    let known = ["incoming", "previous"];
+    for entry in fs::read_dir(&tx).map_err(|e| e.to_string())? {
+        let e = entry.map_err(|e| e.to_string())?;
+        if !known.contains(&e.file_name().to_string_lossy().as_ref()) {
+            return Err("恢复事务含未知内容".into());
+        }
+    }
+    for dir in [&incoming, &previous] {
+        for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !ids.contains(name.as_str())
+                || !fs::symlink_metadata(entry.path())
+                    .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
+            {
+                return Err("恢复事务含未知账号目录".into());
+            }
+        }
+    }
+    let _ = (original, merged);
+    for profile in &journal.profiles {
+        let target = safe_profile_dir_in(&real_profiles_dir(root)?, &profile.id)?;
+        let i = incoming.join(&profile.id);
+        let p = previous.join(&profile.id);
+        for path in [&i, &p] {
+            if path.exists()
+                && !fs::symlink_metadata(path)
+                    .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
+            {
+                return Err("恢复事务目录无效".into());
+            }
+        }
+        if i.exists()
+            && !restore_marker_matches(&i, &journal.transaction_dir, &profile.id, &journal.nonce)?
+        {
+            return Err("恢复标记不匹配".into());
+        }
+        if p.exists() && !profile.had_original {
+            return Err("恢复原始目录不匹配".into());
+        }
+        if target.exists()
+            && !fs::symlink_metadata(&target)
+                .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
+        {
+            return Err("目标账号目录无效".into());
+        }
+        if profile.had_original
+            && matches!(
+                profile.state.as_str(),
+                "rollback-intent" | "revert-move-intent"
+            )
+            && target.exists()
+            && !p.exists()
+        {
+            return Err("回滚后的账号目录缺少可验证证据".into());
+        }
+        if target.exists()
+            && matches!(
+                profile.state.as_str(),
+                "old-moved" | "install-intent" | "installed" | "rollback-intent"
+            )
+            && !restore_marker_matches(
+                &target,
+                &journal.transaction_dir,
+                &profile.id,
+                &journal.nonce,
+            )?
+        {
+            return Err("恢复标记不匹配".into());
+        }
+    }
+    Ok(())
+}
+
+fn real_tx_dir(root: &Path, name: &str) -> Result<PathBuf, String> {
+    real_child_dir(&real_profiles_dir(root)?, name)
+}
+fn real_child_dir(parent: &Path, name: &str) -> Result<PathBuf, String> {
+    let p = parent.join(name);
+    if fs::symlink_metadata(&p).is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink()) {
+        Ok(p)
+    } else {
+        Err("恢复事务目录无效".into())
+    }
 }
 
 fn has_orphan_restore_transaction(profiles_dir: &Path) -> bool {
@@ -1103,6 +1282,164 @@ fn remove_full_restore_journal(root: &Path) -> Result<(), String> {
     if path.exists() {
         fs::remove_file(path).map_err(|error| error.to_string())?;
     }
+    Ok(())
+}
+
+fn persist_full_restore_journal_v2(
+    root: &Path,
+    journal: &FullRestoreJournalV2,
+) -> Result<(), String> {
+    let app_data = real_app_data_dir(root)?;
+    let path = managed_app_data_file(&app_data, RESTORE_JOURNAL_FILE)?;
+    write_text_file_atomically(
+        &path,
+        &serde_json::to_string(&journal).map_err(|e| e.to_string())?,
+    )
+}
+
+fn write_restore_marker(dir: &Path, tx: &Path, id: &str, nonce: &str) -> Result<(), String> {
+    let marker = RestoreMarker {
+        schema_version: 2,
+        transaction_dir: tx
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| "恢复事务目录无效".to_string())?
+            .into(),
+        profile_id: id.into(),
+        nonce: nonce.into(),
+    };
+    write_text_file_atomically(
+        &dir.join(RESTORE_MARKER_FILE),
+        &serde_json::to_string(&marker).map_err(|e| e.to_string())?,
+    )
+}
+fn restore_marker_matches(dir: &Path, tx: &str, id: &str, nonce: &str) -> Result<bool, String> {
+    let path = dir.join(RESTORE_MARKER_FILE);
+    let meta = fs::symlink_metadata(&path).map_err(|_| "恢复标记缺失".to_string())?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return Err("恢复标记无效".into());
+    }
+    let marker: RestoreMarker = serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?)
+        .map_err(|_| "恢复标记无效".to_string())?;
+    Ok(marker.schema_version == 2
+        && marker.transaction_dir == tx
+        && marker.profile_id == id
+        && marker.nonce == nonce)
+}
+
+pub fn rollback_pending_full_restore(root: &Path) -> Result<(), String> {
+    if inspect_pending_full_restore(root)?.state != "rollback-available" {
+        return Err("未发现可安全回滚的完整恢复".into());
+    }
+    let _guard = acquire_root_mutation(root)?;
+    if inspect_pending_full_restore(root)?.state != "rollback-available" {
+        return Err("恢复状态已变化，请重新检查".into());
+    }
+    let app = real_app_data_dir(root)?;
+    let journal_path = managed_app_data_file(&app, RESTORE_JOURNAL_FILE)?;
+    let mut journal: FullRestoreJournalV2 =
+        serde_json::from_slice(&fs::read(&journal_path).map_err(|e| e.to_string())?)
+            .map_err(|_| "恢复 journal 无效".to_string())?;
+    validate_restore_journal_v2(root, &journal)?;
+    let profiles_dir = real_profiles_dir(root)?;
+    let tx = real_tx_dir(root, &journal.transaction_dir)?;
+    let incoming = real_child_dir(&tx, "incoming")?;
+    let previous = real_child_dir(&tx, "previous")?;
+    if journal.phase == "staging" {
+        fs::remove_dir_all(&tx).map_err(|e| e.to_string())?;
+        sync_directory(&profiles_dir)?;
+        remove_full_restore_journal(root)?;
+        return Ok(());
+    }
+    let document_path = managed_app_data_file(&app, "profiles.json")?;
+    let current = fs::read(&document_path).map_err(|e| e.to_string())?;
+    if current != journal.original_document && current != journal.merged_document {
+        return Err("当前索引与恢复事务冲突，未做任何修改".into());
+    }
+    // 先纯读取扫描所有账号；任何一项异常均不能留下 journal 进度写入。
+    let inferred_states = journal
+        .profiles
+        .iter()
+        .map(|p| {
+            let target = profiles_dir.join(&p.id);
+            if p.had_original
+                && p.state == "old-move-intent"
+                && !target.exists()
+                && previous.join(&p.id).is_dir()
+            {
+                "old-moved".to_string()
+            } else {
+                p.state.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    for (p, state) in journal.profiles.iter().zip(&inferred_states) {
+        let target = profiles_dir.join(&p.id);
+        if matches!(
+            state.as_str(),
+            "old-moved" | "install-intent" | "installed" | "rollback-intent"
+        ) && target.exists()
+            && !restore_marker_matches(&target, &journal.transaction_dir, &p.id, &journal.nonce)?
+        {
+            return Err("恢复标记不匹配，未做任何修改".into());
+        }
+        if p.had_original
+            && matches!(
+                state.as_str(),
+                "old-moved"
+                    | "install-intent"
+                    | "installed"
+                    | "rollback-intent"
+                    | "revert-move-intent"
+            )
+            && !previous.join(&p.id).is_dir()
+            && state != "reverted"
+        {
+            return Err("缺少原始账号目录，未做任何修改".into());
+        }
+    }
+    for (profile, state) in journal.profiles.iter_mut().zip(inferred_states) {
+        profile.state = state;
+    }
+    journal.phase = "rolling-back".into();
+    persist_full_restore_journal_v2(root, &journal)?;
+    for index in 0..journal.profiles.len() {
+        if journal.profiles[index].state == "reverted" {
+            continue;
+        }
+        let never_moved = matches!(
+            journal.profiles[index].state.as_str(),
+            "pending" | "old-move-intent"
+        );
+        journal.profiles[index].state = "rollback-intent".into();
+        persist_full_restore_journal_v2(root, &journal)?;
+        let id = journal.profiles[index].id.clone();
+        let target = profiles_dir.join(&id);
+        if !never_moved && target.exists() {
+            fs::remove_dir_all(&target).map_err(|e| e.to_string())?;
+            sync_directory(&profiles_dir)?;
+        }
+        if !never_moved && journal.profiles[index].had_original {
+            journal.profiles[index].state = "revert-move-intent".into();
+            persist_full_restore_journal_v2(root, &journal)?;
+            fs::rename(previous.join(&id), &target).map_err(|e| e.to_string())?;
+            sync_directory(&profiles_dir)?;
+            restore_failpoint(RestoreFailpoint::RevertMoveAfterRename)?;
+        }
+        journal.profiles[index].state = "reverted".into();
+        persist_full_restore_journal_v2(root, &journal)?;
+        restore_failpoint(RestoreFailpoint::RollbackAfterProfile(index + 1))?;
+    }
+    if current == journal.merged_document {
+        write_bytes_file_atomically(&document_path, &journal.original_document)?;
+    }
+    journal.phase = "rollback-cleanup-pending".into();
+    persist_full_restore_journal_v2(root, &journal)?;
+    restore_failpoint(RestoreFailpoint::RollbackCleanup)?;
+    let _ = incoming;
+    fs::remove_dir_all(&tx).map_err(|e| e.to_string())?;
+    sync_directory(&profiles_dir)?;
+    remove_full_restore_journal(root)?;
     Ok(())
 }
 
@@ -3605,6 +3942,327 @@ mod tests {
     }
 
     #[test]
+    fn v1_restore_journal_is_manual_and_never_offers_rollback() {
+        let (_source_root, target_root, _backup) = full_restore_test_roots();
+        let tx = target_root.path().join("profiles/.restore-tx-v1");
+        fs::create_dir(&tx).expect("tx");
+        fs::write(target_root.path().join("app-data/restore-journal.json"), r#"{"schemaVersion":1,"transactionDir":".restore-tx-v1","restoredProfileIds":["account-001"],"originalDocument":[123],"phase":"switching"}"#).expect("journal");
+        assert_eq!(
+            inspect_pending_full_restore(target_root.path())
+                .expect("inspect")
+                .state,
+            "manual-inspection-required"
+        );
+        assert!(rollback_pending_full_restore(target_root.path()).is_err());
+    }
+
+    #[test]
+    fn explicit_rollback_restores_failed_v2_transaction() {
+        let (_source_root, target_root, backup) = full_restore_test_roots();
+        let before = fs::read(target_root.path().join("app-data/profiles.json")).expect("before");
+        set_restore_failpoint(Some(RestoreFailpoint::InstallThenRollback(2)));
+        assert!(restore_full_profile_backup(target_root.path(), &backup, true).is_err());
+        set_restore_failpoint(None);
+        assert_eq!(
+            inspect_pending_full_restore(target_root.path())
+                .expect("inspect")
+                .state,
+            "rollback-available"
+        );
+        rollback_pending_full_restore(target_root.path()).expect("rollback");
+        assert_eq!(
+            fs::read(target_root.path().join("app-data/profiles.json")).expect("after"),
+            before
+        );
+        assert!(!has_restore_transaction(target_root.path()));
+        assert_eq!(
+            inspect_pending_full_restore(target_root.path())
+                .expect("inspect done")
+                .state,
+            "none"
+        );
+    }
+
+    #[test]
+    fn rollback_retries_after_one_profile_was_durably_reverted() {
+        let (_source_root, target_root, backup) = full_restore_test_roots();
+        set_restore_failpoint(Some(RestoreFailpoint::InstallThenRollback(2)));
+        assert!(restore_full_profile_backup(target_root.path(), &backup, true).is_err());
+        set_restore_failpoint(Some(RestoreFailpoint::RollbackAfterProfile(1)));
+        assert!(rollback_pending_full_restore(target_root.path()).is_err());
+        set_restore_failpoint(None);
+        assert_eq!(
+            inspect_pending_full_restore(target_root.path())
+                .expect("retry inspect")
+                .state,
+            "rollback-available"
+        );
+        rollback_pending_full_restore(target_root.path()).expect("retry rollback");
+        assert_eq!(
+            inspect_pending_full_restore(target_root.path())
+                .expect("done")
+                .state,
+            "none"
+        );
+    }
+
+    #[test]
+    fn rollback_retries_after_cleanup_failure() {
+        let (_source_root, target_root, backup) = full_restore_test_roots();
+        set_restore_failpoint(Some(RestoreFailpoint::InstallThenRollback(2)));
+        assert!(restore_full_profile_backup(target_root.path(), &backup, true).is_err());
+        set_restore_failpoint(Some(RestoreFailpoint::RollbackCleanup));
+        assert!(rollback_pending_full_restore(target_root.path()).is_err());
+        set_restore_failpoint(None);
+        assert_eq!(
+            inspect_pending_full_restore(target_root.path())
+                .expect("inspect")
+                .state,
+            "rollback-available"
+        );
+        rollback_pending_full_restore(target_root.path()).expect("retry");
+    }
+
+    #[test]
+    fn rollback_accepts_merged_bytes_when_phase_update_was_interrupted() {
+        let (_source_root, target_root, backup) = full_restore_test_roots();
+        set_restore_failpoint(Some(RestoreFailpoint::PostCommitCleanup));
+        restore_full_profile_backup(target_root.path(), &backup, true).expect("restore");
+        set_restore_failpoint(None);
+        let path = target_root.path().join("app-data/restore-journal.json");
+        let mut journal: FullRestoreJournalV2 =
+            serde_json::from_slice(&fs::read(&path).expect("journal")).expect("parse");
+        journal.phase = "switching".into();
+        fs::write(&path, serde_json::to_vec(&journal).expect("serialize"))
+            .expect("phase before crash");
+        assert_eq!(
+            fs::read(target_root.path().join("app-data/profiles.json")).expect("index"),
+            journal.merged_document
+        );
+        rollback_pending_full_restore(target_root.path()).expect("rollback merged index");
+        assert_eq!(
+            fs::read(target_root.path().join("app-data/profiles.json")).expect("index"),
+            journal.original_document
+        );
+    }
+
+    #[test]
+    fn old_move_intent_keeps_original_target_untouched() {
+        let (_source_root, target_root, _backup) = full_restore_test_roots();
+        let root = target_root.path();
+        let original = fs::read(root.join("app-data/profiles.json")).expect("original");
+        let tx = root.join("profiles/.restore-tx-intent");
+        fs::create_dir(&tx).expect("tx");
+        fs::create_dir(tx.join("incoming")).expect("incoming");
+        fs::create_dir(tx.join("previous")).expect("previous");
+        fs::create_dir(tx.join("incoming/account-001")).expect("staged");
+        write_restore_marker(
+            &tx.join("incoming/account-001"),
+            &tx,
+            "account-001",
+            "nonce",
+        )
+        .expect("marker");
+        let journal = FullRestoreJournalV2 {
+            schema_version: 2,
+            transaction_dir: ".restore-tx-intent".into(),
+            nonce: "nonce".into(),
+            original_document: original.clone(),
+            merged_document: original.clone(),
+            profiles: vec![FullRestoreJournalProfile {
+                id: "account-001".into(),
+                had_original: true,
+                state: "old-move-intent".into(),
+            }],
+            phase: "switching".into(),
+        };
+        persist_full_restore_journal_v2(root, &journal).expect("journal");
+        let marker_before =
+            fs::read(root.join("profiles/account-001/.multichrome-profile.json")).ok();
+        rollback_pending_full_restore(root).expect("rollback");
+        assert_eq!(
+            fs::read(root.join("profiles/account-001/.multichrome-profile.json")).ok(),
+            marker_before
+        );
+    }
+
+    #[test]
+    fn old_move_rename_before_state_persist_is_recovered_from_physical_layout() {
+        let (_source_root, target_root, _backup) = full_restore_test_roots();
+        let root = target_root.path();
+        let original = fs::read(root.join("app-data/profiles.json")).expect("original");
+        let tx = root.join("profiles/.restore-tx-old-rename");
+        fs::create_dir(&tx).expect("tx");
+        fs::create_dir(tx.join("incoming")).expect("in");
+        fs::create_dir(tx.join("previous")).expect("prev");
+        fs::create_dir(tx.join("incoming/account-001")).expect("stage");
+        write_restore_marker(
+            &tx.join("incoming/account-001"),
+            &tx,
+            "account-001",
+            "nonce",
+        )
+        .expect("marker");
+        fs::rename(
+            root.join("profiles/account-001"),
+            tx.join("previous/account-001"),
+        )
+        .expect("simulate rename before persist");
+        let journal = FullRestoreJournalV2 {
+            schema_version: 2,
+            transaction_dir: ".restore-tx-old-rename".into(),
+            nonce: "nonce".into(),
+            original_document: original.clone(),
+            merged_document: original,
+            profiles: vec![FullRestoreJournalProfile {
+                id: "account-001".into(),
+                had_original: true,
+                state: "old-move-intent".into(),
+            }],
+            phase: "switching".into(),
+        };
+        persist_full_restore_journal_v2(root, &journal).expect("journal");
+        rollback_pending_full_restore(root).expect("retry rollback");
+        assert!(root.join("profiles/account-001").is_dir());
+    }
+
+    #[test]
+    fn preflight_does_not_persist_first_inference_when_later_profile_is_invalid() {
+        let (_source_root, target_root, _backup) = full_restore_test_roots();
+        let root = target_root.path();
+        let original = fs::read(root.join("app-data/profiles.json")).expect("original");
+        let tx = root.join("profiles/.restore-tx-preflight");
+        fs::create_dir(&tx).expect("tx");
+        fs::create_dir(tx.join("incoming")).expect("in");
+        fs::create_dir(tx.join("previous")).expect("prev");
+        for id in ["account-001", "account-002"] {
+            fs::create_dir(tx.join("incoming").join(id)).expect("stage");
+            write_restore_marker(&tx.join("incoming").join(id), &tx, id, "nonce").expect("marker");
+        }
+        fs::rename(
+            root.join("profiles/account-001"),
+            tx.join("previous/account-001"),
+        )
+        .expect("first physical move");
+        let journal = FullRestoreJournalV2 {
+            schema_version: 2,
+            transaction_dir: ".restore-tx-preflight".into(),
+            nonce: "nonce".into(),
+            original_document: original.clone(),
+            merged_document: original.clone(),
+            profiles: vec![
+                FullRestoreJournalProfile {
+                    id: "account-001".into(),
+                    had_original: true,
+                    state: "old-move-intent".into(),
+                },
+                FullRestoreJournalProfile {
+                    id: "account-002".into(),
+                    had_original: true,
+                    state: "old-moved".into(),
+                },
+            ],
+            phase: "switching".into(),
+        };
+        persist_full_restore_journal_v2(root, &journal).expect("journal");
+        let before = fs::read(root.join("app-data/restore-journal.json")).expect("bytes");
+        assert!(rollback_pending_full_restore(root).is_err());
+        assert_eq!(
+            fs::read(root.join("app-data/restore-journal.json")).expect("after"),
+            before
+        );
+        assert!(tx.join("previous/account-001").is_dir());
+        assert!(root.join("profiles/account-002").is_dir());
+        assert_eq!(
+            fs::read(root.join("app-data/profiles.json")).expect("index"),
+            original
+        );
+    }
+
+    #[test]
+    fn install_or_old_moved_target_without_restore_marker_requires_manual_inspection() {
+        for state in ["install-intent", "old-moved"] {
+            let (_source_root, target_root, _backup) = full_restore_test_roots();
+            let root = target_root.path();
+            let original = fs::read(root.join("app-data/profiles.json")).expect("original");
+            let name = format!(".restore-tx-marker-{state}");
+            let tx = root.join("profiles").join(&name);
+            fs::create_dir(&tx).expect("tx");
+            fs::create_dir(tx.join("incoming")).expect("in");
+            fs::create_dir(tx.join("previous")).expect("prev");
+            fs::create_dir(tx.join("incoming/account-001")).expect("stage");
+            write_restore_marker(
+                &tx.join("incoming/account-001"),
+                &tx,
+                "account-001",
+                "nonce",
+            )
+            .expect("marker");
+            let journal = FullRestoreJournalV2 {
+                schema_version: 2,
+                transaction_dir: name,
+                nonce: "nonce".into(),
+                original_document: original.clone(),
+                merged_document: original,
+                profiles: vec![FullRestoreJournalProfile {
+                    id: "account-001".into(),
+                    had_original: true,
+                    state: state.into(),
+                }],
+                phase: "switching".into(),
+            };
+            persist_full_restore_journal_v2(root, &journal).expect("journal");
+            assert_eq!(
+                inspect_pending_full_restore(root).expect("inspect").state,
+                "manual-inspection-required"
+            );
+            assert!(rollback_pending_full_restore(root).is_err());
+            assert!(root.join("profiles/account-001").is_dir());
+            assert!(tx.exists());
+        }
+    }
+
+    #[test]
+    fn revert_move_rename_before_state_persist_requires_manual_inspection() {
+        let (_source_root, target_root, _backup) = full_restore_test_roots();
+        let root = target_root.path();
+        let original = fs::read(root.join("app-data/profiles.json")).expect("original");
+        let tx = root.join("profiles/.restore-tx-revert-rename");
+        fs::create_dir(&tx).expect("tx");
+        fs::create_dir(tx.join("incoming")).expect("in");
+        fs::create_dir(tx.join("previous")).expect("prev");
+        fs::create_dir(tx.join("incoming/account-001")).expect("stage");
+        write_restore_marker(
+            &tx.join("incoming/account-001"),
+            &tx,
+            "account-001",
+            "nonce",
+        )
+        .expect("marker");
+        let journal = FullRestoreJournalV2 {
+            schema_version: 2,
+            transaction_dir: ".restore-tx-revert-rename".into(),
+            nonce: "nonce".into(),
+            original_document: original.clone(),
+            merged_document: original,
+            profiles: vec![FullRestoreJournalProfile {
+                id: "account-001".into(),
+                had_original: true,
+                state: "revert-move-intent".into(),
+            }],
+            phase: "rolling-back".into(),
+        };
+        persist_full_restore_journal_v2(root, &journal).expect("journal");
+        assert_eq!(
+            inspect_pending_full_restore(root).expect("inspect").state,
+            "manual-inspection-required"
+        );
+        assert!(rollback_pending_full_restore(root).is_err());
+        assert!(root.join("profiles/account-001").is_dir());
+        assert!(tx.exists());
+    }
+
+    #[test]
     fn full_restore_success_has_no_cleanup_pending_health_issue() {
         let (_source_root, target_root, backup) = full_restore_test_roots();
 
@@ -3638,7 +4296,7 @@ mod tests {
             inspect_pending_full_restore(target_root.path())
                 .expect("inspect journal")
                 .state,
-            "rollback-available"
+            "manual-inspection-required"
         );
         assert!(save_browser_launch_events(target_root.path(), &[])
             .expect_err("pending restore blocks mutation")
