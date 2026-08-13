@@ -2,14 +2,16 @@ mod browser_runtime;
 mod profile_store;
 
 use profile_store::{
-    check_root_health, copy_profile_dir, create_full_profile_backup, create_profile_backup,
-    default_browser_path, delete_profile_dir, directory_size, ensure_profile_backups_dir,
-    ensure_profile_dir, import_profile_dir, init_root, load_profile_document,
-    preview_full_profile_backup, preview_full_profile_restore, repair_root_health,
+    acquire_root_mutation, check_root_health, copy_profile_dir, create_full_profile_backup,
+    create_profile_backup, default_browser_path, delete_profile_dir, directory_size,
+    ensure_profile_backups_dir, ensure_profile_dir_under_root_mutation, import_profile_dir,
+    init_root, inspect_pending_full_restore, load_profile_document, preview_full_profile_backup,
+    preview_full_profile_restore, reject_pending_full_restore, repair_root_health,
     restore_full_profile_backup, restore_profile_backup, save_profile_document, BrowserLaunchEvent,
     FullProfileBackupPreview, FullProfileBackupResult, FullProfileRestorePreview,
-    ProfileBackupResult, ProfileDocument, ProfileImportCandidate, ProfileMarker, RootHealthReport,
-    RootHealthIssue, RootHealthSeverity, RootRepairResult, RootStatus,
+    PendingFullRestoreStatus, ProfileBackupResult, ProfileDocument, ProfileImportCandidate,
+    ProfileMarker, RootHealthIssue, RootHealthReport, RootHealthSeverity, RootRepairResult,
+    RootStatus,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -130,6 +132,7 @@ pub fn run() {
             create_full_profiles_backup,
             preview_full_profiles_restore,
             restore_full_profiles_backup,
+            inspect_pending_full_profiles_restore,
             reveal_profile_backups_dir,
             init_profile_root,
             load_profiles,
@@ -228,6 +231,13 @@ fn restore_full_profiles_backup(
 }
 
 #[tauri::command]
+fn inspect_pending_full_profiles_restore(
+    root_path: String,
+) -> Result<PendingFullRestoreStatus, String> {
+    inspect_pending_full_restore(&PathBuf::from(root_path))
+}
+
+#[tauri::command]
 fn reveal_profile_backups_dir(root_path: String) -> Result<String, String> {
     let path = ensure_profile_backups_dir(&PathBuf::from(root_path))?;
     reveal_path(path.to_string_lossy().to_string())?;
@@ -285,30 +295,41 @@ fn open_profile(
     launch_url: Option<String>,
 ) -> Result<String, String> {
     let root_path = PathBuf::from(root_path);
-    let profile_dir = ensure_profile_dir(&root_path, &profile_id)?;
-    let browser = configured_browser_path(browser_path);
-    if !browser_path_is_launchable(&browser) {
-        return Err(format!("未检测到浏览器：{}", browser.to_string_lossy()));
-    }
+    with_browser_root_mutation(&root_path, || {
+        let profile_dir = ensure_profile_dir_under_root_mutation(&root_path, &profile_id)?;
+        let browser = configured_browser_path(browser_path);
+        if !browser_path_is_launchable(&browser) {
+            return Err(format!("未检测到浏览器：{}", browser.to_string_lossy()));
+        }
 
-    let is_running = is_profile_running(&root_path, &profile_id).unwrap_or(false);
-    let debug_port = if is_running {
-        None
-    } else {
-        Some(allocate_debug_port()?)
-    };
-    let launch_command =
-        profile_launch_command(&browser, &profile_dir, launch_url, is_running, debug_port);
-    let status = Command::new(&launch_command.program)
-        .args(&launch_command.args)
-        .status()
-        .map_err(|error| error.to_string())?;
+        let is_running = is_profile_running(&root_path, &profile_id).unwrap_or(false);
+        let debug_port = if is_running {
+            None
+        } else {
+            Some(allocate_debug_port()?)
+        };
+        let launch_command =
+            profile_launch_command(&browser, &profile_dir, launch_url, is_running, debug_port);
+        let status = Command::new(&launch_command.program)
+            .args(&launch_command.args)
+            .status()
+            .map_err(|error| error.to_string())?;
 
-    if status.success() {
-        Ok(profile_dir.to_string_lossy().to_string())
-    } else {
-        Err("启动 Google Chrome 失败".to_string())
-    }
+        if status.success() {
+            Ok(profile_dir.to_string_lossy().to_string())
+        } else {
+            Err("启动 Google Chrome 失败".to_string())
+        }
+    })
+}
+
+fn with_browser_root_mutation<T>(
+    root: &Path,
+    action: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    reject_pending_full_restore(root)?;
+    let _guard = acquire_root_mutation(root)?;
+    action()
 }
 
 fn is_profile_running(root_path: &Path, profile_id: &str) -> Result<bool, String> {
@@ -427,58 +448,66 @@ fn navigate_runtime_tab(
     profile_id: String,
     url: String,
 ) -> Result<RuntimeTabNavigationResult, String> {
-    let url = browser_runtime::validate_runtime_navigation_url(&url)?;
-    let output = Command::new("ps")
-        .args(["-axo", "pid=,command="])
-        .output()
-        .map_err(|_| "Browser Runtime 不可用".to_string())?;
+    let root_path = PathBuf::from(root_path);
+    with_browser_root_mutation(&root_path, || {
+        let url = browser_runtime::validate_runtime_navigation_url(&url)?;
+        let output = Command::new("ps")
+            .args(["-axo", "pid=,command="])
+            .output()
+            .map_err(|_| "Browser Runtime 不可用".to_string())?;
 
-    if !output.status.success() {
-        return Err("Browser Runtime 不可用".to_string());
-    }
+        if !output.status.success() {
+            return Err("Browser Runtime 不可用".to_string());
+        }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    browser_runtime::navigate_runtime_tab_from_processes(
-        &PathBuf::from(root_path),
-        &profile_id,
-        &url,
-        stdout.lines(),
-        browser_runtime::fetch_cdp_tabs,
-        browser_runtime::send_cdp_page_navigate,
-        current_time_millis(),
-    )
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        browser_runtime::navigate_runtime_tab_from_processes(
+            &root_path,
+            &profile_id,
+            &url,
+            stdout.lines(),
+            browser_runtime::fetch_cdp_tabs,
+            browser_runtime::send_cdp_page_navigate,
+            current_time_millis(),
+        )
+    })
 }
 
 #[tauri::command]
 fn focus_profile_window(root_path: String, profile_id: String) -> Result<(), String> {
-    let process = running_profile_process_for(&PathBuf::from(root_path), &profile_id)?;
-    focus_chrome_process(process.pid)
+    let root_path = PathBuf::from(root_path);
+    with_browser_root_mutation(&root_path, || {
+        let process = running_profile_process_for(&root_path, &profile_id)?;
+        focus_chrome_process(process.pid)
+    })
 }
 
 #[tauri::command]
 fn quit_profile_browser(root_path: String, profile_id: String) -> Result<(), String> {
     let root_path = PathBuf::from(root_path);
-    let process_lines = read_process_lines()?;
-    let process = strict_profile_process_for(
-        &root_path,
-        &profile_id,
-        process_lines.iter().map(String::as_str),
-    )?;
-    let command = quit_profile_process_plan_if_matches(
-        &root_path,
-        &profile_id,
-        process.pid,
-        read_process_lines()?.iter().map(String::as_str),
-    )?;
-    let status = Command::new(&command.program)
-        .args(&command.args)
-        .status()
-        .map_err(|error| error.to_string())?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("退出账号浏览器失败：{}", profile_id))
-    }
+    with_browser_root_mutation(&root_path, || {
+        let process_lines = read_process_lines()?;
+        let process = strict_profile_process_for(
+            &root_path,
+            &profile_id,
+            process_lines.iter().map(String::as_str),
+        )?;
+        let command = quit_profile_process_plan_if_matches(
+            &root_path,
+            &profile_id,
+            process.pid,
+            read_process_lines()?.iter().map(String::as_str),
+        )?;
+        let status = Command::new(&command.program)
+            .args(&command.args)
+            .status()
+            .map_err(|error| error.to_string())?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("退出账号浏览器失败：{}", profile_id))
+        }
+    })
 }
 
 #[tauri::command]
@@ -499,8 +528,11 @@ fn set_profile_window_bounds(
     width: i32,
     height: i32,
 ) -> Result<(), String> {
-    let process = running_profile_process_for(&PathBuf::from(root_path), &profile_id)?;
-    set_chrome_window_bounds(process.pid, x, y, width, height)
+    let root_path = PathBuf::from(root_path);
+    with_browser_root_mutation(&root_path, || {
+        let process = running_profile_process_for(&root_path, &profile_id)?;
+        set_chrome_window_bounds(process.pid, x, y, width, height)
+    })
 }
 
 fn running_profile_process_for(
@@ -852,7 +884,12 @@ where
 {
     let profile_dir = profile_store::profile_dir(root_path, profile_id);
     let registered = load_profile_document(root_path)
-        .map(|document| document.profiles.into_iter().any(|profile| profile.id == profile_id))
+        .map(|document| {
+            document
+                .profiles
+                .into_iter()
+                .any(|profile| profile.id == profile_id)
+        })
         .unwrap_or(false);
     let running = running_profile_processes_from_processes(root_path, process_lines)
         .into_iter()
@@ -1461,6 +1498,57 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    #[test]
+    fn browser_mutation_rejects_busy_root_before_calling_system_api() {
+        let root = tempfile::tempdir().expect("root");
+        init_root(root.path()).expect("init root");
+        let _restore_guard =
+            profile_store::acquire_root_mutation(root.path()).expect("restore guard");
+        let mut system_api_calls = 0;
+
+        let error = with_browser_root_mutation(root.path(), || {
+            system_api_calls += 1;
+            Ok(())
+        })
+        .expect_err("browser action must wait for restore");
+
+        assert_eq!(error, "该根目录已有写操作正在进行，请稍后重试");
+        assert_eq!(system_api_calls, 0);
+    }
+
+    #[test]
+    fn browser_mutation_keeps_same_root_busy_but_leaves_other_roots_available() {
+        let root = tempfile::tempdir().expect("root");
+        let other_root = tempfile::tempdir().expect("other root");
+        init_root(root.path()).expect("init root");
+        init_root(other_root.path()).expect("init other root");
+
+        with_browser_root_mutation(root.path(), || {
+            let document = ProfileDocument {
+                version: 1,
+                settings: profile_store::AppSettings::default(),
+                profiles: Vec::new(),
+                projects: Vec::new(),
+            };
+            let blocked = save_profile_document(root.path(), &document)
+                .expect_err("save must not overlap browser mutation");
+            assert_eq!(blocked, "该根目录已有写操作正在进行，请稍后重试");
+
+            let restore_blocked = restore_full_profile_backup(
+                root.path(),
+                Path::new("/missing-full-profile-backup"),
+                true,
+            )
+            .expect_err("restore must not overlap browser mutation");
+            assert_eq!(restore_blocked, "该根目录已有写操作正在进行，请稍后重试");
+
+            save_profile_document(other_root.path(), &document)
+                .expect("other root remains writable");
+            Ok(())
+        })
+        .expect("browser action");
+    }
+
     struct SlowHandshakeStream {
         inner: TcpStream,
         chunk_size: usize,
@@ -1679,7 +1767,9 @@ mod tests {
         assert!(!browser_path_is_launchable(&empty_dir));
         assert!(!browser_path_is_launchable(&empty_app));
         assert!(!browser_path_is_launchable(&browser_file));
-        assert!(browser_path_is_launchable(&temp_dir.path().join("Working Browser.app")));
+        assert!(browser_path_is_launchable(
+            &temp_dir.path().join("Working Browser.app")
+        ));
     }
 
     #[test]
@@ -1706,7 +1796,9 @@ mod tests {
         assert_eq!(issue.path.as_deref(), unavailable_browser.to_str());
         assert!(issue.detail.contains(".app"));
         assert!(issue.detail.contains("内部可执行文件"));
-        assert!(issue.detail.contains(unavailable_browser.to_string_lossy().as_ref()));
+        assert!(issue
+            .detail
+            .contains(unavailable_browser.to_string_lossy().as_ref()));
     }
 
     #[test]
@@ -1839,10 +1931,13 @@ mod tests {
             .find(|process| process.profile_id == "account-002")
             .expect("matching profile process");
 
-        assert_eq!(quit_profile_process_plan(process.pid), LaunchCommand {
-            program: PathBuf::from("/bin/kill"),
-            args: vec!["-TERM".to_string(), "1301".to_string()]
-        });
+        assert_eq!(
+            quit_profile_process_plan(process.pid),
+            LaunchCommand {
+                program: PathBuf::from("/bin/kill"),
+                args: vec!["-TERM".to_string(), "1301".to_string()]
+            }
+        );
     }
 
     #[test]
@@ -1874,7 +1969,9 @@ mod tests {
         ];
 
         assert_eq!(
-            strict_profile_process_for(root, "account-001", lines).unwrap().pid,
+            strict_profile_process_for(root, "account-001", lines)
+                .unwrap()
+                .pid,
             1203
         );
         assert!(!is_strict_main_chrome_process_for_quit(
@@ -3060,7 +3157,10 @@ mod tests {
         assert!(snapshot.checked_at > 0);
         assert!(!snapshot.managed_profile_root);
         assert!(snapshot.running);
-        assert_eq!(snapshot.directory_status, ProfileEnvironmentDirectoryStatus::Missing);
+        assert_eq!(
+            snapshot.directory_status,
+            ProfileEnvironmentDirectoryStatus::Missing
+        );
         assert!(snapshot
             .health_issues
             .iter()
@@ -3120,7 +3220,10 @@ mod tests {
         );
         assert!(registered.registered);
         assert!(registered.managed_profile_root);
-        assert_eq!(registered.directory_status, ProfileEnvironmentDirectoryStatus::Ready);
+        assert_eq!(
+            registered.directory_status,
+            ProfileEnvironmentDirectoryStatus::Ready
+        );
         assert!(!registered
             .health_issues
             .iter()
