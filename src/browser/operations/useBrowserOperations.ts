@@ -76,6 +76,15 @@ export function useBrowserOperations({
     setBrowserOperations(nextOperations);
   }, []);
 
+  const clearLaunchQueueOperations = useCallback(() => {
+    const nextOperations = browserOperationsRef.current.filter(
+      (operation) =>
+        operation.type !== "bulk-open-url" && operation.type !== "project-open"
+    );
+    browserOperationsRef.current = nextOperations;
+    setBrowserOperations(nextOperations);
+  }, []);
+
   const startWindowOperation = useCallback(
     (action: string, profilesToOperate: ChromeProfile[]): BrowserOperation => {
       const operation = startBrowserOperation(
@@ -211,7 +220,14 @@ export function useBrowserOperations({
   );
 
   const finishLaunchQueueOperation = useCallback(
-    (operation: BrowserOperation, summary: BrowserLaunchQueueSummary) => {
+    (
+      operation: BrowserOperation,
+      summary: BrowserLaunchQueueSummary,
+      shouldFinish?: () => boolean
+    ) => {
+      if (shouldFinish && !shouldFinish()) {
+        return;
+      }
       upsertBrowserOperation(
         finishBrowserOperation(
           operation,
@@ -293,6 +309,7 @@ export function useBrowserOperations({
     browserOperations,
     clearWindowActionOperations,
     clearProfileOpenOperations,
+    clearLaunchQueueOperations,
     startWindowOperation,
     finishWindowOperation,
     startProfileOpenOperation,

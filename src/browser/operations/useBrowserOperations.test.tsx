@@ -197,6 +197,43 @@ describe("useBrowserOperations", () => {
     ]);
   });
 
+  test("根切换只移除批量网址和项目打开 operation", () => {
+    const { result } = renderHook(() =>
+      useBrowserOperations({
+        rootPath: "/tmp/multichrome",
+        maxOperations: 20,
+        commandTimeoutMs: 120000,
+        onMessage: vi.fn()
+      })
+    );
+    const accountOne = profile("account-001", "主号");
+
+    act(() => {
+      result.current.startBulkOpenUrlOperation("批量打开", "https://example.com", [
+        accountOne
+      ]);
+      result.current.startProjectOpenOperation(
+        "项目 Example",
+        {
+          projectId: "project-001",
+          projectName: "Example",
+          projectUrlIds: ["url-001"]
+        },
+        [accountOne]
+      );
+      result.current.startProfileOpenOperation("账号启动", accountOne);
+      result.current.clearLaunchQueueOperations();
+    });
+
+    expect(result.current.browserOperations).toEqual([
+      expect.objectContaining({
+        type: "profile-open",
+        sourceLabel: "账号启动",
+        status: "running"
+      })
+    ]);
+  });
+
   test("浏览器 API 命令使用 rootPath 和超时包装", async () => {
     vi.useFakeTimers();
     const listWindowsSpy = vi

@@ -788,6 +788,162 @@ describe("App launcher layout", () => {
     expect(screen.queryByRole("list", { name: "最近操作记录" })).toBeNull();
   });
 
+  test("批量打开在根目录 A→B→A 后不会继续旧队列或写入新根", async () => {
+    const user = userEvent.setup();
+    const pendingOldLaunch = deferred<string>();
+    const rootBDocument = documentWith([
+      profile({ id: "root-b-001", name: "B 根账号" })
+    ]);
+    const rootAReturnDocument = documentWith([
+      profile({ id: "root-a-return-001", name: "A 根新账号" })
+    ]);
+    const openProfileSpy = vi
+      .spyOn(profileApi, "openProfile")
+      .mockReturnValueOnce(pendingOldLaunch.promise)
+      .mockResolvedValue("/tmp/should-not-open");
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.type(await screen.findByLabelText("批量打开网址"), "galxe.com");
+    await user.click(screen.getByRole("button", { name: "打开指定网址" }));
+    await waitFor(() => expect(openProfileSpy).toHaveBeenCalledTimes(1));
+
+    vi.spyOn(profileApi, "initProfileRoot").mockResolvedValue({
+      rootExists: true,
+      writable: true,
+      profileCount: 1
+    });
+    vi.spyOn(profileApi, "loadProfiles")
+      .mockResolvedValueOnce(rootBDocument)
+      .mockResolvedValueOnce(rootAReturnDocument);
+    const settingsDialog = await openSettingsDialog(user);
+    changeRootPathDraft(settingsDialog, "/tmp/root-b");
+    await user.click(within(settingsDialog).getByRole("button", { name: "保存设置" }));
+    expect(await screen.findByRole("button", { name: "选择 B 根账号" })).toBeTruthy();
+
+    changeRootPathDraft(settingsDialog, "/tmp/root-a-return");
+    await user.click(within(settingsDialog).getByRole("button", { name: "保存设置" }));
+    expect(await screen.findByRole("button", { name: "选择 A 根新账号" })).toBeTruthy();
+
+    await act(async () => {
+      pendingOldLaunch.resolve("/tmp/old-profile");
+      await pendingOldLaunch.promise;
+    });
+    await flushPromises();
+
+    expect(openProfileSpy).toHaveBeenCalledTimes(1);
+    expect(savedDocument().profiles).toEqual([
+      expect.objectContaining({ id: "root-a-return-001", lastOpenedAt: null })
+    ]);
+    expect(screen.queryByText("已为 1 个账号打开网址")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "更多操作" }));
+    expect(screen.queryByRole("list", { name: "最近操作记录" })).toBeNull();
+    openProfileSpy.mockRestore();
+  });
+
+  test("根目录切换期间拒绝新的批量打开", async () => {
+    const user = userEvent.setup();
+    const pendingRootLoad = deferred<ProfileDocument>();
+    const openProfileSpy = vi.spyOn(profileApi, "openProfile");
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.type(await screen.findByLabelText("批量打开网址"), "galxe.com");
+    vi.spyOn(profileApi, "initProfileRoot").mockResolvedValue({
+      rootExists: true,
+      writable: true,
+      profileCount: 1
+    });
+    vi.spyOn(profileApi, "loadProfiles").mockReturnValue(pendingRootLoad.promise);
+    const settingsDialog = await openSettingsDialog(user);
+    changeRootPathDraft(settingsDialog, "/tmp/root-pending");
+
+    act(() => {
+      fireEvent.click(within(settingsDialog).getByRole("button", { name: "保存设置" }));
+    });
+    await user.click(screen.getByRole("button", { name: "打开指定网址" }));
+
+    expect(openProfileSpy).not.toHaveBeenCalled();
+    expect(await screen.findByText("配置根目录正在切换，请稍候")).toBeTruthy();
+
+    await act(async () => {
+      pendingRootLoad.resolve(documentWith([]));
+      await pendingRootLoad.promise;
+    });
+    openProfileSpy.mockRestore();
+  });
+
+  test("项目多网址在切根后不会继续同账号的后续网址", async () => {
+    const user = userEvent.setup();
+    const pendingFirstUrl = deferred<string>();
+    const rootBDocument = documentWith([
+      profile({ id: "root-b-001", name: "B 根账号" })
+    ]);
+    const rootAReturnDocument = documentWith([
+      profile({ id: "root-a-return-001", name: "A 根新账号" })
+    ]);
+    localStorage.setItem(
+      "multichrome.profileDocument",
+      JSON.stringify(
+        documentWith(
+          [profile({ id: "account-001", name: "主号" })],
+          [
+            project({
+              id: "project-001",
+              name: "旧项目",
+              url: "https://first.example",
+              urls: [
+                projectUrl({ id: "url-001", name: "第一条", url: "https://first.example" }),
+                projectUrl({ id: "url-002", name: "第二条", url: "https://second.example" })
+              ],
+              profileIds: ["account-001"]
+            })
+          ]
+        )
+      )
+    );
+    const openProfileSpy = vi
+      .spyOn(profileApi, "openProfile")
+      .mockReturnValueOnce(pendingFirstUrl.promise)
+      .mockResolvedValue("/tmp/should-not-open");
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "项目" }));
+    await user.click(screen.getByRole("button", { name: "打开项目 旧项目" }));
+    await waitFor(() => expect(openProfileSpy).toHaveBeenCalledTimes(1));
+
+    vi.spyOn(profileApi, "initProfileRoot").mockResolvedValue({
+      rootExists: true,
+      writable: true,
+      profileCount: 1
+    });
+    vi.spyOn(profileApi, "loadProfiles")
+      .mockResolvedValueOnce(rootBDocument)
+      .mockResolvedValueOnce(rootAReturnDocument);
+    const settingsDialog = await openSettingsDialog(user);
+    changeRootPathDraft(settingsDialog, "/tmp/root-b");
+    await user.click(within(settingsDialog).getByRole("button", { name: "保存设置" }));
+    await user.click(screen.getByRole("button", { name: "账号" }));
+    expect(await screen.findByRole("button", { name: "选择 B 根账号" })).toBeTruthy();
+
+    changeRootPathDraft(settingsDialog, "/tmp/root-a-return");
+    await user.click(within(settingsDialog).getByRole("button", { name: "保存设置" }));
+    expect(await screen.findByRole("button", { name: "选择 A 根新账号" })).toBeTruthy();
+
+    await act(async () => {
+      pendingFirstUrl.resolve("/tmp/old-profile");
+      await pendingFirstUrl.promise;
+    });
+    await flushPromises();
+
+    expect(openProfileSpy).toHaveBeenCalledTimes(1);
+    expect(savedDocument().profiles).toEqual([
+      expect.objectContaining({ id: "root-a-return-001", lastOpenedAt: null })
+    ]);
+    expect(screen.queryByText("已打开项目 旧项目：1 个账号，2 个网址")).toBeNull();
+    openProfileSpy.mockRestore();
+  });
+
   test("已排队的旧启动记录在 A→B→A 后不会保存或显示旧错误", async () => {
     const user = userEvent.setup();
     const pendingFirstSave = deferred<void>();
@@ -6233,6 +6389,73 @@ describe("App launcher layout", () => {
     expect(screen.getByText("已为 2 个账号打开网址")).toBeTruthy();
 
     openProfileSpy.mockRestore();
+  });
+
+  test("批量打开在间隔等待中切根会唤醒旧队列且不启动下一账号", async () => {
+    const user = userEvent.setup();
+    const rootBDocument = documentWith([
+      profile({ id: "root-b-001", name: "B 根账号" })
+    ]);
+    const openProfileSpy = vi.spyOn(profileApi, "openProfile").mockResolvedValue(
+      "/tmp/profile"
+    );
+    const saveProfilesSpy = vi.spyOn(profileApi, "saveProfiles");
+    const saveLaunchEventsSpy = vi.spyOn(
+      profileApi as typeof profileApi & {
+        saveBrowserLaunchEvents: typeof profileApi.saveBrowserLaunchEvents;
+      },
+      "saveBrowserLaunchEvents"
+    );
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+    await user.click(screen.getByRole("button", { name: "选择 抽奖号" }));
+    await user.clear(screen.getByLabelText("批量打开间隔秒"));
+    await user.type(screen.getByLabelText("批量打开间隔秒"), "60");
+    await user.type(screen.getByLabelText("批量打开网址"), "galxe.com");
+    vi.spyOn(profileApi, "initProfileRoot").mockResolvedValue({
+      rootExists: true,
+      writable: true,
+      profileCount: 1
+    });
+    vi.spyOn(profileApi, "loadProfiles").mockResolvedValue(rootBDocument);
+    const settingsDialog = await openSettingsDialog(user);
+    changeRootPathDraft(settingsDialog, "/tmp/root-b");
+
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "打开指定网址" }));
+      await flushPromises();
+      expect(openProfileSpy).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        fireEvent.click(
+          within(settingsDialog).getByRole("button", { name: "保存设置" })
+        );
+        await flushPromises();
+      });
+      expect(screen.getByRole("button", { name: "选择 B 根账号" })).toBeTruthy();
+      const saveProfilesCallsAfterRootSwitch = saveProfilesSpy.mock.calls.length;
+      const saveLaunchEventsCallsAfterRootSwitch =
+        saveLaunchEventsSpy.mock.calls.length;
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+      await flushPromises();
+
+      expect(openProfileSpy).toHaveBeenCalledTimes(1);
+      expect(saveProfilesSpy).toHaveBeenCalledTimes(saveProfilesCallsAfterRootSwitch);
+      expect(saveLaunchEventsSpy).toHaveBeenCalledTimes(
+        saveLaunchEventsCallsAfterRootSwitch
+      );
+      expect(screen.queryByText("已为 2 个账号打开网址")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+      openProfileSpy.mockRestore();
+      saveProfilesSpy.mockRestore();
+      saveLaunchEventsSpy.mockRestore();
+    }
   });
 
   test("批量打开网址可以中途停止", async () => {
