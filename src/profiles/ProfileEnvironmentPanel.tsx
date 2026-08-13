@@ -15,6 +15,11 @@ const directoryStatusText: Record<ProfileEnvironmentSnapshot["directoryStatus"],
   unreadable: "无法读取"
 };
 
+function formatCheckedAt(checkedAt: number): string {
+  const date = new Date(checkedAt);
+  return Number.isNaN(date.getTime()) ? String(checkedAt) : date.toLocaleString("zh-CN");
+}
+
 export function ProfileEnvironmentPanel({
   snapshot,
   loading,
@@ -27,6 +32,7 @@ export function ProfileEnvironmentPanel({
         <div>
           <h3 id="profile-environment-title">本地环境</h3>
           <p className="muted-line">只读概览，不会修改账号、浏览器或网络设置。</p>
+          {snapshot ? <p className="muted-line">当前检查：{formatCheckedAt(snapshot.checkedAt)}（非实时）</p> : null}
         </div>
         <button
           className="secondary-button compact"
@@ -51,7 +57,20 @@ export function ProfileEnvironmentPanel({
           <div><dt>配置浏览器</dt><dd>{snapshot.browserAvailable ? "可用" : "不可用"}<br /><code>{snapshot.browserPath}</code></dd></div>
           <div><dt>运行状态</dt><dd>{snapshot.running ? "运行中" : "未运行"}</dd></div>
           {snapshot.healthIssues.length > 0 ? (
-            <div><dt>关联健康项</dt><dd>{snapshot.healthIssues.map((issue) => issue.title).join("；")}</dd></div>
+            <div className="profile-environment-health-issues">
+              <dt>关联健康项</dt>
+              <dd>
+                <ul>
+                  {snapshot.healthIssues.map((issue) => (
+                    <li key={issue.code}>
+                      <strong>{issue.severity === "error" ? "错误" : "警告"}：{issue.title}</strong>
+                      <span>{issue.detail}</span>
+                      {issue.path ? <code>{issue.path}</code> : null}
+                    </li>
+                  ))}
+                </ul>
+              </dd>
+            </div>
           ) : null}
         </dl>
       ) : (

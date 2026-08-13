@@ -147,6 +147,7 @@ describe("账号展示组件", () => {
           browserPath: "/Applications/Google Chrome.app",
           browserAvailable: true,
           running: true,
+          checkedAt: Date.UTC(2026, 7, 13, 12, 34, 56),
           healthIssues: []
         }}
         loading={false}
@@ -159,7 +160,45 @@ describe("账号展示组件", () => {
     expect(screen.getByText("受管 Profile 目录")).toBeTruthy();
     expect(screen.getByText("已登记")).toBeTruthy();
     expect(screen.getByRole("button", { name: "刷新本地环境" })).toBeTruthy();
+    expect(
+      screen.getByText(
+        `当前检查：${new Date(Date.UTC(2026, 7, 13, 12, 34, 56)).toLocaleString("zh-CN")}（非实时）`
+      )
+    ).toBeTruthy();
     expect(screen.queryByText(/CDP|DevTools|端口/)).toBeNull();
+  });
+
+  test("环境隔离概览逐项展示已有健康信息的完整说明", () => {
+    render(
+      <ProfileEnvironmentPanel
+        snapshot={{
+          profileId: "account-001",
+          profileDir: "/tmp/multichrome/profiles/account-001",
+          directoryStatus: "missing",
+          managedProfileRoot: false,
+          registered: true,
+          browserPath: "/Applications/Google Chrome.app",
+          browserAvailable: false,
+          running: false,
+          checkedAt: 1000,
+          healthIssues: [{
+            severity: "error",
+            code: "profile_dir_missing",
+            title: "账号目录缺失",
+            detail: "未找到该账号的本地 Profile 目录。",
+            path: "/tmp/multichrome/profiles/account-001",
+            profileId: "account-001"
+          }]
+        }}
+        loading={false}
+        error={null}
+        onRefresh={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText("错误：账号目录缺失")).toBeTruthy();
+    expect(screen.getByText("未找到该账号的本地 Profile 目录。")).toBeTruthy();
+    expect(screen.getAllByText("/tmp/multichrome/profiles/account-001")).toHaveLength(2);
   });
 
   test("环境隔离概览展示读取错误", () => {

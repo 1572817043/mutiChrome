@@ -99,6 +99,7 @@ export interface ProfileEnvironmentSnapshot {
   browserPath: string;
   browserAvailable: boolean;
   running: boolean;
+  checkedAt: number;
   healthIssues: Array<{
     severity: "warning" | "error";
     code: string;
@@ -419,6 +420,7 @@ export const profileApi = {
       browserPath: normalizeBrowserPath(browserPath),
       browserAvailable: false,
       running: false,
+      checkedAt: Date.now(),
       healthIssues: []
     };
   },

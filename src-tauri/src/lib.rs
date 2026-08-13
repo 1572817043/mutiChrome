@@ -93,6 +93,7 @@ struct ProfileEnvironmentSnapshot {
     browser_path: String,
     browser_available: bool,
     running: bool,
+    checked_at: u64,
     health_issues: Vec<RootHealthIssue>,
 }
 
@@ -860,6 +861,7 @@ where
         browser_path: browser_path.to_string_lossy().to_string(),
         browser_available: browser_path.exists(),
         running,
+        checked_at: current_time_millis(),
         health_issues: profile_environment_health_issues(
             root_path,
             profile_id,
@@ -2923,6 +2925,7 @@ mod tests {
         );
 
         assert_eq!(snapshot.profile_id, "account-001");
+        assert!(snapshot.checked_at > 0);
         assert!(!snapshot.managed_profile_root);
         assert!(snapshot.running);
         assert_eq!(snapshot.directory_status, ProfileEnvironmentDirectoryStatus::Missing);

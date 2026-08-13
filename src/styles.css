@@ -2291,6 +2291,31 @@ button:disabled {
   white-space: nowrap;
 }
 
+.profile-environment-health-issues {
+  grid-column: 1 / -1;
+}
+
+.profile-environment-health-issues ul {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.profile-environment-health-issues li {
+  display: grid;
+  gap: 3px;
+}
+
+.profile-environment-health-issues strong {
+  font-size: 13px;
+}
+
+.profile-environment-health-issues span {
+  color: #65756c;
+}
+
 .runtime-tabs-list {
   display: grid;
   gap: 6px;
@@ -3403,6 +3428,10 @@ button:disabled {
 
 :root[data-theme="dark"] .profile-environment-list dd {
   color: #f4f4f5;
+}
+
+:root[data-theme="dark"] .profile-environment-health-issues span {
+  color: #a1a1aa;
 }
 
 :root[data-theme="dark"] .profile-environment-list code {
