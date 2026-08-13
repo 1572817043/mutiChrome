@@ -1719,6 +1719,46 @@ describe("App launcher layout", () => {
     });
   });
 
+  test.each(["平铺窗口", "预览同步", "同步布局"])(
+    "根目录切换等待期间拒绝新的%s动作且不调用窗口 API",
+    async (action) => {
+      const user = userEvent.setup();
+      const pendingRoot = deferred<{
+        rootExists: boolean;
+        writable: boolean;
+        profileCount: number;
+      }>();
+      const listWindowsSpy = vi.spyOn(profileApi, "listProfileWindows");
+      const setBoundsSpy = vi.spyOn(profileApi, "setProfileWindowBounds");
+      const focusSpy = vi.spyOn(profileApi, "focusProfileWindow");
+      render(<App />);
+
+      await user.click(await screen.findByRole("button", { name: "选择 主号" }));
+      await user.click(screen.getByRole("button", { name: "选择 抽奖号" }));
+      await user.click(screen.getByRole("button", { name: "更多操作" }));
+      const actionButton = screen.getByRole("button", { name: action });
+      const initRootSpy = vi
+        .spyOn(profileApi, "initProfileRoot")
+        .mockReturnValueOnce(pendingRoot.promise);
+      const settingsDialog = await openSettingsDialog(user);
+      changeRootPathDraft(settingsDialog, "/tmp/pending-root");
+      fireEvent.click(within(settingsDialog).getByRole("button", { name: "保存设置" }));
+      await waitFor(() => expect(initRootSpy).toHaveBeenCalledWith("/tmp/pending-root"));
+
+      fireEvent.click(actionButton);
+
+      expect(screen.getByRole("status").textContent).toBe("配置根目录正在切换，请稍候");
+      expect(listWindowsSpy).not.toHaveBeenCalled();
+      expect(setBoundsSpy).not.toHaveBeenCalled();
+      expect(focusSpy).not.toHaveBeenCalled();
+
+      await act(async () => {
+        pendingRoot.resolve({ rootExists: true, writable: true, profileCount: 0 });
+        await pendingRoot.promise;
+      });
+    }
+  );
+
   test("根切换会作废账号卡片前置，旧完成不刷新新根会话", async () => {
     const user = userEvent.setup();
     const pendingFocus = deferred<void>();
